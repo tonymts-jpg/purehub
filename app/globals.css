@@ -1,0 +1,61 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #f7f4ee;
+  --card: rgba(255,255,255,.86);
+  --text: #171319;
+  --muted: #746d77;
+  --line: rgba(34,24,38,.09);
+}
+
+.dark {
+  --bg: #100e12;
+  --card: rgba(28,24,31,.88);
+  --text: #f8f5ef;
+  --muted: #aaa1ae;
+  --line: rgba(255,255,255,.09);
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  color: var(--text);
+  background:
+    radial-gradient(circle at 80% -10%, rgba(121,87,232,.10), transparent 35%),
+    radial-gradient(circle at 5% 20%, rgba(255,107,107,.08), transparent 30%),
+    var(--bg);
+  min-height: 100vh;
+}
+button, input, textarea, select { font: inherit; }
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: 3px solid rgba(121,87,232,.34);
+  outline-offset: 2px;
+}
+.glass {
+  background: var(--card);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(18px);
+}
+.muted { color: var(--muted); }
+.brand-gradient { background: linear-gradient(135deg,#ff6b6b 0%,#d65fc5 50%,#7957e8 100%); }
+.brand-text {
+  background: linear-gradient(135deg,#ff625f,#9d5cdb 65%,#6957ed);
+  -webkit-background-clip: text;
+  color: transparent;
+}
+.cover-1 { background: linear-gradient(135deg,#1d2333,#5e4ab3 52%,#ff826a); }
+.cover-2 { background: linear-gradient(135deg,#f9d8c5,#ef7890 50%,#6948a8); }
+.cover-3 { background: linear-gradient(135deg,#20313a,#4f8c8f 50%,#f5c26b); }
+.cover-4 { background: linear-gradient(135deg,#1c1524,#5c315d 45%,#e96573); }
+.cover-5 { background: linear-gradient(135deg,#2e3148,#6277c8 50%,#c987c5); }
+.cover-6 { background: linear-gradient(135deg,#f6cb8f,#ef7b6e 50%,#662f52); }
+.mesh::after {
+  content:""; position:absolute; inset:0; opacity:.28; pointer-events:none;
+  background-image: radial-gradient(circle at 20% 25%,white 0 1px,transparent 1.5px), radial-gradient(circle at 80% 65%,white 0 1px,transparent 1.5px);
+  background-size: 28px 28px, 42px 42px;
+}
+.hide-scrollbar::-webkit-scrollbar { display:none; }
+.hide-scrollbar { scrollbar-width:none; }

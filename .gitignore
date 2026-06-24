@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+
+# Next.js build/cache output
+.next/
+out/
+dist/
+build/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Test and browser artifacts
+coverage/
+test-results/
+playwright-report/
+blob-report/
+
+# Local Codex / agent workspace metadata
+.agents/
+.codex/
+
+# Raw/generated source experiments not required by the demo runtime
+pictures/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.temp
