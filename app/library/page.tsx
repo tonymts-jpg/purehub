@@ -9,7 +9,7 @@ export default function LibraryPage() {
   const s=useDemoStore(); const all=getAllPosts(s.customPosts);
   const saved=all.filter(p=>s.bookmarked.includes(p.id)); const unlocked=all.filter(p=>s.unlocked.includes(p.id)||s.subscriptions.some(x=>x.creatorId===p.creatorId&&p.visibility==="members"));
   return <div className="mx-auto max-w-6xl px-4 py-8 sm:px-8"><PageHeader title="我的收藏库" subtitle="所有支持过的创作，都在这里继续发光。"/>
-    <section className="mb-10"><h2 className="mb-4 flex items-center gap-2 text-xl font-black"><LockKeyhole size={20} className="text-violet"/>已解锁内容</h2>{unlocked.length?<div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">{unlocked.map(p=><PostCard key={p.id} post={p}/>)}</div>:<Empty title="还没有解锁内容" text="订阅创作者或购买数字作品后，它们会出现在这里。"/>}</section>
+    <section className="mb-10"><h2 className="mb-4 flex items-center gap-2 text-xl font-black"><LockKeyhole size={20} className="text-violet"/>已解锁内容</h2>{unlocked.length?<div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">{unlocked.map(p=><PostCard key={p.id} post={p}/>)}</div>:<Empty title="还没有解锁内容" text="订阅博主或购买数字作品后，它们会出现在这里。"/>}</section>
     <section><h2 className="mb-4 flex items-center gap-2 text-xl font-black"><Bookmark size={20} className="text-coral"/>收藏作品</h2>{saved.length?<div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">{saved.map(p=><PostCard key={p.id} post={p}/>)}</div>:<Empty title="收藏夹还是空的" text="在探索作品时点击书签，稍后就能轻松回来。"/>}</section>
   </div>;
 }

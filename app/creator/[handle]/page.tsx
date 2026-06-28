@@ -10,7 +10,7 @@ import { useDemoStore } from "@/lib/store";
 
 export default function CreatorPage({params}:{params:Promise<{handle:string}>}) {
   const {handle}=use(params); const creator=creators.find(c=>c.handle===handle); const store=useDemoStore();
-  if(!creator)return <div className="p-20 text-center">创作者不存在</div>;
+  if(!creator)return <div className="p-20 text-center">博主不存在</div>;
   const creatorPosts=[...store.customPosts,...posts].filter(p=>p.creatorId===creator.id);
   return <div>
     <div className={`mesh relative h-60 ${creator.cover}`}><div className="absolute inset-0 bg-gradient-to-t from-black/55 to-transparent"/></div>

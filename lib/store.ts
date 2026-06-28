@@ -26,7 +26,7 @@ const initial = {
 
 export const useDemoStore = create<DemoStore>()(persist((set,get)=>({
   ...initial, toast:null,
-  setRole:(role)=>set({role,toast:role==="creator"?"已切换至创作者视角":"已切换至粉丝视角"}),
+  setRole:(role)=>set({role,toast:role==="creator"?"已切换至博主视角":"已切换至粉丝视角"}),
   toggleTheme:()=>set(s=>({theme:s.theme==="light"?"dark":"light"})),
   toggleLike:(id)=>set(s=>({liked:s.liked.includes(id)?s.liked.filter(x=>x!==id):[...s.liked,id]})),
   toggleBookmark:(id)=>set(s=>({bookmarked:s.bookmarked.includes(id)?s.bookmarked.filter(x=>x!==id):[...s.bookmarked,id]})),

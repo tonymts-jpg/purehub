@@ -17,7 +17,7 @@ const createPostMedia = (postId:string, title:string) =>
   }));
 
 export const creators: CreatorProfile[] = [
-  { id:"c1", name:"林夕 Yuki", handle:"yuki", avatar:"夕", role:"creator", bio:"Cosplay 造型师与角色摄影创作者，分享服装制作、妆造细节与完整主题企划。", category:"Cosplay", followers:128400, members:2438, cover:"cover-1", verified:true, plans:[
+  { id:"c1", name:"林夕 Yuki", handle:"yuki", avatar:"夕", role:"creator", bio:"Cosplay 造型师与角色摄影博主，分享服装制作、妆造细节与完整主题企划。", category:"Cosplay", followers:128400, members:2438, cover:"cover-1", verified:true, plans:[
     {id:"p11",name:"旅人",price:18,color:"#ff7b75",benefits:["每周高清套图","造型制作动态","会员徽章"]},
     {id:"p12",name:"造梦者",price:48,color:"#a865d7",benefits:["包含旅人权益","幕后花絮","每月直播"]},
     {id:"p13",name:"星图收藏家",price:98,color:"#6559df",benefits:["全部权益","限定主题企划","作品署名鸣谢"]}
@@ -64,7 +64,7 @@ const titles = [
 
 export const posts: Post[] = titles.map((item, i) => ({
   id:`post-${i+1}`, creatorId:`c${i%6+1}`, title:item[0], excerpt:item[1],
-  content:"这是完整作品内容的 Demo 展示。创作者可以在这里分享高清图集、创作过程、源文件说明与会员专属幕后故事。PureHub 将内容、社群与可持续收入放在同一个体验里。",
+  content:"这是完整作品内容的 Demo 展示。博主可以在这里分享高清图集、创作过程、源文件说明与会员专属幕后故事。PureHub 将内容、社群与可持续收入放在同一个体验里。",
   cover:`cover-${i%6+1}`, category:item[2], tags:[item[2],"精选",i%2?"幕后":"灵感"],
   visibility:i%5===3?"purchase":i%4===2?"members":"free", price:i%5===3?28:undefined,
   likes:860+i*137, comments:[{id:`cm-${i}`,user:"小北",text:"氛围和细节都太棒了，期待下一篇！",time:"2小时前"}],
@@ -89,7 +89,7 @@ export const notifications: Notification[] = [
   {id:"n1",title:"你有一位新会员",body:"南风加入了「造梦者」会员。",time:"5分钟前",read:false,type:"member"},
   {id:"n2",title:"作品获得 100 个赞",body:"《雾港纪事》正在被更多人看见。",time:"1小时前",read:false,type:"like"},
   {id:"n3",title:"订阅续费成功",body:"你对林夕 Yuki 的支持已续费。",time:"昨天",read:true,type:"payment"},
-  {id:"n4",title:"PureHub 创作者周报",body:"本周收入较上周增长 18.4%。",time:"周一",read:true,type:"system"}
+  {id:"n4",title:"PureHub 博主周报",body:"本周收入较上周增长 18.4%。",time:"周一",read:true,type:"system"}
 ];
 
 export const trendData = [
