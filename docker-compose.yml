@@ -1,0 +1,100 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${PUREHUB_IMAGE:-purehub-web:local}
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-staging}
+      PUREHUB_PHASE: ${PUREHUB_PHASE:-phase-1}
+      NEXT_PUBLIC_APP_VERSION: ${NEXT_PUBLIC_APP_VERSION:-0.1.0}
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+      DB_HOST: postgres
+      DB_PORT: 5432
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  worker:
+    image: ${PUREHUB_IMAGE:-purehub-web:local}
+    restart: unless-stopped
+    command: ["node", "scripts/worker.mjs"]
+    environment:
+      APP_ENV: ${APP_ENV:-staging}
+      WORKER_HEALTH_PORT: 4001
+      DB_HOST: postgres
+      DB_PORT: 5432
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    volumes:
+      - ./infra/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      web:
+        condition: service_healthy
+      worker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-purehub}
+      POSTGRES_USER: ${POSTGRES_USER:-purehub}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-purehub_change_me}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres-data:
+  redis-data:
