@@ -4,6 +4,9 @@ set -euo pipefail
 ENVIRONMENT="${1:-staging}"
 ENV_FILE=".env.${ENVIRONMENT}"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+bash "${SCRIPT_DIR}/preflight.sh"
+
 if [ ! -f "${ENV_FILE}" ]; then
   echo "Missing ${ENV_FILE}. Create it from .env.example on the server." >&2
   exit 1

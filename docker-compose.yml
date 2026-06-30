@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
     image: ${PUREHUB_IMAGE:-purehub-web:local}
     restart: unless-stopped
     environment:
