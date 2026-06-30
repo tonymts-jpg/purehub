@@ -12,9 +12,28 @@ if [ ! -f "${ENV_FILE}" ]; then
   exit 1
 fi
 
+retry() {
+  local attempts="$1"
+  local delay_seconds="$2"
+  shift 2
+
+  local attempt=1
+  until "$@"; do
+    if [ "${attempt}" -ge "${attempts}" ]; then
+      echo "Command failed after ${attempts} attempts: $*" >&2
+      return 1
+    fi
+    echo "Attempt ${attempt}/${attempts} failed. Retrying in ${delay_seconds}s: $*" >&2
+    sleep "${delay_seconds}"
+    attempt=$((attempt + 1))
+  done
+}
+
 echo "Deploying PureHub ${ENVIRONMENT}"
-docker compose --env-file "${ENV_FILE}" build
-docker compose --env-file "${ENV_FILE}" up -d --remove-orphans
+echo "Pulling runtime images"
+retry 3 15 docker compose --env-file "${ENV_FILE}" pull postgres redis nginx
+retry 2 20 docker compose --env-file "${ENV_FILE}" build
+retry 3 15 docker compose --env-file "${ENV_FILE}" up -d --remove-orphans
 
 echo "Waiting for services to become healthy"
 bash "${SCRIPT_DIR}/healthcheck.sh" "${ENVIRONMENT}"

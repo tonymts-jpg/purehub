@@ -50,6 +50,21 @@ Then rebuild:
 ./scripts/deploy.sh staging
 ```
 
+If Docker cannot resolve Docker Hub, for example `failed to resolve reference` or `lookup registry-1.docker.io on 127.0.0.53:53: i/o timeout`, configure Docker daemon DNS on the server:
+
+```bash
+sudo mkdir -p /etc/docker
+printf '%s\n' \
+  '{' \
+  '  "dns": ["1.1.1.1", "8.8.8.8"]' \
+  '}' | sudo tee /etc/docker/daemon.json
+sudo systemctl restart docker
+docker pull nginx:1.27-alpine
+docker pull postgres:16-alpine
+docker pull redis:7-alpine
+./scripts/deploy.sh staging
+```
+
 ## Deploy
 
 ```bash
@@ -88,3 +103,13 @@ Rollback recreates services from the last available local image and reruns healt
 - `SMOKE_BASE_URL=http://127.0.0.1 ./scripts/smoke-test.sh` passes.
 - `npm run test:e2e` passes before the build is promoted.
 - Logs for the last 10 minutes contain no startup-level `uncaught`, `unhandled`, `fatal`, or `panic` errors.
+
+On the Ubuntu server, install test dependencies before running Playwright directly on the deployed staging site:
+
+```bash
+npm ci
+npx playwright install --with-deps chromium
+PLAYWRIGHT_BASE_URL=http://127.0.0.1 npm run test:e2e:deployed
+```
+
+`PLAYWRIGHT_BASE_URL` tells Playwright to use the already deployed Docker service instead of starting a local Next.js dev server.
