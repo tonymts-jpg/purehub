@@ -1,0 +1,202 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                  String               @id
+  name                String
+  handle              String               @unique
+  avatar              String
+  role                String               @default("fan")
+  creatorStatus       String               @default("none")
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  creatorProfile      CreatorProfile?
+  creatorApplications CreatorApplication[]
+  posts               Post[]
+  follows             Follow[]
+  bookmarks           Bookmark[]
+  subscriptions       Subscription[]
+  entitlements        Entitlement[]
+  transactions        Transaction[]
+  walletBalance       WalletBalance?
+  payoutRequests      PayoutRequest[]
+}
+
+model CreatorProfile {
+  id        String           @id
+  userId    String           @unique
+  bio       String
+  category  String
+  followers Int              @default(0)
+  members   Int              @default(0)
+  cover     String
+  verified  Boolean          @default(false)
+  levelId   String?
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  level     CreatorLevel?    @relation(fields: [levelId], references: [id])
+  plans     MembershipPlan[]
+}
+
+model CreatorApplication {
+  id          String   @id
+  userId      String
+  status      String   @default("pending")
+  displayName String
+  category    String
+  portfolio   String
+  contact     String
+  note        String?
+  reviewedAt  DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model MembershipPlan {
+  id        String         @id
+  creatorId String
+  name      String
+  price     Int
+  color     String
+  benefits  Json
+  creator   CreatorProfile @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+}
+
+model Post {
+  id           String       @id
+  creatorId    String
+  title        String
+  excerpt      String
+  content      String
+  cover        String
+  category     String
+  tags         Json
+  visibility   String
+  contentType  String       @default("photo_short")
+  saleMode     String       @default("subscription_only")
+  price        Int?
+  likes        Int          @default(0)
+  comments     Json
+  createdLabel String       @default("刚刚")
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  creator      User         @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  media        MediaAsset[]
+  bookmarks    Bookmark[]
+  entitlements Entitlement[]
+}
+
+model MediaAsset {
+  id              String @id
+  postId          String
+  src             String
+  alt             String
+  width           Int
+  height          Int
+  order           Int
+  kind            String @default("image")
+  durationSeconds Int?
+  post            Post   @relation(fields: [postId], references: [id], onDelete: Cascade)
+}
+
+model Follow {
+  id        String   @id @default(cuid())
+  userId    String
+  creatorId String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, creatorId])
+}
+
+model Bookmark {
+  id        String   @id @default(cuid())
+  userId    String
+  postId    String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, postId])
+}
+
+model Subscription {
+  id        String   @id
+  userId    String
+  creatorId String
+  planId    String
+  status    String   @default("active")
+  startedAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Entitlement {
+  id        String   @id
+  userId    String
+  postId    String
+  source    String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, postId, source])
+}
+
+model Transaction {
+  id        String   @id
+  userId    String
+  title     String
+  amount    Int
+  type      String
+  dateLabel String
+  status    String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model WalletBalance {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  available Int      @default(0)
+  pending   Int      @default(0)
+  currency  String   @default("CNY")
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model PayoutRequest {
+  id        String   @id @default(cuid())
+  userId    String
+  amount    Int
+  status    String   @default("pending")
+  channel   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model CreatorLevel {
+  id           String           @id
+  name         String
+  minFollowers Int
+  maxFollowers Int?
+  creators     CreatorProfile[]
+  priceTiers   PriceTier[]
+}
+
+model PriceTier {
+  id          String       @id
+  levelId     String
+  contentType String
+  saleMode    String
+  price       Int
+  currency    String       @default("CNY")
+  active      Boolean      @default(true)
+  level       CreatorLevel @relation(fields: [levelId], references: [id], onDelete: Cascade)
+}

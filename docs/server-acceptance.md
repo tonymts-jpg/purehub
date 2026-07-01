@@ -73,6 +73,16 @@ docker pull redis:7-alpine
 
 The deploy script builds the image, starts Web/API, PostgreSQL, Redis, worker, and Nginx, runs health checks, then runs smoke tests.
 
+For Phase 2 database milestones, run migrations and seed before the final deploy verification:
+
+```bash
+npm ci
+npx prisma generate
+npx prisma migrate deploy
+npm run db:seed
+./scripts/deploy.sh staging
+```
+
 ## Rollback
 
 ```bash
