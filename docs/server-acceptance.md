@@ -73,14 +73,14 @@ docker pull redis:7-alpine
 
 The deploy script builds the image, starts Web/API, PostgreSQL, Redis, worker, and Nginx, runs health checks, then runs smoke tests.
 
-For Phase 2 database milestones, run migrations and seed before the final deploy verification:
+For Phase 2 database milestones, deploy the containers first, then run migrations and seed inside the `web` container:
 
 ```bash
-npm ci
-npx prisma generate
-npx prisma migrate deploy
-npm run db:seed
 ./scripts/deploy.sh staging
+docker compose --env-file .env.staging exec web npm run db:migrate
+docker compose --env-file .env.staging exec web npm run db:seed
+./scripts/healthcheck.sh
+SMOKE_BASE_URL=http://127.0.0.1 ./scripts/smoke-test.sh
 ```
 
 ## Rollback
