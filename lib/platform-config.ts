@@ -6,7 +6,7 @@ export type SaleMode = "single_plus_subscription" | "subscription_only" | "long_
 export type PaymentProvider = "stripe" | "paypal" | "card" | "alipay_intl" | "wechatpay_intl" | "usdt";
 export type AdminRole =
   | "super_admin"
-  | "operations_admin"
+  | "ops_admin"
   | "content_admin"
   | "finance_admin"
   | "support_admin"
@@ -38,7 +38,7 @@ export const DEFAULT_USDT_CONFIG = {
 
 export const ADMIN_ROLE_LABELS: Record<AdminRole, string> = {
   super_admin: "Super Admin",
-  operations_admin: "Operations Admin",
+  ops_admin: "Operations Admin",
   content_admin: "Content Admin",
   finance_admin: "Finance Admin",
   support_admin: "Support Admin",

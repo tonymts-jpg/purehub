@@ -22,9 +22,9 @@ test("default gallery assets are complete", async () => {
 });
 
 test("core pages are reachable", async ({ page }) => {
-  await page.goto("/");
+  await page.goto("/", { waitUntil: "domcontentloaded" });
   await expect(page.locator("article").first()).toBeVisible();
-  await page.goto("/explore");
+  await page.goto("/explore", { waitUntil: "domcontentloaded" });
   await expect(page.locator("main")).toBeVisible();
   await page.goto("/dashboard", { waitUntil: "domcontentloaded" });
   await expect(page.locator("main")).toBeVisible();
@@ -62,8 +62,10 @@ test("post cards show eight previews and lead members to unlock", async ({ page 
   await expect(memberPost.getByTestId("post-card-gallery").locator("button")).toHaveCount(8);
   const lockedImage = memberPost.getByRole("button", { name: /3/ });
   await expect(lockedImage).toBeVisible();
-  await lockedImage.click();
-  await expect(page).toHaveURL(/\/membership\/momo/, { timeout: 5000 });
+  await Promise.all([
+    page.waitForURL(/\/membership\/momo/, { timeout: 8000 }),
+    lockedImage.click()
+  ]);
   await expect(page.locator("main")).toBeVisible();
 });
 

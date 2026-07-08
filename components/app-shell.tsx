@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Bell, BookOpen, Compass, Home, LayoutDashboard, Moon, PlusCircle, Sparkles, Sun, UserPlus, UserRound } from "lucide-react";
+import { Bell, BookOpen, Compass, Home, LayoutDashboard, Moon, PlusCircle, ShieldCheck, Sparkles, Sun, UserPlus, UserRound } from "lucide-react";
 import { useDemoStore } from "@/lib/store";
 import { useEffect } from "react";
 
@@ -24,6 +24,7 @@ export function AppShell({children}:{children:React.ReactNode}) {
       </Link>
       <nav className="space-y-1">
         {nav.map(({href,label,icon:Icon})=><Link key={href} href={href} className={`flex items-center gap-3 rounded-2xl px-4 py-3 text-sm font-semibold transition ${pathname===href?"bg-ink text-white dark:bg-white dark:text-ink":"muted hover:bg-black/5 dark:hover:bg-white/5"}`}><Icon size={19}/>{label}</Link>)}
+        <Link href="/admin" className={`flex items-center gap-3 rounded-2xl px-4 py-3 text-sm font-semibold transition ${pathname==="/admin"?"bg-ink text-white dark:bg-white dark:text-ink":"muted hover:bg-black/5 dark:hover:bg-white/5"}`}><ShieldCheck size={19}/>站务后台</Link>
       </nav>
       <div className="my-6 border-t border-[var(--line)]"/>
       <p className="mb-2 px-4 text-[11px] font-bold uppercase tracking-[.18em] muted">博主空间</p>

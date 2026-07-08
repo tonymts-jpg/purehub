@@ -27,6 +27,8 @@ model User {
   transactions        Transaction[]
   walletBalance       WalletBalance?
   payoutRequests      PayoutRequest[]
+  adminAccounts       AdminAccount[]
+  auditLogs           AuditLog[]
 }
 
 model CreatorProfile {
@@ -187,17 +189,68 @@ model CreatorLevel {
   name         String
   minFollowers Int
   maxFollowers Int?
+  updatedAt    DateTime         @updatedAt
   creators     CreatorProfile[]
   priceTiers   PriceTier[]
 }
 
+model PricingVersion {
+  id          String      @id @default(cuid())
+  name        String
+  status      String      @default("draft")
+  publishedAt DateTime?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  tiers       PriceTier[]
+}
+
 model PriceTier {
-  id          String       @id
-  levelId     String
-  contentType String
-  saleMode    String
-  price       Int
-  currency    String       @default("CNY")
-  active      Boolean      @default(true)
-  level       CreatorLevel @relation(fields: [levelId], references: [id], onDelete: Cascade)
+  id               String         @id
+  levelId          String
+  pricingVersionId String         @default("pricing-v1")
+  contentType      String
+  saleMode         String
+  price            Int
+  currency         String         @default("CNY")
+  active           Boolean        @default(true)
+  level            CreatorLevel   @relation(fields: [levelId], references: [id], onDelete: Cascade)
+  pricingVersion   PricingVersion @relation(fields: [pricingVersionId], references: [id], onDelete: Cascade)
+}
+
+model AdminAccount {
+  id        String   @id @default(cuid())
+  userId    String
+  role      String
+  status    String   @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, role])
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  actorUserId String?
+  actorRole   String
+  action      String
+  targetType  String
+  targetId    String
+  metadata    Json
+  createdAt   DateTime @default(now())
+  actor       User?    @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+}
+
+model PaymentChannelConfig {
+  id          String   @id @default(cuid())
+  provider    String   @unique
+  enabled     Boolean  @default(false)
+  mode        String   @default("test")
+  currencies  Json
+  regions     Json
+  feeNote     String   @default("")
+  config      Json
+  statusNote  String   @default("not_configured")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }

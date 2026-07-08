@@ -184,6 +184,7 @@ export async function getPriceTiers(input?: { levelId?: string; contentType?: Co
     async () => prisma.priceTier.findMany({
       where: {
         active: true,
+        pricingVersion: { status: "active" },
         levelId: input?.levelId,
         contentType: input?.contentType,
         saleMode: input?.saleMode
@@ -198,6 +199,7 @@ export async function getPriceTiers(input?: { levelId?: string; contentType?: Co
       return prices.map((price) => ({
         id: `${levelId}-${contentType}-${saleMode}-${price}`,
         levelId,
+        pricingVersionId: "pricing-v1",
         contentType,
         saleMode,
         price,

@@ -12,6 +12,9 @@ const levelForFollowers = (followers: number) => {
 
 async function main() {
   await prisma.$transaction([
+    prisma.auditLog.deleteMany(),
+    prisma.adminAccount.deleteMany(),
+    prisma.paymentChannelConfig.deleteMany(),
     prisma.entitlement.deleteMany(),
     prisma.subscription.deleteMany(),
     prisma.bookmark.deleteMany(),
@@ -26,6 +29,7 @@ async function main() {
     prisma.creatorProfile.deleteMany(),
     prisma.user.deleteMany(),
     prisma.priceTier.deleteMany(),
+    prisma.pricingVersion.deleteMany(),
     prisma.creatorLevel.deleteMany()
   ]);
 
@@ -35,6 +39,15 @@ async function main() {
       { id: "level-2", name: "Rising", minFollowers: 50_000, maxFollowers: 99_999 },
       { id: "level-3", name: "Premium", minFollowers: 100_000, maxFollowers: null }
     ]
+  });
+
+  await prisma.pricingVersion.create({
+    data: {
+      id: "pricing-v1",
+      name: "Phase 3 active baseline pricing",
+      status: "active",
+      publishedAt: new Date()
+    }
   });
 
   const priceTiers = [
@@ -54,6 +67,7 @@ async function main() {
       prices.map((price) => ({
         id: `${levelId}-${contentType}-${saleMode}-${price}`,
         levelId,
+        pricingVersionId: "pricing-v1",
         contentType,
         saleMode,
         price,
@@ -61,6 +75,77 @@ async function main() {
         active: true
       }))
     )
+  });
+
+  await prisma.paymentChannelConfig.createMany({
+    data: [
+      {
+        id: "pay-stripe",
+        provider: "stripe",
+        enabled: false,
+        mode: "test",
+        currencies: json(["CNY", "USD"]),
+        regions: json(["global"]),
+        feeNote: "Configured in Phase 4 before real payments.",
+        config: json({}),
+        statusNote: "not_configured"
+      },
+      {
+        id: "pay-paypal",
+        provider: "paypal",
+        enabled: false,
+        mode: "test",
+        currencies: json(["USD"]),
+        regions: json(["global"]),
+        feeNote: "Sandbox only until Phase 4 payment adapter is enabled.",
+        config: json({}),
+        statusNote: "not_configured"
+      },
+      {
+        id: "pay-card",
+        provider: "card",
+        enabled: false,
+        mode: "test",
+        currencies: json(["CNY", "USD"]),
+        regions: json(["global"]),
+        feeNote: "Card routing follows the selected provider in Phase 4.",
+        config: json({}),
+        statusNote: "not_configured"
+      },
+      {
+        id: "pay-alipay-intl",
+        provider: "alipay_intl",
+        enabled: false,
+        mode: "test",
+        currencies: json(["CNY", "USD"]),
+        regions: json(["CN", "global"]),
+        feeNote: "International merchant eligibility must be confirmed.",
+        config: json({}),
+        statusNote: "not_configured"
+      },
+      {
+        id: "pay-wechatpay-intl",
+        provider: "wechatpay_intl",
+        enabled: false,
+        mode: "test",
+        currencies: json(["CNY", "USD"]),
+        regions: json(["CN", "global"]),
+        feeNote: "International merchant eligibility must be confirmed.",
+        config: json({}),
+        statusNote: "not_configured"
+      },
+      {
+        id: "pay-usdt",
+        provider: "usdt",
+        enabled: false,
+        mode: "test",
+        currencies: json(["USDT"]),
+        regions: json(["global"]),
+        feeNote: "TRC20 and ERC20 are default staging options.",
+        config: json({ networks: ["TRC20", "ERC20"], minConfirmations: 12, orderTtlMinutes: 30, rateSource: "admin_fixed_rate" }),
+        statusNote: "not_configured"
+      }
+    ]
   });
 
   await prisma.user.create({
@@ -72,6 +157,35 @@ async function main() {
       role: "fan",
       creatorStatus: "none",
       walletBalance: { create: { available: 0, pending: 0, currency: "CNY" } }
+    }
+  });
+
+  await prisma.user.create({
+    data: {
+      id: "admin-demo",
+      name: "PureHub Admin",
+      handle: "purehub-admin",
+      avatar: "A",
+      role: "admin",
+      creatorStatus: "none",
+      adminAccounts: {
+        create: {
+          role: "super_admin",
+          status: "active"
+        }
+      },
+      walletBalance: { create: { available: 0, pending: 0, currency: "CNY" } }
+    }
+  });
+
+  await prisma.auditLog.create({
+    data: {
+      actorUserId: "admin-demo",
+      actorRole: "super_admin",
+      action: "seed.phase3",
+      targetType: "system",
+      targetId: "phase-3",
+      metadata: json({ note: "Phase 3 admin baseline seeded" })
     }
   });
 
