@@ -9,8 +9,9 @@ services:
     restart: unless-stopped
     environment:
       APP_ENV: ${APP_ENV:-staging}
-      PUREHUB_PHASE: ${PUREHUB_PHASE:-phase-1}
+      PUREHUB_PHASE: ${PUREHUB_PHASE:-phase-4}
       NEXT_PUBLIC_APP_VERSION: ${NEXT_PUBLIC_APP_VERSION:-0.1.0}
+      ADMIN_ACCESS_TOKEN: ${ADMIN_ACCESS_TOKEN:?ADMIN_ACCESS_TOKEN is required}
       PORT: 3000
       HOSTNAME: 0.0.0.0
       DB_HOST: postgres
@@ -36,6 +37,7 @@ services:
     command: ["node", "scripts/worker.mjs"]
     environment:
       APP_ENV: ${APP_ENV:-staging}
+      PUREHUB_PHASE: ${PUREHUB_PHASE:-phase-4}
       WORKER_HEALTH_PORT: 4001
       DB_HOST: postgres
       DB_PORT: 5432

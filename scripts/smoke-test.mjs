@@ -22,3 +22,24 @@ for (const check of checks) {
   }
   console.log(`ok ${check.name} ${url}`);
 }
+
+const adminToken = process.env.SMOKE_ADMIN_TOKEN || process.env.ADMIN_ACCESS_TOKEN;
+if (adminToken) {
+  const url = new URL("/api/admin/finance/fee-configs", baseUrl);
+  const response = await fetch(url, {
+    headers: {
+      "x-admin-token": adminToken,
+      "x-admin-role": "finance_admin"
+    }
+  });
+  if (!response.ok) {
+    throw new Error(`finance-fee-configs failed: ${response.status} ${response.statusText} at ${url}`);
+  }
+  const body = await response.json();
+  if (!Array.isArray(body.configs)) {
+    throw new Error("finance-fee-configs expected configs array");
+  }
+  console.log(`ok finance-fee-configs ${url}`);
+} else {
+  console.log("skip finance-fee-configs: SMOKE_ADMIN_TOKEN or ADMIN_ACCESS_TOKEN not configured");
+}

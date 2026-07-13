@@ -18,6 +18,7 @@ test("platform rules expose formal phase constraints", async ({ request }) => {
   expect(body.contentRules.shortVideoMaxSeconds).toBe(60);
   expect(body.contentRules.longVideoMaxSeconds).toBe(300);
   expect(body.usdtDefaults.networks).toEqual(["TRC20", "ERC20"]);
+  expect(body.platformFeeRules).toEqual({ minFeeBps: 0, maxFeeBps: 5000, defaultFeeBps: 1000 });
   expect(Object.keys(body.paymentProviders)).toEqual([
     "stripe",
     "paypal",

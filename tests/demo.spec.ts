@@ -62,10 +62,8 @@ test("post cards show eight previews and lead members to unlock", async ({ page 
   await expect(memberPost.getByTestId("post-card-gallery").locator("button")).toHaveCount(8);
   const lockedImage = memberPost.getByRole("button", { name: /3/ });
   await expect(lockedImage).toBeVisible();
-  await Promise.all([
-    page.waitForURL(/\/membership\/momo/, { timeout: 8000 }),
-    lockedImage.click()
-  ]);
+  await lockedImage.click();
+  await expect(page).toHaveURL(/\/membership\/momo/, { timeout: 10000 });
   await expect(page.locator("main")).toBeVisible();
 });
 

@@ -15,6 +15,9 @@ type ApplicationRow = { id: string; displayName: string; category: string; conta
 type LevelRow = { id: string; name: string; minFollowers: number; maxFollowers: number | null; _count?: { creators: number } };
 type PricingVersion = { id: string; name: string; status: string; tiers: Array<{ id: string; levelId: string; contentType: string; saleMode: string; price: number; currency: string }> };
 type PaymentChannel = { provider: string; enabled: boolean; mode: string; currencies: string[]; regions: string[]; feeNote: string; statusNote: string };
+type FeeConfig = { id: string; name: string; feeBps: number; status: string };
+type FinanceTransaction = { id: string; amount: number; currency: string; status: string; platformFeeBps: number; platformFeeAmount: number; creatorNetAmount: number; order: { id: string; kind: string; buyerUserId: string; creatorUserId: string } };
+type PayoutRequest = { id: string; amount: number; status: string; channel: string; user: { handle: string } };
 type AuditLog = { id: string; actorRole: string; action: string; targetType: string; targetId: string; createdAt: string };
 
 const defaultToken = "purehub-admin-demo-token";
@@ -29,6 +32,9 @@ export default function AdminPage() {
   const [levels, setLevels] = useState<LevelRow[]>([]);
   const [versions, setVersions] = useState<PricingVersion[]>([]);
   const [channels, setChannels] = useState<PaymentChannel[]>([]);
+  const [feeConfigs, setFeeConfigs] = useState<FeeConfig[]>([]);
+  const [financeTransactions, setFinanceTransactions] = useState<FinanceTransaction[]>([]);
+  const [payouts, setPayouts] = useState<PayoutRequest[]>([]);
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [message, setMessage] = useState("输入管理员 token 后加载站务数据。");
 
@@ -42,13 +48,16 @@ export default function AdminPage() {
 
   async function loadAdmin() {
     try {
-      const [overviewBody, usersBody, applicationsBody, levelsBody, pricingBody, paymentsBody, auditBody] = await Promise.all([
+      const [overviewBody, usersBody, applicationsBody, levelsBody, pricingBody, paymentsBody, feeBody, financeBody, payoutBody, auditBody] = await Promise.all([
         adminFetch<Overview>("/api/admin/overview"),
         adminFetch<{ users: UserRow[] }>("/api/admin/users").catch(() => ({ users: [] })),
         adminFetch<{ applications: ApplicationRow[] }>("/api/admin/creator-applications").catch(() => ({ applications: [] })),
         adminFetch<{ levels: LevelRow[] }>("/api/admin/creator-levels").catch(() => ({ levels: [] })),
         adminFetch<{ versions: PricingVersion[] }>("/api/admin/pricing/versions").catch(() => ({ versions: [] })),
         adminFetch<{ channels: PaymentChannel[] }>("/api/admin/payment-channels").catch(() => ({ channels: [] })),
+        adminFetch<{ configs: FeeConfig[] }>("/api/admin/finance/fee-configs").catch(() => ({ configs: [] })),
+        adminFetch<{ transactions: FinanceTransaction[] }>("/api/admin/finance/transactions").catch(() => ({ transactions: [] })),
+        adminFetch<{ payouts: PayoutRequest[] }>("/api/admin/finance/payout-requests").catch(() => ({ payouts: [] })),
         adminFetch<{ logs: AuditLog[] }>("/api/admin/audit-logs").catch(() => ({ logs: [] }))
       ]);
       setOverview(overviewBody);
@@ -57,6 +66,9 @@ export default function AdminPage() {
       setLevels(levelsBody.levels);
       setVersions(pricingBody.versions);
       setChannels(paymentsBody.channels);
+      setFeeConfigs(feeBody.configs);
+      setFinanceTransactions(financeBody.transactions);
+      setPayouts(payoutBody.payouts);
       setLogs(auditBody.logs);
       setMessage("站务数据已同步。");
       localStorage.setItem("purehub-admin-token", token);
@@ -105,6 +117,26 @@ export default function AdminPage() {
       body: JSON.stringify({ enabled: !usdt?.enabled, mode: usdt?.mode ?? "test", statusNote: "updated_from_admin_dashboard" })
     });
     setMessage("USDT 支付渠道状态已更新。");
+    await loadAdmin();
+  }
+
+  async function createFeeConfig() {
+    const nextFee = feeConfigs.find((config) => config.status === "active")?.feeBps === 1500 ? 1000 : 1500;
+    const body = await adminFetch<{ config: FeeConfig }>("/api/admin/finance/fee-configs", {
+      method: "POST",
+      body: JSON.stringify({ name: `Finance fee ${nextFee / 100}%`, feeBps: nextFee })
+    });
+    await adminFetch(`/api/admin/finance/fee-configs/${body.config.id}/activate`, { method: "POST" });
+    setMessage(`平台抽成已更新为 ${nextFee / 100}%。`);
+    await loadAdmin();
+  }
+
+  async function reviewPayout(id: string, status: "approved" | "rejected") {
+    await adminFetch("/api/admin/finance/payout-requests", {
+      method: "PATCH",
+      body: JSON.stringify({ id, status, reviewNote: `Reviewed from admin dashboard as ${status}` })
+    });
+    setMessage(`提现申请已${status === "approved" ? "通过" : "拒绝"}。`);
     await loadAdmin();
   }
 
@@ -186,6 +218,42 @@ export default function AdminPage() {
             <td className="px-3 py-2">{item.mode}</td>
             <td className="px-3 py-2"><Status text={item.enabled ? "enabled" : "disabled"}/></td>
             <td className="px-3 py-2 text-xs muted">{item.statusNote}</td>
+          </tr>)}
+        </Table>
+      </Panel>
+
+      <Panel title="平台抽成" icon={BadgeDollarSign} action={<button onClick={createFeeConfig} className="rounded-md border border-[var(--line)] px-3 py-1 text-xs font-bold">切换 10/15%</button>}>
+        <Table headers={["名称", "比例", "状态", "ID"]}>
+          {feeConfigs.map((item) => <tr key={item.id}>
+            <td className="px-3 py-2 font-bold">{item.name}</td>
+            <td className="px-3 py-2">{item.feeBps / 100}%</td>
+            <td className="px-3 py-2"><Status text={item.status}/></td>
+            <td className="px-3 py-2 text-xs muted">{item.id}</td>
+          </tr>)}
+        </Table>
+      </Panel>
+
+      <Panel title="财务交易" icon={BadgeDollarSign}>
+        <Table headers={["订单", "总额", "平台抽成", "博主净收入"]}>
+          {financeTransactions.slice(0, 8).map((item) => <tr key={item.id}>
+            <td className="px-3 py-2 font-bold">{item.order.kind}<p className="text-xs muted">{item.order.id}</p></td>
+            <td className="px-3 py-2">{item.currency} {item.amount}</td>
+            <td className="px-3 py-2">{item.platformFeeAmount}<p className="text-xs muted">{item.platformFeeBps / 100}%</p></td>
+            <td className="px-3 py-2">{item.creatorNetAmount}</td>
+          </tr>)}
+        </Table>
+      </Panel>
+
+      <Panel title="提现审核" icon={Activity}>
+        <Table headers={["博主", "金额", "状态", "操作"]}>
+          {payouts.slice(0, 8).map((item) => <tr key={item.id}>
+            <td className="px-3 py-2 font-bold">@{item.user.handle}<p className="text-xs muted">{item.channel}</p></td>
+            <td className="px-3 py-2">{item.amount}</td>
+            <td className="px-3 py-2"><Status text={item.status}/></td>
+            <td className="px-3 py-2">
+              <button disabled={item.status !== "pending"} onClick={() => reviewPayout(item.id, "approved")} className="mr-2 rounded-md bg-emerald-600 px-2 py-1 text-xs font-bold text-white disabled:opacity-40">通过</button>
+              <button disabled={item.status !== "pending"} onClick={() => reviewPayout(item.id, "rejected")} className="rounded-md bg-rose-600 px-2 py-1 text-xs font-bold text-white disabled:opacity-40">拒绝</button>
+            </td>
           </tr>)}
         </Table>
       </Panel>

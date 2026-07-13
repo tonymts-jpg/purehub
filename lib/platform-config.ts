@@ -36,6 +36,12 @@ export const DEFAULT_USDT_CONFIG = {
   rateSource: "admin_fixed_rate"
 } as const;
 
+export const PLATFORM_FEE_RULES = {
+  minFeeBps: 0,
+  maxFeeBps: 5000,
+  defaultFeeBps: 1000
+} as const;
+
 export const ADMIN_ROLE_LABELS: Record<AdminRole, string> = {
   super_admin: "Super Admin",
   ops_admin: "Operations Admin",

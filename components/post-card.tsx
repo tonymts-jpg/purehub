@@ -2,7 +2,6 @@
 
 import Link from "next/link";
 import { Bookmark, Heart, LockKeyhole, MessageCircle, ShoppingBag } from "lucide-react";
-import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { creators } from "@/lib/data";
 import { Post } from "@/lib/types";
@@ -13,13 +12,12 @@ import { PaymentModal } from "./payment-modal";
 
 export function PostCard({post}:{post:Post}) {
   const creator=creators.find(c=>c.id===post.creatorId)!;
-  const router=useRouter();
   const [paying,setPaying]=useState(false);
   const {liked,bookmarked,toggleLike,toggleBookmark,subscriptions,unlocked,unlock}=useDemoStore();
   const isLiked=liked.includes(post.id), saved=bookmarked.includes(post.id);
   const hasAccess=post.visibility==="free"||subscriptions.some(item=>item.creatorId===creator.id)||unlocked.includes(post.id);
   const handleLocked=()=>{
-    if(post.visibility==="members")router.push(`/membership/${creator.handle}`);
+    if(post.visibility==="members")window.location.href=`/membership/${creator.handle}`;
     else setPaying(true);
   };
   return <article className="glass overflow-hidden rounded-[28px] shadow-soft transition duration-300 hover:-translate-y-1">

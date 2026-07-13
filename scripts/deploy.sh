@@ -35,10 +35,21 @@ retry 3 15 docker compose --env-file "${ENV_FILE}" pull postgres redis nginx
 retry 2 20 docker compose --env-file "${ENV_FILE}" build
 retry 3 15 docker compose --env-file "${ENV_FILE}" up -d --remove-orphans
 
+echo "Running database migrations"
+retry 3 10 docker compose --env-file "${ENV_FILE}" exec -T web npm run db:migrate
+
+if [ "${DEPLOY_SEED:-false}" = "true" ]; then
+  echo "Seeding database because DEPLOY_SEED=true"
+  docker compose --env-file "${ENV_FILE}" exec -T web npm run db:seed
+fi
+
 echo "Waiting for services to become healthy"
 bash "${SCRIPT_DIR}/healthcheck.sh" "${ENVIRONMENT}"
 
 echo "Running smoke tests"
-SMOKE_BASE_URL="${SMOKE_BASE_URL:-http://127.0.0.1:${HTTP_PORT:-80}}" bash "${SCRIPT_DIR}/smoke-test.sh"
+HTTP_PORT_VALUE="$(grep -E '^HTTP_PORT=' "${ENV_FILE}" | tail -1 | cut -d= -f2-)"
+HTTP_PORT_VALUE="${HTTP_PORT_VALUE:-80}"
+ADMIN_ACCESS_TOKEN_VALUE="$(grep -E '^ADMIN_ACCESS_TOKEN=' "${ENV_FILE}" | tail -1 | cut -d= -f2-)"
+SMOKE_ADMIN_TOKEN="${SMOKE_ADMIN_TOKEN:-${ADMIN_ACCESS_TOKEN_VALUE}}" SMOKE_BASE_URL="${SMOKE_BASE_URL:-http://127.0.0.1:${HTTP_PORT_VALUE}}" bash "${SCRIPT_DIR}/smoke-test.sh"
 
 echo "Deployment complete"

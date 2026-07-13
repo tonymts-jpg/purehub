@@ -25,6 +25,8 @@ model User {
   subscriptions       Subscription[]
   entitlements        Entitlement[]
   transactions        Transaction[]
+  buyerOrders         Order[]              @relation("BuyerOrders")
+  creatorOrders       Order[]              @relation("CreatorOrders")
   walletBalance       WalletBalance?
   payoutRequests      PayoutRequest[]
   adminAccounts       AdminAccount[]
@@ -134,19 +136,23 @@ model Subscription {
   userId    String
   creatorId String
   planId    String
+  orderId   String?
   status    String   @default("active")
   startedAt DateTime @default(now())
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  order     Order?   @relation(fields: [orderId], references: [id], onDelete: SetNull)
 }
 
 model Entitlement {
   id        String   @id
   userId    String
   postId    String
+  orderId   String?
   source    String
   createdAt DateTime @default(now())
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  order     Order?   @relation(fields: [orderId], references: [id], onDelete: SetNull)
 
   @@unique([userId, postId, source])
 }
@@ -154,13 +160,16 @@ model Entitlement {
 model Transaction {
   id        String   @id
   userId    String
+  orderId   String?
   title     String
   amount    Int
   type      String
   dateLabel String
   status    String
+  metadata  Json     @default("{}")
   createdAt DateTime @default(now())
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  order     Order?   @relation(fields: [orderId], references: [id], onDelete: SetNull)
 }
 
 model WalletBalance {
@@ -179,9 +188,97 @@ model PayoutRequest {
   amount    Int
   status    String   @default("pending")
   channel   String
+  reviewNote String  @default("")
+  reviewedAt DateTime?
+  reviewedBy String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model PlatformFeeConfig {
+  id          String   @id @default(cuid())
+  name        String
+  feeBps      Int
+  status      String   @default("draft")
+  activatedAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Order {
+  id                String               @id @default(cuid())
+  buyerUserId       String
+  creatorUserId     String
+  kind              String
+  itemId            String
+  amount            Int
+  currency          String               @default("CNY")
+  status            String               @default("pending")
+  provider          String?
+  platformFeeBps    Int                  @default(0)
+  platformFeeAmount Int                  @default(0)
+  creatorNetAmount  Int                  @default(0)
+  metadata          Json                 @default("{}")
+  paidAt            DateTime?
+  fulfilledAt       DateTime?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  buyer             User                 @relation("BuyerOrders", fields: [buyerUserId], references: [id], onDelete: Cascade)
+  creator           User                 @relation("CreatorOrders", fields: [creatorUserId], references: [id], onDelete: Cascade)
+  paymentIntents    PaymentIntent[]
+  paymentTransactions PaymentTransaction[]
+  subscriptions     Subscription[]
+  entitlements      Entitlement[]
+  transactions      Transaction[]
+}
+
+model PaymentIntent {
+  id                 String               @id @default(cuid())
+  orderId            String
+  provider           String
+  status             String               @default("requires_confirmation")
+  amount             Int
+  currency           String               @default("CNY")
+  providerIntentId   String?
+  clientSecret       String?
+  manualInstructions Json                 @default("{}")
+  metadata           Json                 @default("{}")
+  confirmedAt        DateTime?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  order              Order                @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  paymentTransactions PaymentTransaction[]
+}
+
+model WebhookEvent {
+  id              String   @id @default(cuid())
+  provider        String
+  providerEventId String
+  eventType       String
+  status          String   @default("received")
+  payload         Json
+  processedAt     DateTime?
+  createdAt       DateTime @default(now())
+
+  @@unique([provider, providerEventId])
+}
+
+model PaymentTransaction {
+  id                String         @id @default(cuid())
+  orderId           String
+  paymentIntentId   String?
+  provider          String
+  amount            Int
+  currency          String         @default("CNY")
+  status            String
+  platformFeeBps    Int
+  platformFeeAmount Int
+  creatorNetAmount  Int
+  metadata          Json           @default("{}")
+  createdAt         DateTime       @default(now())
+  order             Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  paymentIntent     PaymentIntent? @relation(fields: [paymentIntentId], references: [id], onDelete: SetNull)
 }
 
 model CreatorLevel {

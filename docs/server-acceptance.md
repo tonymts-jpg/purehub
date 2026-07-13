@@ -50,6 +50,8 @@ Then rebuild:
 ./scripts/deploy.sh staging
 ```
 
+For Phase 4 staging tests, make sure `.env.staging` includes a real `ADMIN_ACCESS_TOKEN` value. The deploy script passes it to the web container and uses it for the finance smoke check.
+
 If Docker cannot resolve Docker Hub, for example `failed to resolve reference` or `lookup registry-1.docker.io on 127.0.0.53:53: i/o timeout`, configure Docker daemon DNS on the server:
 
 ```bash
@@ -72,6 +74,14 @@ docker pull redis:7-alpine
 ```
 
 The deploy script builds the image, starts Web/API, PostgreSQL, Redis, worker, and Nginx, runs health checks, then runs smoke tests.
+
+For Phase 4 and later, the deploy script also runs Prisma migrations automatically after the containers start and before smoke tests run. To reset staging demo data after migrations, opt in explicitly:
+
+```bash
+DEPLOY_SEED=true ./scripts/deploy.sh staging
+```
+
+Do not use `DEPLOY_SEED=true` against production unless you intentionally want to replace seeded demo data.
 
 For Phase 2 database milestones, deploy the containers first, then run migrations and seed inside the `web` container:
 

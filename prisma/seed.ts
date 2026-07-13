@@ -14,6 +14,11 @@ async function main() {
   await prisma.$transaction([
     prisma.auditLog.deleteMany(),
     prisma.adminAccount.deleteMany(),
+    prisma.paymentTransaction.deleteMany(),
+    prisma.webhookEvent.deleteMany(),
+    prisma.paymentIntent.deleteMany(),
+    prisma.order.deleteMany(),
+    prisma.platformFeeConfig.deleteMany(),
     prisma.paymentChannelConfig.deleteMany(),
     prisma.entitlement.deleteMany(),
     prisma.subscription.deleteMany(),
@@ -104,13 +109,13 @@ async function main() {
       {
         id: "pay-card",
         provider: "card",
-        enabled: false,
+        enabled: true,
         mode: "test",
         currencies: json(["CNY", "USD"]),
         regions: json(["global"]),
-        feeNote: "Card routing follows the selected provider in Phase 4.",
-        config: json({}),
-        statusNote: "not_configured"
+        feeNote: "Phase 4 test card uses manual confirmation and never collects real card data.",
+        config: json({ adapter: "manual_confirm", instructions: "Use the Phase 4 manual confirm endpoint for sandbox payments." }),
+        statusNote: "manual_confirm_enabled"
       },
       {
         id: "pay-alipay-intl",
@@ -146,6 +151,16 @@ async function main() {
         statusNote: "not_configured"
       }
     ]
+  });
+
+  await prisma.platformFeeConfig.create({
+    data: {
+      id: "platform-fee-v1",
+      name: "Phase 4 default platform fee",
+      feeBps: 1000,
+      status: "active",
+      activatedAt: new Date()
+    }
   });
 
   await prisma.user.create({

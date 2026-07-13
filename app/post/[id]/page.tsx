@@ -26,6 +26,22 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
     if(post.visibility==="members")window.location.href=`/membership/${creator.handle}`;
     else setPaying(true);
   };
+  const confirmPurchase=async()=>{
+    try{
+      const orderResponse=await fetch("/api/payments/orders",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({kind:"post_unlock",itemId:post.id,buyerUserId:"fan-demo"})});
+      if(!orderResponse.ok)throw new Error("order failed");
+      const {order}=await orderResponse.json();
+      const intentResponse=await fetch("/api/payments/intents",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({orderId:order.id,provider:"card"})});
+      if(!intentResponse.ok)throw new Error("intent failed");
+      const {intent}=await intentResponse.json();
+      const confirmResponse=await fetch(`/api/payments/intents/${intent.id}/confirm`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({source:"post_modal"})});
+      if(!confirmResponse.ok)throw new Error("confirm failed");
+    }catch{
+      store.showToast("Server payment unavailable, using local demo unlock.");
+    }
+    store.unlock(post.id,post.price||0);
+    setPaying(false);
+  };
 
   return <div className="mx-auto max-w-5xl px-4 py-8 sm:px-8">
     {post.media.length?<div className="relative aspect-[16/9] overflow-hidden rounded-[36px] bg-black">
@@ -80,6 +96,6 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
       </article>
     </div>
 
-    {paying&&<PaymentModal title={post.title} price={post.price||0} onClose={()=>setPaying(false)} onConfirm={()=>{store.unlock(post.id,post.price||0);setPaying(false)}}/>}
+    {paying&&<PaymentModal title={post.title} price={post.price||0} onClose={()=>setPaying(false)} onConfirm={confirmPurchase}/>}
   </div>;
 }
