@@ -280,13 +280,14 @@ export async function createCreatorApplication(input: {
   }
 
   const userId = input.userId ?? "fan-demo";
+  const fanHandle = userId === "fan-demo" ? "pure-fan" : `fan-${userId.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 40)}`;
   await prisma.user.upsert({
     where: { id: userId },
-    update: {},
+    update: { creatorStatus: "pending" },
     create: {
       id: userId,
       name: "Pure 粉丝",
-      handle: "pure-fan",
+      handle: fanHandle,
       avatar: "P",
       role: "fan",
       creatorStatus: "pending"

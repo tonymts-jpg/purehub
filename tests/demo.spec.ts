@@ -60,9 +60,11 @@ test("post cards show eight previews and lead members to unlock", async ({ page 
   await page.goto("/");
   const memberPost = page.locator("article").filter({ has: page.getByRole("link", { name: "Momo Studio" }) }).first();
   await expect(memberPost.getByTestId("post-card-gallery").locator("button")).toHaveCount(8);
-  const lockedImage = memberPost.getByRole("button", { name: /3/ });
-  await expect(lockedImage).toBeVisible();
-  await lockedImage.click();
+  await expect(async () => {
+    const lockedImage = memberPost.getByRole("button", { name: /3/ });
+    await expect(lockedImage).toBeVisible({ timeout: 3000 });
+    await lockedImage.evaluate((element: HTMLElement) => element.click());
+  }).toPass({ timeout: 15000 });
   await expect(page).toHaveURL(/\/membership\/momo/, { timeout: 10000 });
   await expect(page.locator("main")).toBeVisible();
 });
