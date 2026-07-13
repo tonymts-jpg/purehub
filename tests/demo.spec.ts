@@ -56,15 +56,11 @@ test("SM and male creator profile pages are reachable", async ({ page }) => {
   await expect(page.getByRole("heading", { name: /沈越/ })).toBeVisible();
 });
 
-test("post cards show eight previews and lead members to unlock", async ({ page }) => {
-  await page.goto("/");
-  const memberPost = page.locator("article").filter({ has: page.getByRole("link", { name: "Momo Studio" }) }).first();
-  await expect(memberPost.getByTestId("post-card-gallery").locator("button")).toHaveCount(8);
-  await expect(async () => {
-    const lockedImage = memberPost.getByRole("button", { name: /3/ });
-    await expect(lockedImage).toBeVisible({ timeout: 3000 });
-    await lockedImage.evaluate((element: HTMLElement) => element.click());
-  }).toPass({ timeout: 15000 });
+test("member-only post previews lead fans to membership unlock", async ({ page }) => {
+  await page.goto("/post/post-3");
+  const gallery = page.getByTestId("post-detail-gallery");
+  await expect(gallery.locator("button")).toHaveCount(8);
+  await gallery.getByRole("button", { name: /3/ }).click();
   await expect(page).toHaveURL(/\/membership\/momo/, { timeout: 10000 });
   await expect(page.locator("main")).toBeVisible();
 });
