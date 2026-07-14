@@ -69,11 +69,22 @@ docker pull redis:7-alpine
 
 ## Deploy
 
+Phase 5 requires these additional staging secrets before deployment:
+
+```bash
+WORKER_ACCESS_TOKEN=replace-with-a-long-random-token
+MINIO_ROOT_USER=purehub-minio
+MINIO_ROOT_PASSWORD=replace-with-a-long-random-password
+OBJECT_STORAGE_BUCKET=purehub-media
+OBJECT_STORAGE_REGION=us-east-1
+PUREHUB_PHASE=phase-5
+```
+
 ```bash
 ./scripts/deploy.sh staging
 ```
 
-The deploy script builds the image, starts Web/API, PostgreSQL, Redis, worker, and Nginx, runs health checks, then runs smoke tests.
+The deploy script builds the image, starts Web/API, PostgreSQL, Redis, MinIO, worker, and Nginx, runs health checks, then runs smoke tests.
 
 For Phase 4 and later, the deploy script also runs Prisma migrations automatically after the containers start and before smoke tests run. To reset staging demo data after migrations, opt in explicitly:
 
@@ -120,6 +131,8 @@ Rollback recreates services from the last available local image and reruns healt
 - `docker compose --env-file .env.staging ps` shows all services healthy.
 - `curl http://127.0.0.1/api/health` returns `status: ok`.
 - `curl http://127.0.0.1/worker-health` returns `status: ok`.
+- `/api/health` reports `objectStorage: ok`, and the one-shot `minio-init` service exits with code 0 after creating the private bucket.
+- Finance smoke checks can read settlement configs and reconciliation runs with the staging admin token.
 - `SMOKE_BASE_URL=http://127.0.0.1 ./scripts/smoke-test.sh` passes.
 - `npm run test:e2e` passes before the build is promoted.
 - Logs for the last 10 minutes contain no startup-level `uncaught`, `unhandled`, `fatal`, or `panic` errors.

@@ -34,6 +34,8 @@ export default function NewPostPage() {
   const [preview, setPreview] = useState(false);
   const [tiers, setTiers] = useState<PriceTier[]>([]);
   const [apiError, setApiError] = useState<string | null>(null);
+  const [mediaAssetIds, setMediaAssetIds] = useState<string[]>([]);
+  const [uploadStatus, setUploadStatus] = useState("");
   const { register, handleSubmit, watch, setValue, formState: { errors, isSubmitting } } = useForm<FormInput, unknown, z.output<typeof schema>>({
     resolver: zodResolver(schema),
     defaultValues: { category: "Cosplay", contentType: "photo_short", saleMode: "subscription_only", price: 0 }
@@ -61,8 +63,43 @@ export default function NewPostPage() {
 
   const priceOptions = useMemo(() => tiers.filter((tier) => priced || tier.price === 0), [priced, tiers]);
 
+  async function uploadMedia(files: FileList | null) {
+    if (!files?.length) return;
+    setUploadStatus("正在安全上传媒体...");
+    try {
+      const ids: string[] = [];
+      const visibility = visibilityForSaleMode(values.saleMode);
+      for (const file of Array.from(files).slice(0, 20)) {
+        const kind = file.type.startsWith("video/") ? "video" : "image";
+        const presign = await fetch("/api/uploads/presign", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ userId: "c1", fileName: file.name, mimeType: file.type, sizeBytes: file.size, kind, visibility }) });
+        if (!presign.ok) throw new Error("无法建立上传任务。");
+        const prepared = await presign.json();
+        if (!String(prepared.uploadUrl).startsWith("mock://")) {
+          const stored = await fetch(prepared.uploadUrl, { method: "PUT", headers: prepared.headers, body: file });
+          if (!stored.ok) throw new Error("媒体上传失败。");
+        }
+        const completed = await fetch("/api/uploads/complete", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ assetId: prepared.assetId, userId: "c1" }) });
+        if (!completed.ok) throw new Error("无法完成上传任务。");
+        ids.push(prepared.assetId);
+      }
+      for (let attempt = 0; attempt < 35; attempt += 1) {
+        const response = await fetch(`/api/uploads/complete?userId=c1&ids=${ids.join(",")}`);
+        const body = await response.json();
+        if (body.assets.some((asset: { status: string }) => asset.status === "failed")) throw new Error("媒体处理失败，请重新上传。");
+        if (body.assets.length === ids.length && body.assets.every((asset: { status: string }) => asset.status === "ready")) break;
+        if (attempt === 34) throw new Error("媒体仍在处理中，请稍后重试。");
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      setMediaAssetIds(ids);
+      setUploadStatus(`${ids.length} 个媒体文件已完成处理。`);
+    } catch (error) {
+      setMediaAssetIds([]);
+      setUploadStatus(error instanceof Error ? error.message : "媒体上传失败。");
+    }
+  }
+
   return <div className="mx-auto max-w-5xl px-4 py-8 sm:px-8">
-    <PageHeader title="发布新作品" subtitle="将作品写入 Phase 2 数据 API；媒体上传在本阶段先保存 metadata/stub。"/>
+    <PageHeader title="发布新作品" subtitle="上传私有媒体、等待安全处理，然后按订阅或单品规则发布。"/>
     <DashboardNav/>
     <form onSubmit={handleSubmit(async (data) => {
       setApiError(null);
@@ -70,7 +107,7 @@ export default function NewPostPage() {
       const response = await fetch("/api/posts", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ...data, visibility, price: priced ? data.price : undefined })
+        body: JSON.stringify({ ...data, visibility, price: priced ? data.price : undefined, mediaAssetIds })
       });
 
       if (!response.ok) {
@@ -83,6 +120,7 @@ export default function NewPostPage() {
         <Field label="作品标题" error={errors.title?.message}><input {...register("title")} placeholder="给作品一个让人记住的名字" className="w-full bg-transparent text-2xl font-black outline-none"/></Field>
         <Field label="简短介绍" error={errors.excerpt?.message}><textarea {...register("excerpt")} rows={3} placeholder="这件作品想分享什么？" className="w-full resize-none rounded-2xl bg-black/[.035] p-4 outline-none dark:bg-white/[.04]"/></Field>
         <Field label="正文内容" error={errors.content?.message}><textarea {...register("content")} rows={10} placeholder="写下创作过程、灵感和想对支持者说的话..." className="w-full resize-none rounded-2xl bg-black/[.035] p-4 leading-7 outline-none dark:bg-white/[.04]"/></Field>
+        <Field label="私有媒体"><input type="file" multiple accept="image/*,video/*" onChange={(event) => void uploadMedia(event.target.files)} className="w-full rounded-md border border-[var(--line)] p-3 text-sm"/>{uploadStatus && <span className="mt-2 block text-xs muted">{uploadStatus}</span>}</Field>
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="分类"><select {...register("category")} className="w-full rounded-2xl border border-[var(--line)] bg-transparent p-3">{CONTENT_CATEGORIES.map((category) => <option key={category}>{category}</option>)}</select></Field>
           <Field label="作品类型"><select {...register("contentType")} className="w-full rounded-2xl border border-[var(--line)] bg-transparent p-3"><option value="photo_short">照片 / 短视频</option><option value="long_video">长视频</option></select></Field>

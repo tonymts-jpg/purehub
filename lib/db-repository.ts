@@ -155,15 +155,19 @@ export async function getCreatorPosts(creatorId: string): Promise<Post[]> {
 export async function getDashboardSummary(creatorId = "c1") {
   return withFallback(
     async () => {
-      const [wallet, creatorPosts, recentTransactions, members] = await Promise.all([
+      const [wallet, creatorPosts, recentTransactions, members, nextSettlement] = await Promise.all([
         prisma.walletBalance.findUnique({ where: { userId: creatorId } }),
         prisma.post.findMany({ where: { creatorId }, include: postInclude, orderBy: { createdAt: "desc" } }),
         prisma.transaction.findMany({ where: { userId: creatorId }, orderBy: { createdAt: "desc" }, take: 8 }),
-        prisma.subscription.count({ where: { creatorId, status: "active" } })
+        prisma.subscription.count({ where: { creatorId, status: "active" } }),
+        prisma.paymentTransaction.findFirst({ where: { order: { creatorUserId: creatorId }, status: "succeeded", settledAt: null }, orderBy: { availableAt: "asc" }, select: { availableAt: true } })
       ]);
       return {
         balance: wallet?.available ?? 0,
         pending: wallet?.pending ?? 0,
+        reserved: wallet?.reserved ?? 0,
+        debt: wallet?.debt ?? 0,
+        nextAvailableAt: nextSettlement?.availableAt ?? null,
         posts: creatorPosts.map(mapPost),
         transactions: recentTransactions.map(mapTransaction),
         members
@@ -172,6 +176,9 @@ export async function getDashboardSummary(creatorId = "c1") {
     () => ({
       balance: 8620,
       pending: 1280,
+      reserved: 0,
+      debt: 0,
+      nextAvailableAt: null,
       posts: posts.filter((post) => post.creatorId === creatorId),
       transactions,
       members: creators.find((creator) => creator.id === creatorId)?.members ?? 0
@@ -220,6 +227,7 @@ export async function createPost(input: {
   contentType: ContentType;
   saleMode: SaleMode;
   price?: number;
+  mediaAssetIds?: string[];
 }) {
   if (!isSaleModeAllowed(input.contentType, input.saleMode)) {
     throw new Error("Sale mode is not allowed for this content type.");
@@ -244,9 +252,15 @@ export async function createPost(input: {
     } satisfies Post;
   }
 
-  const post = await prisma.post.create({
-    data: {
-      id: `custom-${Date.now()}`,
+  const postId = `custom-${Date.now()}`;
+  const post = await prisma.$transaction(async (tx) => {
+    if (input.mediaAssetIds?.length) {
+      const assets = await tx.mediaAsset.findMany({ where: { id: { in: input.mediaAssetIds }, uploaderUserId: input.creatorId ?? "c1", status: "ready", postId: null } });
+      if (assets.length !== input.mediaAssetIds.length) throw new Error("All media assets must be ready and owned by the creator.");
+    }
+    await tx.post.create({
+      data: {
+      id: postId,
       creatorId: input.creatorId ?? "c1",
       title: input.title,
       excerpt: input.excerpt,
@@ -261,8 +275,12 @@ export async function createPost(input: {
       likes: 0,
       comments: [],
       createdLabel: "刚刚"
-    },
-    include: postInclude
+      }
+    });
+    if (input.mediaAssetIds?.length) {
+      await Promise.all(input.mediaAssetIds.map((id, order) => tx.mediaAsset.update({ where: { id }, data: { postId, order, visibility: input.visibility } })));
+    }
+    return tx.post.findUniqueOrThrow({ where: { id: postId }, include: postInclude });
   });
   return mapPost(post);
 }

@@ -1,13 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ArrowDownRight, ArrowUpRight, CircleDollarSign, WalletCards } from "lucide-react";
+import { ArrowDownRight, ArrowUpRight, CalendarClock, CircleDollarSign, ShieldCheck, WalletCards } from "lucide-react";
 import { PageHeader } from "@/components/app-shell";
 import { DashboardNav } from "@/components/dashboard-nav";
 import { useDemoStore } from "@/lib/store";
 
 type ServerTransaction = { id: string; title: string; amount: number; date: string; status: string };
-type DashboardSummary = { balance: number; pending: number; transactions: ServerTransaction[] };
+type DashboardSummary = { balance: number; pending: number; reserved: number; debt: number; nextAvailableAt: string | null; transactions: ServerTransaction[] };
 
 export default function WalletPage() {
   const { balance, transactions, payout } = useDemoStore();
@@ -15,18 +15,26 @@ export default function WalletPage() {
   const [open, setOpen] = useState(false);
   const [amount, setAmount] = useState("1000");
   const [error, setError] = useState("");
+  const [kycStatus, setKycStatus] = useState("not_submitted");
+  const [legalName, setLegalName] = useState("");
+  const [countryCode, setCountryCode] = useState("CN");
+  const [kycFile, setKycFile] = useState<File | null>(null);
+  const [kycMessage, setKycMessage] = useState("");
 
   useEffect(() => {
     fetch("/api/dashboard/summary?creatorId=c1")
       .then((response) => response.ok ? response.json() : null)
       .then((body) => {
-        if (body) setSummary({ balance: body.balance ?? 0, pending: body.pending ?? 0, transactions: body.transactions ?? [] });
+        if (body) setSummary({ balance: body.balance ?? 0, pending: body.pending ?? 0, reserved: body.reserved ?? 0, debt: body.debt ?? 0, nextAvailableAt: body.nextAvailableAt ?? null, transactions: body.transactions ?? [] });
       })
       .catch(() => setSummary(null));
+    fetch("/api/creator/kyc?userId=c1").then((response) => response.ok ? response.json() : null).then((body) => body && setKycStatus(body.case.status)).catch(() => undefined);
   }, []);
 
   const visibleBalance = summary?.balance ?? balance;
   const visiblePending = summary?.pending ?? 1840;
+  const visibleReserved = summary?.reserved ?? 0;
+  const visibleDebt = summary?.debt ?? 0;
   const visibleTransactions = useMemo(() => summary?.transactions ?? transactions, [summary, transactions]);
 
   const submit = async () => {
@@ -54,8 +62,27 @@ export default function WalletPage() {
     setError("");
   };
 
+  const submitKyc = async () => {
+    if (!legalName.trim() || !kycFile) return setKycMessage("请填写法定姓名并选择证件文件。");
+    try {
+      const presign = await fetch("/api/creator/kyc/documents/presign", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ userId: "c1", fileName: kycFile.name, mimeType: kycFile.type }) });
+      if (!presign.ok) throw new Error("KYC upload could not be prepared.");
+      const upload = await presign.json();
+      if (!String(upload.uploadUrl).startsWith("mock://")) {
+        const stored = await fetch(upload.uploadUrl, { method: "PUT", headers: upload.headers, body: kycFile });
+        if (!stored.ok) throw new Error("KYC document upload failed.");
+      }
+      const submitted = await fetch("/api/creator/kyc", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ userId: "c1", legalName, countryCode: countryCode.toUpperCase(), documentKeys: [upload.documentKey] }) });
+      if (!submitted.ok) throw new Error("KYC case submission failed.");
+      setKycStatus("pending");
+      setKycMessage("KYC 资料已提交审核。");
+    } catch (submissionError) {
+      setKycMessage(submissionError instanceof Error ? submissionError.message : "KYC submission failed.");
+    }
+  };
+
   return <div className="mx-auto max-w-5xl px-4 py-8 sm:px-8">
-    <PageHeader title="钱包与提现" subtitle="Phase 4: creator wallet, pending settlement, and payout review."/>
+    <PageHeader title="钱包与提现" subtitle="Phase 5：账本余额、结算冻结、KYC 与提现审核。"/>
     <DashboardNav/>
 
     <section className="relative overflow-hidden rounded-[34px] bg-ink p-7 text-white shadow-2xl sm:p-10">
@@ -66,6 +93,23 @@ export default function WalletPage() {
         <p className="mt-2 text-sm text-white/55">另有 ¥{visiblePending.toLocaleString()} 待结算</p>
         <button onClick={() => setOpen(true)} className="mt-7 rounded-full bg-white px-6 py-3 text-sm font-black text-ink">申请提现</button>
       </div>
+    </section>
+
+    <section className="mt-6 grid gap-4 sm:grid-cols-3">
+      <WalletMetric icon={CalendarClock} label="待结算" value={visiblePending} note={summary?.nextAvailableAt ? new Date(summary.nextAvailableAt).toLocaleDateString() : "暂无到期批次"}/>
+      <WalletMetric icon={WalletCards} label="提现处理中" value={visibleReserved} note="财务审核及付款保留"/>
+      <WalletMetric icon={ShieldCheck} label="待偿余额" value={visibleDebt} note={visibleDebt > 0 ? "偿清前暂停提现" : "账户状态正常"}/>
+    </section>
+
+    <section className="mt-6 rounded-lg border border-[var(--line)] bg-[var(--card)] p-6">
+      <div className="flex items-center justify-between gap-4"><div><h2 className="font-black">创作者 KYC</h2><p className="mt-1 text-sm muted">身份资料仅保存为私有对象 key，由财务管理员人工审核。</p></div><span className="rounded-full bg-black/5 px-3 py-1 text-xs font-bold dark:bg-white/10">{kycStatus}</span></div>
+      {kycStatus !== "approved" && <div className="mt-5 grid gap-3 sm:grid-cols-[1fr_100px_1fr_auto]">
+        <input value={legalName} onChange={(event) => setLegalName(event.target.value)} placeholder="法定姓名" className="rounded-md border border-[var(--line)] bg-transparent px-3 py-2"/>
+        <input value={countryCode} onChange={(event) => setCountryCode(event.target.value)} maxLength={2} aria-label="国家代码" className="rounded-md border border-[var(--line)] bg-transparent px-3 py-2 uppercase"/>
+        <input type="file" accept="image/jpeg,image/png,application/pdf" onChange={(event) => setKycFile(event.target.files?.[0] ?? null)} className="min-w-0 text-sm"/>
+        <button onClick={submitKyc} className="rounded-md bg-[var(--text)] px-4 py-2 text-sm font-bold text-[var(--bg)]">提交审核</button>
+      </div>}
+      {kycMessage && <p className="mt-3 text-sm muted">{kycMessage}</p>}
     </section>
 
     <section className="glass mt-6 rounded-[30px] p-6">
@@ -99,4 +143,8 @@ export default function WalletPage() {
       </div>
     </div>}
   </div>;
+}
+
+function WalletMetric({ icon: Icon, label, value, note }: { icon: typeof WalletCards; label: string; value: number; note: string }) {
+  return <div className="rounded-lg border border-[var(--line)] bg-[var(--card)] p-5"><Icon size={18} className="muted"/><p className="mt-3 text-xs font-bold muted">{label}</p><p className="mt-1 text-2xl font-black">¥{value.toLocaleString()}</p><p className="mt-1 text-xs muted">{note}</p></div>;
 }

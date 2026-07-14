@@ -17,7 +17,8 @@ const schema = z.object({
   contentType: z.enum(["photo_short", "long_video"]).default("photo_short"),
   saleMode: z.enum(["single_plus_subscription", "subscription_only", "long_video_single"]).default("subscription_only"),
   price: z.number().int().nonnegative().optional(),
-  durationSeconds: z.number().nonnegative().optional()
+  durationSeconds: z.number().nonnegative().optional(),
+  mediaAssetIds: z.array(z.string()).max(20).optional()
 });
 
 export async function GET() {

@@ -31,7 +31,7 @@ retry() {
 
 echo "Deploying PureHub ${ENVIRONMENT}"
 echo "Pulling runtime images"
-retry 3 15 docker compose --env-file "${ENV_FILE}" pull postgres redis nginx
+retry 3 15 docker compose --env-file "${ENV_FILE}" pull postgres redis nginx minio minio-init
 retry 2 20 docker compose --env-file "${ENV_FILE}" build
 retry 3 15 docker compose --env-file "${ENV_FILE}" up -d --remove-orphans
 

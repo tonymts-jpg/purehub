@@ -18,6 +18,9 @@ type PaymentChannel = { provider: string; enabled: boolean; mode: string; curren
 type FeeConfig = { id: string; name: string; feeBps: number; status: string };
 type FinanceTransaction = { id: string; amount: number; currency: string; status: string; platformFeeBps: number; platformFeeAmount: number; creatorNetAmount: number; order: { id: string; kind: string; buyerUserId: string; creatorUserId: string } };
 type PayoutRequest = { id: string; amount: number; status: string; channel: string; user: { handle: string } };
+type SettlementConfig = { id: string; name: string; holdDays: number; status: string };
+type KycCase = { id: string; status: string; legalName: string; countryCode: string; user: { handle: string; name: string } };
+type ReconciliationRun = { id: string; status: string; paymentCount: number; ledgerCount: number; walletCount: number; discrepancyCount: number; startedAt: string };
 type AuditLog = { id: string; actorRole: string; action: string; targetType: string; targetId: string; createdAt: string };
 
 const defaultToken = "purehub-admin-demo-token";
@@ -35,6 +38,9 @@ export default function AdminPage() {
   const [feeConfigs, setFeeConfigs] = useState<FeeConfig[]>([]);
   const [financeTransactions, setFinanceTransactions] = useState<FinanceTransaction[]>([]);
   const [payouts, setPayouts] = useState<PayoutRequest[]>([]);
+  const [settlementConfigs, setSettlementConfigs] = useState<SettlementConfig[]>([]);
+  const [kycCases, setKycCases] = useState<KycCase[]>([]);
+  const [reconciliationRuns, setReconciliationRuns] = useState<ReconciliationRun[]>([]);
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [message, setMessage] = useState("输入管理员 token 后加载站务数据。");
 
@@ -48,7 +54,7 @@ export default function AdminPage() {
 
   async function loadAdmin() {
     try {
-      const [overviewBody, usersBody, applicationsBody, levelsBody, pricingBody, paymentsBody, feeBody, financeBody, payoutBody, auditBody] = await Promise.all([
+      const [overviewBody, usersBody, applicationsBody, levelsBody, pricingBody, paymentsBody, feeBody, financeBody, payoutBody, settlementBody, kycBody, reconciliationBody, auditBody] = await Promise.all([
         adminFetch<Overview>("/api/admin/overview"),
         adminFetch<{ users: UserRow[] }>("/api/admin/users").catch(() => ({ users: [] })),
         adminFetch<{ applications: ApplicationRow[] }>("/api/admin/creator-applications").catch(() => ({ applications: [] })),
@@ -58,6 +64,9 @@ export default function AdminPage() {
         adminFetch<{ configs: FeeConfig[] }>("/api/admin/finance/fee-configs").catch(() => ({ configs: [] })),
         adminFetch<{ transactions: FinanceTransaction[] }>("/api/admin/finance/transactions").catch(() => ({ transactions: [] })),
         adminFetch<{ payouts: PayoutRequest[] }>("/api/admin/finance/payout-requests").catch(() => ({ payouts: [] })),
+        adminFetch<{ configs: SettlementConfig[] }>("/api/admin/finance/settlement-configs").catch(() => ({ configs: [] })),
+        adminFetch<{ cases: KycCase[] }>("/api/admin/finance/kyc-cases").catch(() => ({ cases: [] })),
+        adminFetch<{ runs: ReconciliationRun[] }>("/api/admin/finance/reconciliation").catch(() => ({ runs: [] })),
         adminFetch<{ logs: AuditLog[] }>("/api/admin/audit-logs").catch(() => ({ logs: [] }))
       ]);
       setOverview(overviewBody);
@@ -69,6 +78,9 @@ export default function AdminPage() {
       setFeeConfigs(feeBody.configs);
       setFinanceTransactions(financeBody.transactions);
       setPayouts(payoutBody.payouts);
+      setSettlementConfigs(settlementBody.configs);
+      setKycCases(kycBody.cases);
+      setReconciliationRuns(reconciliationBody.runs);
       setLogs(auditBody.logs);
       setMessage("站务数据已同步。");
       localStorage.setItem("purehub-admin-token", token);
@@ -140,8 +152,40 @@ export default function AdminPage() {
     await loadAdmin();
   }
 
+  async function markPayoutPaid(id: string) {
+    await adminFetch("/api/admin/finance/payout-requests", { method: "PATCH", body: JSON.stringify({ id, status: "paid", reviewNote: "Payout completed from finance dashboard" }) });
+    setMessage("Payout marked as paid and reserved funds moved to clearing.");
+    await loadAdmin();
+  }
+
+  async function createSettlementConfig() {
+    const holdDays = settlementConfigs.find((config) => config.status === "active")?.holdDays === 14 ? 7 : 14;
+    const body = await adminFetch<{ config: SettlementConfig }>("/api/admin/finance/settlement-configs", { method: "POST", body: JSON.stringify({ name: `Settlement ${holdDays} days`, holdDays }) });
+    await adminFetch(`/api/admin/finance/settlement-configs/${body.config.id}/activate`, { method: "POST" });
+    setMessage(`Settlement hold updated to ${holdDays} days.`);
+    await loadAdmin();
+  }
+
+  async function reviewKyc(id: string, status: "approved" | "rejected") {
+    await adminFetch("/api/admin/finance/kyc-cases", { method: "PATCH", body: JSON.stringify({ id, status, reviewNote: `Reviewed from finance dashboard: ${status}` }) });
+    setMessage(`KYC case ${status}.`);
+    await loadAdmin();
+  }
+
+  async function refund(orderId: string) {
+    await adminFetch(`/api/admin/finance/orders/${orderId}/refund`, { method: "POST", body: JSON.stringify({ reason: "Finance dashboard full refund" }) });
+    setMessage("Order refunded and access revoked.");
+    await loadAdmin();
+  }
+
+  async function runReconciliation() {
+    await adminFetch("/api/admin/finance/reconciliation", { method: "POST" });
+    setMessage("Finance reconciliation completed.");
+    await loadAdmin();
+  }
+
   return <div className="mx-auto max-w-7xl px-4 py-8 sm:px-8">
-    <PageHeader title="站务后台" subtitle="Phase 3：权限、申请、等级、价格版本、支付配置与审计。"/>
+    <PageHeader title="站务后台" subtitle="Phase 5：支付、平衡账本、结算、退款、KYC、对账与私有媒体运营。"/>
     <section className="mb-6 grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--card)] p-4 md:grid-cols-[1fr_220px_140px]">
       <label className="text-sm font-bold">ADMIN_ACCESS_TOKEN
         <input value={token} onChange={(event) => setToken(event.target.value)} className="mt-2 w-full rounded-md border border-[var(--line)] bg-transparent px-3 py-2 font-mono text-sm"/>
@@ -234,12 +278,13 @@ export default function AdminPage() {
       </Panel>
 
       <Panel title="财务交易" icon={BadgeDollarSign}>
-        <Table headers={["订单", "总额", "平台抽成", "博主净收入"]}>
+        <Table headers={["订单", "总额", "平台抽成", "博主净收入", "操作"]}>
           {financeTransactions.slice(0, 8).map((item) => <tr key={item.id}>
             <td className="px-3 py-2 font-bold">{item.order.kind}<p className="text-xs muted">{item.order.id}</p></td>
             <td className="px-3 py-2">{item.currency} {item.amount}</td>
             <td className="px-3 py-2">{item.platformFeeAmount}<p className="text-xs muted">{item.platformFeeBps / 100}%</p></td>
             <td className="px-3 py-2">{item.creatorNetAmount}</td>
+            <td className="px-3 py-2"><button disabled={item.status !== "succeeded"} onClick={() => refund(item.order.id)} className="rounded-md border border-rose-500 px-2 py-1 text-xs font-bold text-rose-600 disabled:opacity-40">全额退款</button></td>
           </tr>)}
         </Table>
       </Panel>
@@ -253,7 +298,33 @@ export default function AdminPage() {
             <td className="px-3 py-2">
               <button disabled={item.status !== "pending"} onClick={() => reviewPayout(item.id, "approved")} className="mr-2 rounded-md bg-emerald-600 px-2 py-1 text-xs font-bold text-white disabled:opacity-40">通过</button>
               <button disabled={item.status !== "pending"} onClick={() => reviewPayout(item.id, "rejected")} className="rounded-md bg-rose-600 px-2 py-1 text-xs font-bold text-white disabled:opacity-40">拒绝</button>
+              <button disabled={item.status !== "approved"} onClick={() => markPayoutPaid(item.id)} className="ml-2 rounded-md border border-[var(--line)] px-2 py-1 text-xs font-bold disabled:opacity-40">已付款</button>
             </td>
+          </tr>)}
+        </Table>
+      </Panel>
+
+      <Panel title="结算规则" icon={Activity} action={<button onClick={createSettlementConfig} className="rounded-md border border-[var(--line)] px-3 py-1 text-xs font-bold">切换 7/14 天</button>}>
+        <Table headers={["名称", "冻结天数", "状态", "ID"]}>
+          {settlementConfigs.map((item) => <tr key={item.id}>
+            <td className="px-3 py-2 font-bold">{item.name}</td><td className="px-3 py-2">{item.holdDays}</td><td className="px-3 py-2"><Status text={item.status}/></td><td className="px-3 py-2 text-xs muted">{item.id}</td>
+          </tr>)}
+        </Table>
+      </Panel>
+
+      <Panel title="KYC 审核" icon={ShieldCheck}>
+        <Table headers={["创作者", "国家", "状态", "操作"]}>
+          {kycCases.map((item) => <tr key={item.id}>
+            <td className="px-3 py-2 font-bold">{item.legalName}<p className="text-xs muted">@{item.user.handle}</p></td><td className="px-3 py-2">{item.countryCode}</td><td className="px-3 py-2"><Status text={item.status}/></td>
+            <td className="px-3 py-2"><button disabled={item.status !== "pending"} onClick={() => reviewKyc(item.id, "approved")} className="mr-2 rounded-md bg-emerald-600 px-2 py-1 text-xs font-bold text-white disabled:opacity-40">通过</button><button disabled={item.status !== "pending"} onClick={() => reviewKyc(item.id, "rejected")} className="rounded-md bg-rose-600 px-2 py-1 text-xs font-bold text-white disabled:opacity-40">拒绝</button></td>
+          </tr>)}
+        </Table>
+      </Panel>
+
+      <Panel title="财务对账" icon={Activity} action={<button onClick={runReconciliation} className="rounded-md border border-[var(--line)] px-3 py-1 text-xs font-bold">立即对账</button>}>
+        <Table headers={["时间", "支付", "账本", "钱包", "差异"]}>
+          {reconciliationRuns.map((item) => <tr key={item.id}>
+            <td className="px-3 py-2 text-xs">{new Date(item.startedAt).toLocaleString()}</td><td className="px-3 py-2">{item.paymentCount}</td><td className="px-3 py-2">{item.ledgerCount}</td><td className="px-3 py-2">{item.walletCount}</td><td className="px-3 py-2"><Status text={String(item.discrepancyCount)}/></td>
           </tr>)}
         </Table>
       </Panel>

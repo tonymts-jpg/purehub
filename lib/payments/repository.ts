@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import type { AdminContext } from "@/lib/admin-auth";
 import { PLATFORM_FEE_RULES, type PaymentProvider } from "@/lib/platform-config";
 import { resolvePaymentAdapter } from "./adapters";
+import { completePayout, recordPaymentLedger, refundOrder, releasePayout, reservePayout } from "@/lib/finance/ledger";
 
 const json = (value: unknown) => value as Prisma.InputJsonValue;
 const canUseDatabase = () => Boolean(process.env.DATABASE_URL);
@@ -211,6 +212,7 @@ async function fulfillPaidOrder(tx: Prisma.TransactionClient, orderId: string, p
   }
 
   const now = new Date();
+  const { availableAt } = await recordPaymentLedger(tx, { ...order, provider });
   await tx.paymentTransaction.create({
     data: {
       orderId: order.id,
@@ -222,6 +224,7 @@ async function fulfillPaidOrder(tx: Prisma.TransactionClient, orderId: string, p
       platformFeeBps: order.platformFeeBps,
       platformFeeAmount: order.platformFeeAmount,
       creatorNetAmount: order.creatorNetAmount,
+      availableAt,
       metadata: json(metadata ?? {})
     }
   });
@@ -333,7 +336,7 @@ export async function recordWebhook(provider: PaymentProvider, payload: unknown)
   const adapter = resolvePaymentAdapter(provider, channel?.config);
   const parsed = adapter.parseWebhook(payload);
 
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const event = await tx.webhookEvent.upsert({
       where: { provider_providerEventId: { provider, providerEventId: parsed.providerEventId } },
       update: {},
@@ -344,18 +347,33 @@ export async function recordWebhook(provider: PaymentProvider, payload: unknown)
         payload: json(payload)
       }
     });
-    if (event.status === "processed" || !parsed.intentId || parsed.status !== "succeeded") return event;
+    if (event.status === "processed") return { event, orderId: null, status: "processed" };
+    if (!parsed.intentId || !["succeeded", "charged_back"].includes(parsed.status)) {
+      return { event, orderId: null, status: parsed.status };
+    }
+
+    const existingIntent = await tx.paymentIntent.findUnique({ where: { id: parsed.intentId } });
+    if (!existingIntent) throw new Error("Payment intent not found.");
+    if (parsed.status === "charged_back") {
+      return { event, orderId: existingIntent.orderId, status: parsed.status };
+    }
 
     const intent = await tx.paymentIntent.update({
       where: { id: parsed.intentId },
       data: { status: "succeeded", confirmedAt: new Date() }
     });
     await fulfillPaidOrder(tx, intent.orderId, intent.id, provider, { webhookEventId: event.id });
-    return tx.webhookEvent.update({
+    const processed = await tx.webhookEvent.update({
       where: { id: event.id },
       data: { status: "processed", processedAt: new Date() }
     });
+    return { event: processed, orderId: intent.orderId, status: parsed.status };
   });
+  if (result.status === "charged_back" && result.orderId) {
+    await refundOrder(null, result.orderId, "Provider chargeback", "chargeback");
+    return prisma.webhookEvent.update({ where: { id: result.event.id }, data: { status: "processed", processedAt: new Date() } });
+  }
+  return result.event;
 }
 
 export async function listFinanceTransactions() {
@@ -375,18 +393,16 @@ export async function createPayoutRequest(input: { userId?: string; amount: numb
   return prisma.$transaction(async (tx) => {
     const wallet = await tx.walletBalance.findUnique({ where: { userId } });
     if (!wallet || wallet.available < input.amount) throw new Error("Available wallet balance is insufficient.");
+    if (wallet.debt > 0) throw new Error("Outstanding creator debt must be cleared before payout.");
+    const kyc = await tx.kycCase.findUnique({ where: { userId } });
+    if (kyc?.status !== "approved") throw new Error("Approved KYC is required before payout.");
+    const request = await tx.payoutRequest.create({ data: { userId, amount: input.amount, channel: input.channel, status: "pending" } });
+    const ledger = await reservePayout(tx, { id: request.id, userId, amount: input.amount, currency: wallet.currency });
     await tx.walletBalance.update({
       where: { userId },
-      data: { available: { decrement: input.amount } }
+      data: { available: { decrement: input.amount }, reserved: { increment: input.amount } }
     });
-    return tx.payoutRequest.create({
-      data: {
-        userId,
-        amount: input.amount,
-        channel: input.channel,
-        status: "pending"
-      }
-    });
+    return tx.payoutRequest.update({ where: { id: request.id }, data: { ledgerTransactionId: ledger.id } });
   });
 }
 
@@ -405,9 +421,13 @@ export async function reviewPayoutRequest(admin: AdminContext, input: { id: stri
   return prisma.$transaction(async (tx) => {
     const request = await tx.payoutRequest.findUnique({ where: { id: input.id } });
     if (!request) throw new Error("Payout request not found.");
-    if (request.status !== "pending" && input.status !== "paid") throw new Error("Payout request is already reviewed.");
+    if (input.status === "paid" && request.status !== "approved") throw new Error("Only approved payouts can be marked paid.");
+    if (input.status !== "paid" && request.status !== "pending") throw new Error("Payout request is already reviewed.");
+    const wallet = await tx.walletBalance.findUniqueOrThrow({ where: { userId: request.userId } });
 
-    if (input.status === "approved") {
+    if (input.status === "paid") {
+      await completePayout(tx, { id: request.id, userId: request.userId, amount: request.amount, currency: wallet.currency, channel: request.channel });
+      await tx.walletBalance.update({ where: { userId: request.userId }, data: { reserved: { decrement: request.amount } } });
       await tx.transaction.create({
         data: {
           id: `txn-payout-${request.id}`,
@@ -423,9 +443,10 @@ export async function reviewPayoutRequest(admin: AdminContext, input: { id: stri
     }
 
     if (input.status === "rejected") {
+      await releasePayout(tx, { id: request.id, userId: request.userId, amount: request.amount, currency: wallet.currency });
       await tx.walletBalance.update({
         where: { userId: request.userId },
-        data: { available: { increment: request.amount } }
+        data: { available: { increment: request.amount }, reserved: { decrement: request.amount } }
       });
     }
 

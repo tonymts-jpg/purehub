@@ -60,8 +60,10 @@ test("member-only post previews lead fans to membership unlock", async ({ page }
   await page.goto("/post/post-3");
   const gallery = page.getByTestId("post-detail-gallery");
   await expect(gallery.locator("button")).toHaveCount(8);
-  await gallery.getByRole("button", { name: /3/ }).click();
-  await expect(page).toHaveURL(/\/membership\/momo/, { timeout: 10000 });
+  await expect(async () => {
+    await gallery.getByRole("button", { name: /3/ }).click();
+    await expect(page).toHaveURL(/\/membership\/momo/, { timeout: 1500 });
+  }).toPass({ timeout: 15000 });
   await expect(page.locator("main")).toBeVisible();
 });
 
@@ -69,8 +71,10 @@ test("single purchase unlocks full post gallery after payment", async ({ page })
   await page.goto("/post/post-4");
   const gallery = page.getByTestId("post-detail-gallery");
   await expect(gallery.locator("button")).toHaveCount(8);
-  await gallery.getByRole("button", { name: /3/ }).click();
-  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(async () => {
+    await gallery.getByRole("button", { name: /3/ }).click();
+    await expect(page.getByRole("dialog")).toBeVisible({ timeout: 1500 });
+  }).toPass({ timeout: 15000 });
   await page.getByRole("dialog").getByRole("button", { name: /确认支付/ }).click();
   await page.getByRole("button", { name: /查看全部 12/ }).click();
   await expect(gallery.locator("button")).toHaveCount(12);

@@ -29,6 +29,7 @@ model User {
   creatorOrders       Order[]              @relation("CreatorOrders")
   walletBalance       WalletBalance?
   payoutRequests      PayoutRequest[]
+  kycCase             KycCase?
   adminAccounts       AdminAccount[]
   auditLogs           AuditLog[]
 }
@@ -49,18 +50,18 @@ model CreatorProfile {
 }
 
 model CreatorApplication {
-  id          String   @id
+  id          String    @id
   userId      String
-  status      String   @default("pending")
+  status      String    @default("pending")
   displayName String
   category    String
   portfolio   String
   contact     String
   note        String?
   reviewedAt  DateTime?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model MembershipPlan {
@@ -74,7 +75,7 @@ model MembershipPlan {
 }
 
 model Post {
-  id           String       @id
+  id           String        @id
   creatorId    String
   title        String
   excerpt      String
@@ -83,31 +84,42 @@ model Post {
   category     String
   tags         Json
   visibility   String
-  contentType  String       @default("photo_short")
-  saleMode     String       @default("subscription_only")
+  contentType  String        @default("photo_short")
+  saleMode     String        @default("subscription_only")
   price        Int?
-  likes        Int          @default(0)
+  likes        Int           @default(0)
   comments     Json
-  createdLabel String       @default("刚刚")
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
-  creator      User         @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  createdLabel String        @default("刚刚")
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  creator      User          @relation(fields: [creatorId], references: [id], onDelete: Cascade)
   media        MediaAsset[]
   bookmarks    Bookmark[]
   entitlements Entitlement[]
 }
 
 model MediaAsset {
-  id              String @id
-  postId          String
-  src             String
+  id              String   @id @default(cuid())
+  postId          String?
+  uploaderUserId  String?
+  src             String   @default("")
   alt             String
   width           Int
   height          Int
   order           Int
-  kind            String @default("image")
+  kind            String   @default("image")
   durationSeconds Int?
-  post            Post   @relation(fields: [postId], references: [id], onDelete: Cascade)
+  mimeType        String   @default("image/jpeg")
+  sizeBytes       Int      @default(0)
+  checksum        String?
+  storageKey      String?  @unique
+  derivativeKey   String?
+  status          String   @default("ready")
+  visibility      String   @default("public")
+  processingError String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  post            Post?    @relation(fields: [postId], references: [id], onDelete: Cascade)
 }
 
 model Follow {
@@ -177,89 +189,92 @@ model WalletBalance {
   userId    String   @unique
   available Int      @default(0)
   pending   Int      @default(0)
+  reserved  Int      @default(0)
+  debt      Int      @default(0)
   currency  String   @default("CNY")
   updatedAt DateTime @updatedAt
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model PayoutRequest {
-  id        String   @id @default(cuid())
-  userId    String
-  amount    Int
-  status    String   @default("pending")
-  channel   String
-  reviewNote String  @default("")
-  reviewedAt DateTime?
-  reviewedBy String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id                  String    @id @default(cuid())
+  userId              String
+  amount              Int
+  status              String    @default("pending")
+  channel             String
+  reviewNote          String    @default("")
+  reviewedAt          DateTime?
+  reviewedBy          String?
+  ledgerTransactionId String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model PlatformFeeConfig {
-  id          String   @id @default(cuid())
+  id          String    @id @default(cuid())
   name        String
   feeBps      Int
-  status      String   @default("draft")
+  status      String    @default("draft")
   activatedAt DateTime?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 }
 
 model Order {
-  id                String               @id @default(cuid())
-  buyerUserId       String
-  creatorUserId     String
-  kind              String
-  itemId            String
-  amount            Int
-  currency          String               @default("CNY")
-  status            String               @default("pending")
-  provider          String?
-  platformFeeBps    Int                  @default(0)
-  platformFeeAmount Int                  @default(0)
-  creatorNetAmount  Int                  @default(0)
-  metadata          Json                 @default("{}")
-  paidAt            DateTime?
-  fulfilledAt       DateTime?
-  createdAt         DateTime             @default(now())
-  updatedAt         DateTime             @updatedAt
-  buyer             User                 @relation("BuyerOrders", fields: [buyerUserId], references: [id], onDelete: Cascade)
-  creator           User                 @relation("CreatorOrders", fields: [creatorUserId], references: [id], onDelete: Cascade)
-  paymentIntents    PaymentIntent[]
+  id                  String               @id @default(cuid())
+  buyerUserId         String
+  creatorUserId       String
+  kind                String
+  itemId              String
+  amount              Int
+  currency            String               @default("CNY")
+  status              String               @default("pending")
+  provider            String?
+  platformFeeBps      Int                  @default(0)
+  platformFeeAmount   Int                  @default(0)
+  creatorNetAmount    Int                  @default(0)
+  metadata            Json                 @default("{}")
+  paidAt              DateTime?
+  fulfilledAt         DateTime?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  buyer               User                 @relation("BuyerOrders", fields: [buyerUserId], references: [id], onDelete: Cascade)
+  creator             User                 @relation("CreatorOrders", fields: [creatorUserId], references: [id], onDelete: Cascade)
+  paymentIntents      PaymentIntent[]
   paymentTransactions PaymentTransaction[]
-  subscriptions     Subscription[]
-  entitlements      Entitlement[]
-  transactions      Transaction[]
+  subscriptions       Subscription[]
+  entitlements        Entitlement[]
+  transactions        Transaction[]
 }
 
 model PaymentIntent {
-  id                 String               @id @default(cuid())
-  orderId            String
-  provider           String
-  status             String               @default("requires_confirmation")
-  amount             Int
-  currency           String               @default("CNY")
-  providerIntentId   String?
-  clientSecret       String?
-  manualInstructions Json                 @default("{}")
-  metadata           Json                 @default("{}")
-  confirmedAt        DateTime?
-  createdAt          DateTime             @default(now())
-  updatedAt          DateTime             @updatedAt
-  order              Order                @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  id                  String               @id @default(cuid())
+  orderId             String
+  provider            String
+  status              String               @default("requires_confirmation")
+  amount              Int
+  currency            String               @default("CNY")
+  providerIntentId    String?
+  clientSecret        String?
+  manualInstructions  Json                 @default("{}")
+  metadata            Json                 @default("{}")
+  confirmedAt         DateTime?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  order               Order                @relation(fields: [orderId], references: [id], onDelete: Cascade)
   paymentTransactions PaymentTransaction[]
 }
 
 model WebhookEvent {
-  id              String   @id @default(cuid())
+  id              String    @id @default(cuid())
   provider        String
   providerEventId String
   eventType       String
-  status          String   @default("received")
+  status          String    @default("received")
   payload         Json
   processedAt     DateTime?
-  createdAt       DateTime @default(now())
+  createdAt       DateTime  @default(now())
 
   @@unique([provider, providerEventId])
 }
@@ -275,10 +290,99 @@ model PaymentTransaction {
   platformFeeBps    Int
   platformFeeAmount Int
   creatorNetAmount  Int
+  availableAt       DateTime?
+  settledAt         DateTime?
   metadata          Json           @default("{}")
   createdAt         DateTime       @default(now())
   order             Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
   paymentIntent     PaymentIntent? @relation(fields: [paymentIntentId], references: [id], onDelete: SetNull)
+}
+
+model LedgerAccount {
+  id          String        @id @default(cuid())
+  key         String        @unique
+  ownerUserId String?
+  type        String
+  currency    String        @default("CNY")
+  balance     Int           @default(0)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  entries     LedgerEntry[]
+}
+
+model LedgerTransaction {
+  id             String        @id @default(cuid())
+  idempotencyKey String        @unique
+  type           String
+  referenceType  String
+  referenceId    String
+  currency       String        @default("CNY")
+  status         String        @default("posted")
+  metadata       Json          @default("{}")
+  createdAt      DateTime      @default(now())
+  entries        LedgerEntry[]
+}
+
+model LedgerEntry {
+  id            String            @id @default(cuid())
+  transactionId String
+  accountId     String
+  amount        Int
+  createdAt     DateTime          @default(now())
+  transaction   LedgerTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  account       LedgerAccount     @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@index([transactionId])
+  @@index([accountId])
+}
+
+model SettlementConfig {
+  id          String    @id @default(cuid())
+  name        String
+  holdDays    Int       @default(7)
+  status      String    @default("draft")
+  activatedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+model Refund {
+  id                  String   @id @default(cuid())
+  orderId             String   @unique
+  reason              String
+  status              String   @default("succeeded")
+  source              String   @default("admin")
+  ledgerTransactionId String?
+  createdBy           String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+model KycCase {
+  id           String    @id @default(cuid())
+  userId       String    @unique
+  status       String    @default("pending")
+  legalName    String
+  countryCode  String
+  documentKeys Json
+  reviewNote   String    @default("")
+  reviewedAt   DateTime?
+  reviewedBy   String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model ReconciliationRun {
+  id               String    @id @default(cuid())
+  status           String    @default("completed")
+  paymentCount     Int       @default(0)
+  ledgerCount      Int       @default(0)
+  walletCount      Int       @default(0)
+  discrepancyCount Int       @default(0)
+  discrepancies    Json      @default("[]")
+  startedAt        DateTime  @default(now())
+  completedAt      DateTime?
 }
 
 model CreatorLevel {
@@ -339,15 +443,15 @@ model AuditLog {
 }
 
 model PaymentChannelConfig {
-  id          String   @id @default(cuid())
-  provider    String   @unique
-  enabled     Boolean  @default(false)
-  mode        String   @default("test")
-  currencies  Json
-  regions     Json
-  feeNote     String   @default("")
-  config      Json
-  statusNote  String   @default("not_configured")
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id         String   @id @default(cuid())
+  provider   String   @unique
+  enabled    Boolean  @default(false)
+  mode       String   @default("test")
+  currencies Json
+  regions    Json
+  feeNote    String   @default("")
+  config     Json
+  statusNote String   @default("not_configured")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 }

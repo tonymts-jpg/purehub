@@ -12,6 +12,13 @@ const levelForFollowers = (followers: number) => {
 
 async function main() {
   await prisma.$transaction([
+    prisma.ledgerEntry.deleteMany(),
+    prisma.ledgerTransaction.deleteMany(),
+    prisma.ledgerAccount.deleteMany(),
+    prisma.reconciliationRun.deleteMany(),
+    prisma.refund.deleteMany(),
+    prisma.kycCase.deleteMany(),
+    prisma.settlementConfig.deleteMany(),
     prisma.auditLog.deleteMany(),
     prisma.adminAccount.deleteMany(),
     prisma.paymentTransaction.deleteMany(),
@@ -163,6 +170,16 @@ async function main() {
     }
   });
 
+  await prisma.settlementConfig.create({
+    data: {
+      id: "settlement-v1",
+      name: "Phase 5 default settlement",
+      holdDays: 7,
+      status: "active",
+      activatedAt: new Date()
+    }
+  });
+
   await prisma.user.create({
     data: {
       id: "fan-demo",
@@ -241,6 +258,20 @@ async function main() {
     });
   }
 
+  await prisma.kycCase.create({
+    data: {
+      id: "kyc-c1-approved",
+      userId: "c1",
+      status: "approved",
+      legalName: "Phase 5 Demo Creator",
+      countryCode: "CN",
+      documentKeys: json(["kyc/c1/demo-document.enc"]),
+      reviewNote: "Seeded approval for staging payout tests.",
+      reviewedAt: new Date(),
+      reviewedBy: "admin-demo"
+    }
+  });
+
   for (const post of posts) {
     await prisma.post.create({
       data: {
@@ -273,6 +304,25 @@ async function main() {
       }
     });
   }
+
+  const openingAccounts = await Promise.all([
+    prisma.ledgerAccount.create({ data: { key: "creator:c1:available:CNY", ownerUserId: "c1", type: "creator_available", currency: "CNY", balance: 8620 } }),
+    prisma.ledgerAccount.create({ data: { key: "creator:c1:pending:CNY", ownerUserId: "c1", type: "creator_pending", currency: "CNY", balance: 1280 } }),
+    prisma.ledgerAccount.create({ data: { key: "platform:opening_equity:CNY", type: "opening_equity", currency: "CNY", balance: -9900 } })
+  ]);
+  await prisma.ledgerTransaction.create({
+    data: {
+      idempotencyKey: "seed:phase5:opening-balances",
+      type: "opening_balance",
+      referenceType: "seed",
+      referenceId: "phase-5",
+      currency: "CNY",
+      metadata: json({ note: "Balances migrated into the Phase 5 ledger" }),
+      entries: {
+        create: openingAccounts.map((account) => ({ accountId: account.id, amount: account.balance }))
+      }
+    }
+  });
 
   await prisma.transaction.createMany({
     data: transactions.map((transaction) => ({

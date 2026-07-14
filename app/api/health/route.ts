@@ -27,12 +27,13 @@ function checkTcp(host: string | undefined, port: string | undefined, timeoutMs 
 }
 
 export async function GET() {
-  const [database, redis] = await Promise.all([
+  const [database, redis, objectStorage] = await Promise.all([
     checkTcp(process.env.DB_HOST, process.env.DB_PORT ?? "5432"),
-    checkTcp(process.env.REDIS_HOST, process.env.REDIS_PORT ?? "6379")
+    checkTcp(process.env.REDIS_HOST, process.env.REDIS_PORT ?? "6379"),
+    checkTcp(process.env.OBJECT_STORAGE_HOST, process.env.OBJECT_STORAGE_PORT ?? "9000")
   ]);
 
-  const dependencies = { database, redis };
+  const dependencies = { database, redis, objectStorage };
   const hasErrors = Object.values(dependencies).some((dependency) => dependency.status === "error");
 
   return NextResponse.json(

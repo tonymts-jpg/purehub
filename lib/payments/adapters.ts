@@ -36,7 +36,7 @@ export type PaymentAdapter = {
     providerEventId: string;
     eventType: string;
     intentId?: string;
-    status: "succeeded" | "failed" | "processing";
+    status: "succeeded" | "failed" | "processing" | "charged_back";
   };
 };
 
@@ -50,7 +50,7 @@ const sandboxAdapter = (provider: PaymentProvider): PaymentAdapter => ({
   }),
   confirmIntent: () => ({ status: "processing", metadata: { sandbox: true } }),
   parseWebhook: (payload) => {
-    const body = payload as { id?: string; type?: string; intentId?: string; status?: "succeeded" | "failed" | "processing" };
+    const body = payload as { id?: string; type?: string; intentId?: string; status?: "succeeded" | "failed" | "processing" | "charged_back" };
     return {
       providerEventId: body.id ?? `evt_${Date.now()}`,
       eventType: body.type ?? "payment_intent.updated",
@@ -78,7 +78,7 @@ export const manualConfirmAdapter: PaymentAdapter = {
     metadata: { adapter: "manual_confirm", payload: payload ?? null }
   }),
   parseWebhook: (payload) => {
-    const body = payload as { id?: string; type?: string; intentId?: string; status?: "succeeded" | "failed" | "processing" };
+    const body = payload as { id?: string; type?: string; intentId?: string; status?: "succeeded" | "failed" | "processing" | "charged_back" };
     return {
       providerEventId: body.id ?? `manual_evt_${Date.now()}`,
       eventType: body.type ?? "manual.payment_confirmed",

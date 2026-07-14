@@ -42,6 +42,12 @@ export const PLATFORM_FEE_RULES = {
   defaultFeeBps: 1000
 } as const;
 
+export const SETTLEMENT_RULES = {
+  defaultHoldDays: 7,
+  minHoldDays: 0,
+  maxHoldDays: 90
+} as const;
+
 export const ADMIN_ROLE_LABELS: Record<AdminRole, string> = {
   super_admin: "Super Admin",
   ops_admin: "Operations Admin",

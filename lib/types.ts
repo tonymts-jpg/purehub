@@ -26,6 +26,6 @@ export interface Product { id: string; creatorId: string; title: string; price: 
 export interface Subscription { id: string; creatorId: string; planId: string; startedAt: string; }
 export interface Entitlement { id: string; postId: string; source: "subscription" | "purchase"; }
 export interface Transaction { id: string; title: string; amount: number; type: "income" | "payout"; date: string; status: string; }
-export interface WalletBalance { available: number; pending: number; currency: "CNY"; }
+export interface WalletBalance { available: number; pending: number; reserved: number; debt: number; currency: "CNY"; }
 export interface Notification { id: string; title: string; body: string; time: string; read: boolean; type: string; }
 export interface DemoSession { role: Role; theme: "light" | "dark"; }

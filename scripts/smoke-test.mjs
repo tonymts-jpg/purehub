@@ -40,6 +40,12 @@ if (adminToken) {
     throw new Error("finance-fee-configs expected configs array");
   }
   console.log(`ok finance-fee-configs ${url}`);
+  for (const path of ["/api/admin/finance/settlement-configs", "/api/admin/finance/reconciliation"]) {
+    const phase5Url = new URL(path, baseUrl);
+    const phase5Response = await fetch(phase5Url, { headers: { "x-admin-token": adminToken, "x-admin-role": "finance_admin" } });
+    if (!phase5Response.ok) throw new Error(`phase5 finance check failed: ${phase5Response.status} at ${phase5Url}`);
+    console.log(`ok phase5-finance ${phase5Url}`);
+  }
 } else {
   console.log("skip finance-fee-configs: SMOKE_ADMIN_TOKEN or ADMIN_ACCESS_TOKEN not configured");
 }
