@@ -1,5 +1,7 @@
 ﻿import { expect, test } from "@playwright/test";
 
+import { hasDatabase, signInCreator, signInFan } from "./auth-helpers";
+
 test("phase 2 feed, detail, creator, and pricing APIs are available", async ({ request }) => {
   const feed = await request.get("/api/feed");
   expect(feed.ok()).toBeTruthy();
@@ -25,9 +27,10 @@ test("phase 2 feed, detail, creator, and pricing APIs are available", async ({ r
 });
 
 test("phase 2 creator application and post APIs accept writable data", async ({ request }) => {
+  test.skip(!(await hasDatabase(request)), "Phase 2 writable APIs require the seeded database.");
+  await signInFan(request);
   const application = await request.post("/api/creator/applications", {
     data: {
-      userId: `fan-${Date.now()}`,
       displayName: "Phase 2 Creator",
       category: "Cosplay",
       portfolio: "https://example.com/portfolio",
@@ -39,9 +42,9 @@ test("phase 2 creator application and post APIs accept writable data", async ({ 
   const applicationBody = await application.json();
   expect(applicationBody.application.status).toBe("pending");
 
+  await signInCreator(request);
   const post = await request.post("/api/posts", {
     data: {
-      creatorId: "c1",
       title: "Phase 2 API Post",
       excerpt: "Created through the Phase 2 post API.",
       content: "This post verifies that the Phase 2 post API can accept new creator work and keep the response shape stable.",

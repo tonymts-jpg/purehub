@@ -14,7 +14,7 @@ const schema = z.object({
 });
 
 export async function GET(request: Request) {
-  const auth = requireAdmin(request, "levels");
+  const auth = await requireAdmin(request, "levels");
   if (!auth.ok) return auth.response;
 
   const levels = await listCreatorLevels();
@@ -22,7 +22,7 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const auth = requireAdmin(request, "levels");
+  const auth = await requireAdmin(request, "levels");
   if (!auth.ok) return auth.response;
 
   const level = await createCreatorLevel(auth.admin, schema.parse(await request.json()));

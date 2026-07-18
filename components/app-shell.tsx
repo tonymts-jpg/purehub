@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Bell, BookOpen, Compass, Home, LayoutDashboard, Moon, PlusCircle, ShieldCheck, Sparkles, Sun, UserPlus, UserRound } from "lucide-react";
+import { Bell, BookOpen, Compass, Home, LayoutDashboard, LogIn, LogOut, Moon, PlusCircle, ShieldCheck, Sparkles, Sun, UserPlus, UserRound } from "lucide-react";
 import { useDemoStore } from "@/lib/store";
 import { useEffect } from "react";
+import { authClient } from "@/lib/auth-client";
 
 const nav = [
   {href:"/",label:"首页",icon:Home},{href:"/explore",label:"探索",icon:Compass},
@@ -13,7 +14,8 @@ const nav = [
 ];
 
 export function AppShell({children}:{children:React.ReactNode}) {
-  const pathname=usePathname(); const {theme,toggleTheme,role,setRole,toast,clearToast}=useDemoStore();
+  const pathname=usePathname(); const {theme,toggleTheme,role,toast,clearToast}=useDemoStore();
+  const {data:session}=authClient.useSession();
   useEffect(()=>{document.documentElement.classList.toggle("dark",theme==="dark")},[theme]);
   useEffect(()=>{if(!toast)return;const t=setTimeout(clearToast,2400);return()=>clearTimeout(t)},[toast,clearToast]);
   const dashboard=pathname.startsWith("/dashboard");
@@ -32,6 +34,7 @@ export function AppShell({children}:{children:React.ReactNode}) {
       <Link href="/dashboard/posts/new" className="mt-2 flex items-center gap-3 rounded-2xl px-4 py-3 text-sm font-semibold muted hover:bg-black/5 dark:hover:bg-white/5"><PlusCircle size={19}/>发布作品</Link>
       <div className="mt-auto space-y-3">
         <button onClick={toggleTheme} className="glass flex w-full items-center justify-between rounded-2xl px-4 py-3 text-sm font-semibold"><span className="flex items-center gap-3">{theme==="light"?<Moon size={18}/>:<Sun size={18}/>}外观模式</span><span className="muted">{theme==="light"?"浅色":"深色"}</span></button>
+        {session?.user?<div className="glass flex items-center gap-3 rounded-2xl p-3"><Avatar text={session.user.name.slice(0,1).toUpperCase()} small/><div className="min-w-0 flex-1"><p className="truncate text-sm font-bold">{session.user.name}</p><p className="truncate text-xs muted">{session.user.email}</p></div><button title="登出" aria-label="登出" onClick={()=>authClient.signOut().then(()=>window.location.assign("/"))} className="rounded-xl p-2 muted hover:bg-black/5"><LogOut size={17}/></button></div>:<Link href="/sign-in" className="brand-gradient flex items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-bold text-white"><LogIn size={17}/>登入</Link>}
         <Link href="/demo" className="glass flex items-center gap-3 rounded-2xl p-3">
           <Avatar text={role==="creator"?"夕":"P"} small/>
           <div className="min-w-0"><p className="truncate text-sm font-bold">{role==="creator"?"林夕 Yuki":"Pure 粉丝"}</p><p className="text-xs muted">Demo 模式 · {role==="creator"?"博主":"粉丝"}</p></div>
@@ -42,7 +45,7 @@ export function AppShell({children}:{children:React.ReactNode}) {
       <Link href="/" className="flex items-center gap-2 font-black"><span className="brand-gradient grid h-8 w-8 place-items-center rounded-xl text-white"><Sparkles size={16}/></span>PureHub</Link>
       <div className="flex items-center gap-2">
         <button onClick={toggleTheme} aria-label="切换主题" className="glass rounded-xl p-2">{theme==="light"?<Moon size={18}/>:<Sun size={18}/>}</button>
-        <button onClick={()=>setRole(role==="fan"?"creator":"fan")} className="brand-gradient rounded-xl px-3 py-2 text-xs font-bold text-white">{role==="fan"?"切换博主":"切换粉丝"}</button>
+        {session?.user?<button title="登出" aria-label="登出" onClick={()=>authClient.signOut().then(()=>window.location.assign("/"))} className="glass rounded-xl p-2"><LogOut size={18}/></button>:<Link href="/sign-in" aria-label="登入" className="brand-gradient rounded-xl p-2 text-white"><LogIn size={18}/></Link>}
       </div>
     </header>
     <main className="pb-24 lg:ml-64 lg:pb-0">{children}</main>

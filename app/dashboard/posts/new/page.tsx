@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -71,19 +71,19 @@ export default function NewPostPage() {
       const visibility = visibilityForSaleMode(values.saleMode);
       for (const file of Array.from(files).slice(0, 20)) {
         const kind = file.type.startsWith("video/") ? "video" : "image";
-        const presign = await fetch("/api/uploads/presign", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ userId: "c1", fileName: file.name, mimeType: file.type, sizeBytes: file.size, kind, visibility }) });
+        const presign = await fetch("/api/uploads/presign", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fileName: file.name, mimeType: file.type, sizeBytes: file.size, kind, visibility }) });
         if (!presign.ok) throw new Error("无法建立上传任务。");
         const prepared = await presign.json();
         if (!String(prepared.uploadUrl).startsWith("mock://")) {
           const stored = await fetch(prepared.uploadUrl, { method: "PUT", headers: prepared.headers, body: file });
           if (!stored.ok) throw new Error("媒体上传失败。");
         }
-        const completed = await fetch("/api/uploads/complete", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ assetId: prepared.assetId, userId: "c1" }) });
+        const completed = await fetch("/api/uploads/complete", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ assetId: prepared.assetId }) });
         if (!completed.ok) throw new Error("无法完成上传任务。");
         ids.push(prepared.assetId);
       }
       for (let attempt = 0; attempt < 35; attempt += 1) {
-        const response = await fetch(`/api/uploads/complete?userId=c1&ids=${ids.join(",")}`);
+        const response = await fetch(`/api/uploads/complete?ids=${ids.join(",")}`);
         const body = await response.json();
         if (body.assets.some((asset: { status: string }) => asset.status === "failed")) throw new Error("媒体处理失败，请重新上传。");
         if (body.assets.length === ids.length && body.assets.every((asset: { status: string }) => asset.status === "ready")) break;

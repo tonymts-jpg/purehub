@@ -9,13 +9,30 @@ import { useDemoStore } from "@/lib/store";
 import { Avatar } from "./app-shell";
 import { MediaGallery } from "./media-gallery";
 import { PaymentModal } from "./payment-modal";
+import { authClient } from "@/lib/auth-client";
 
 export function PostCard({post}:{post:Post}) {
   const creator=creators.find(c=>c.id===post.creatorId)!;
   const [paying,setPaying]=useState(false);
-  const {liked,bookmarked,toggleLike,toggleBookmark,subscriptions,unlocked,unlock}=useDemoStore();
-  const isLiked=liked.includes(post.id), saved=bookmarked.includes(post.id);
-  const hasAccess=post.visibility==="free"||subscriptions.some(item=>item.creatorId===creator.id)||unlocked.includes(post.id);
+  const {liked,bookmarked,subscriptions,unlocked,unlock}=useDemoStore();
+  const {data:session}=authClient.useSession();
+  const [isLiked,setIsLiked]=useState(post.liked??liked.includes(post.id));
+  const [saved,setSaved]=useState(post.bookmarked??bookmarked.includes(post.id));
+  const [likeCount,setLikeCount]=useState(post.likes);
+  const hasAccess=post.hasAccess??(post.visibility==="free"||subscriptions.some(item=>item.creatorId===creator.id)||unlocked.includes(post.id));
+  const signIn=()=>{window.location.href=`/sign-in?callbackUrl=${encodeURIComponent(window.location.pathname)}`};
+  const updateLike=async()=>{
+    if(!session?.user)return signIn();
+    const next=!isLiked; setIsLiked(next); setLikeCount(value=>value+(next?1:-1));
+    const response=await fetch(`/api/posts/${post.id}/like`,{method:next?"POST":"DELETE"});
+    if(!response.ok){setIsLiked(!next);setLikeCount(value=>value+(next?-1:1))}
+  };
+  const updateBookmark=async()=>{
+    if(!session?.user)return signIn();
+    const next=!saved; setSaved(next);
+    const response=await fetch(`/api/posts/${post.id}/bookmark`,{method:next?"POST":"DELETE"});
+    if(!response.ok)setSaved(!next);
+  };
   const handleLocked=()=>{
     if(post.visibility==="members")window.location.href=`/membership/${creator.handle}`;
     else setPaying(true);
@@ -40,10 +57,10 @@ export function PostCard({post}:{post:Post}) {
       <Link href={`/post/${post.id}`}><h2 className="text-xl font-black leading-snug">{post.title}</h2><p className="mt-2 line-clamp-2 text-sm leading-6 muted">{post.excerpt}</p></Link>
       <div className="mt-5 flex items-center justify-between border-t border-[var(--line)] pt-4">
         <div className="flex gap-4">
-          <button onClick={()=>toggleLike(post.id)} aria-label="喜欢" className={`flex items-center gap-1.5 text-sm font-semibold ${isLiked?"text-coral":"muted hover:text-coral"}`}><Heart size={18} fill={isLiked?"currentColor":"none"}/>{post.likes+(isLiked?1:0)}</button>
+          <button onClick={updateLike} aria-label="喜欢" className={`flex items-center gap-1.5 text-sm font-semibold ${isLiked?"text-coral":"muted hover:text-coral"}`}><Heart size={18} fill={isLiked?"currentColor":"none"}/>{likeCount}</button>
           <span className="flex items-center gap-1.5 text-sm muted"><MessageCircle size={18}/>{post.comments.length}</span>
         </div>
-        <button onClick={()=>toggleBookmark(post.id)} aria-label="收藏" className={saved?"text-violet":"muted hover:text-violet"}><Bookmark size={19} fill={saved?"currentColor":"none"}/></button>
+        <button onClick={updateBookmark} aria-label="收藏" className={saved?"text-violet":"muted hover:text-violet"}><Bookmark size={19} fill={saved?"currentColor":"none"}/></button>
       </div>
     </div>
     {paying&&<PaymentModal title={post.title} price={post.price||0} onClose={()=>setPaying(false)} onConfirm={()=>{unlock(post.id,post.price||0);setPaying(false)}}/>}

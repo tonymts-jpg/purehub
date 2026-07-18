@@ -22,13 +22,13 @@ export default function WalletPage() {
   const [kycMessage, setKycMessage] = useState("");
 
   useEffect(() => {
-    fetch("/api/dashboard/summary?creatorId=c1")
+    fetch("/api/dashboard/summary")
       .then((response) => response.ok ? response.json() : null)
       .then((body) => {
         if (body) setSummary({ balance: body.balance ?? 0, pending: body.pending ?? 0, reserved: body.reserved ?? 0, debt: body.debt ?? 0, nextAvailableAt: body.nextAvailableAt ?? null, transactions: body.transactions ?? [] });
       })
       .catch(() => setSummary(null));
-    fetch("/api/creator/kyc?userId=c1").then((response) => response.ok ? response.json() : null).then((body) => body && setKycStatus(body.case.status)).catch(() => undefined);
+    fetch("/api/creator/kyc").then((response) => response.ok ? response.json() : null).then((body) => body && setKycStatus(body.case.status)).catch(() => undefined);
   }, []);
 
   const visibleBalance = summary?.balance ?? balance;
@@ -48,7 +48,7 @@ export default function WalletPage() {
       const response = await fetch("/api/payout-requests", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ userId: "c1", amount: n, channel: "alipay" })
+        body: JSON.stringify({ amount: n, channel: "alipay" })
       });
       if (!response.ok) throw new Error("server payout failed");
     } catch {
@@ -65,14 +65,14 @@ export default function WalletPage() {
   const submitKyc = async () => {
     if (!legalName.trim() || !kycFile) return setKycMessage("请填写法定姓名并选择证件文件。");
     try {
-      const presign = await fetch("/api/creator/kyc/documents/presign", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ userId: "c1", fileName: kycFile.name, mimeType: kycFile.type }) });
+      const presign = await fetch("/api/creator/kyc/documents/presign", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fileName: kycFile.name, mimeType: kycFile.type }) });
       if (!presign.ok) throw new Error("KYC upload could not be prepared.");
       const upload = await presign.json();
       if (!String(upload.uploadUrl).startsWith("mock://")) {
         const stored = await fetch(upload.uploadUrl, { method: "PUT", headers: upload.headers, body: kycFile });
         if (!stored.ok) throw new Error("KYC document upload failed.");
       }
-      const submitted = await fetch("/api/creator/kyc", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ userId: "c1", legalName, countryCode: countryCode.toUpperCase(), documentKeys: [upload.documentKey] }) });
+      const submitted = await fetch("/api/creator/kyc", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ legalName, countryCode: countryCode.toUpperCase(), documentKeys: [upload.documentKey] }) });
       if (!submitted.ok) throw new Error("KYC case submission failed.");
       setKycStatus("pending");
       setKycMessage("KYC 资料已提交审核。");

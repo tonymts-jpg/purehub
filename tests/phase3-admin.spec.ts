@@ -1,4 +1,5 @@
 import { expect, test, type APIRequestContext } from "@playwright/test";
+import { signInAdmin, signInFan, signInSupport } from "./auth-helpers";
 
 const adminHeaders = {
   "x-admin-token": process.env.ADMIN_ACCESS_TOKEN ?? "purehub-admin-demo-token",
@@ -22,13 +23,15 @@ test("phase 3 admin APIs reject requests without token", async ({ request }) => 
 });
 
 test("phase 3 admin APIs enforce role sections", async ({ request }) => {
-  const response = await request.get("/api/admin/payment-channels", {
-    headers: { ...adminHeaders, "x-admin-role": "support_admin" }
-  });
+  test.skip(!(await hasDatabase(request)), "Role enforcement requires the seeded admin accounts.");
+  await signInSupport(request);
+  const response = await request.get("/api/admin/payment-channels", { headers: { "x-admin-role": "super_admin" } });
   expect(response.status()).toBe(403);
 });
 
-test("phase 3 admin UI is reachable with staging token", async ({ page }) => {
+test("phase 3 admin UI is reachable with an admin session", async ({ page }) => {
+  test.skip(!(await hasDatabase(page.request)), "Admin UI sessions require the seeded database.");
+  await signInAdmin(page.request);
   await page.goto("/admin");
   await expect(page.getByRole("heading", { name: "站务后台" })).toBeVisible();
   await expect(page.getByRole("status")).toBeVisible();
@@ -38,9 +41,9 @@ test("phase 3 admin UI is reachable with staging token", async ({ page }) => {
 test("phase 3 admin can review creator applications and write audit logs", async ({ request }) => {
   test.skip(!(await hasDatabase(request)), "Phase 3 admin APIs require the seeded database.");
 
+  await signInFan(request);
   const application = await request.post("/api/creator/applications", {
     data: {
-      userId: `phase3-fan-${Date.now()}`,
       displayName: "Phase 3 Creator",
       category: "Cosplay",
       portfolio: "https://example.com/phase3",

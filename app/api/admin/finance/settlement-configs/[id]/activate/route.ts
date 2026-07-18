@@ -3,7 +3,7 @@ import { requireAdmin } from "@/lib/admin-auth";
 import { activateSettlementConfig } from "@/lib/finance/ledger";
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const auth = requireAdmin(request, "transactions");
+  const auth = await requireAdmin(request, "transactions");
   if (!auth.ok) return auth.response;
   try {
     const { id } = await params;

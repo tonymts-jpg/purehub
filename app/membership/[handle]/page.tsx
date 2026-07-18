@@ -5,14 +5,17 @@ import { useRouter } from "next/navigation";
 import { Check, CreditCard, ShieldCheck, Sparkles } from "lucide-react";
 import { creators } from "@/lib/data";
 import { useDemoStore } from "@/lib/store";
+import { authClient } from "@/lib/auth-client";
 
 export default function MembershipPage({params}:{params:Promise<{handle:string}>}) {
   const {handle}=use(params); const creator=creators.find(c=>c.handle===handle)||creators[0];
   const plans=creator.plans.length?creator.plans:creators[0].plans; const [selected,setSelected]=useState(plans[1]?.id||plans[0].id); const [paying,setPaying]=useState(false); const router=useRouter();
   const subscribe=useDemoStore(s=>s.subscribe); const plan=plans.find(p=>p.id===selected)!;
+  const {data:session}=authClient.useSession(); const demoMode=process.env.NEXT_PUBLIC_DEMO_MODE==="true";
   const confirmSubscription=async()=>{
+    if(!session?.user){window.location.assign(`/sign-in?callbackUrl=${encodeURIComponent(window.location.pathname)}`);return}
     try{
-      const orderResponse=await fetch("/api/payments/orders",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({kind:"subscription",itemId:plan.id,buyerUserId:"fan-demo"})});
+      const orderResponse=await fetch("/api/payments/orders",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({kind:"subscription",itemId:plan.id})});
       if(!orderResponse.ok)throw new Error("order failed");
       const {order}=await orderResponse.json();
       const intentResponse=await fetch("/api/payments/intents",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({orderId:order.id,provider:"card"})});
@@ -21,9 +24,9 @@ export default function MembershipPage({params}:{params:Promise<{handle:string}>
       const confirmResponse=await fetch(`/api/payments/intents/${intent.id}/confirm`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({source:"membership_page"})});
       if(!confirmResponse.ok)throw new Error("confirm failed");
     }catch{
-      // Keep the static demo usable when no database is configured.
+      if(!demoMode)return;
     }
-    subscribe(creator.id,plan.id);
+    if(demoMode)subscribe(creator.id,plan.id);
     setPaying(false);
     router.push(`/creator/${creator.handle}`);
   };

@@ -21,7 +21,7 @@ const schema = z.object({
 });
 
 export async function GET(request: Request) {
-  const auth = requireAdmin(request, "pricing");
+  const auth = await requireAdmin(request, "pricing");
   if (!auth.ok) return auth.response;
 
   const versions = await listPricingVersions();
@@ -29,7 +29,7 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const auth = requireAdmin(request, "pricing");
+  const auth = await requireAdmin(request, "pricing");
   if (!auth.ok) return auth.response;
 
   const version = await createPricingVersion(auth.admin, schema.parse(await request.json()));

@@ -16,15 +16,17 @@ check_url "post detail" "/post/post-1"
 check_url "health" "/api/health"
 check_url "platform rules" "/api/platform/rules"
 
+echo "Checking unauthenticated identity boundary"
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' "${BASE_URL}/api/me")" = "401"
+
 if [ -n "${SMOKE_ADMIN_TOKEN:-}" ]; then
   echo "Checking finance fee configs: ${BASE_URL}/api/admin/finance/fee-configs"
   curl --fail --silent --show-error \
     -H "x-admin-token: ${SMOKE_ADMIN_TOKEN}" \
-    -H "x-admin-role: finance_admin" \
     "${BASE_URL}/api/admin/finance/fee-configs" >/dev/null
   echo "Checking Phase 5 settlement configs and reconciliation"
-  curl --fail --silent --show-error -H "x-admin-token: ${SMOKE_ADMIN_TOKEN}" -H "x-admin-role: finance_admin" "${BASE_URL}/api/admin/finance/settlement-configs" >/dev/null
-  curl --fail --silent --show-error -H "x-admin-token: ${SMOKE_ADMIN_TOKEN}" -H "x-admin-role: finance_admin" "${BASE_URL}/api/admin/finance/reconciliation" >/dev/null
+  curl --fail --silent --show-error -H "x-admin-token: ${SMOKE_ADMIN_TOKEN}" "${BASE_URL}/api/admin/finance/settlement-configs" >/dev/null
+  curl --fail --silent --show-error -H "x-admin-token: ${SMOKE_ADMIN_TOKEN}" "${BASE_URL}/api/admin/finance/reconciliation" >/dev/null
 else
   echo "Skipping finance fee configs smoke check: SMOKE_ADMIN_TOKEN is not configured"
 fi

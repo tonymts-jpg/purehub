@@ -7,6 +7,7 @@ test("health endpoint exposes server dependency status", async ({ request }) => 
   expect(body.status).toBe("ok");
   expect(body.locales).toEqual(["zh-CN", "zh-TW", "en", "ja"]);
   expect(body.paymentProviders).toContain("usdt");
+  expect(body.capabilities).toEqual({ databaseSessions: true, credentialAuth: true, socialInteractions: true, notifications: true });
   expect(body.dependencies.database.status).toMatch(/ok|skipped/);
   expect(body.dependencies.redis.status).toMatch(/ok|skipped/);
   expect(body.dependencies.objectStorage.status).toMatch(/ok|skipped/);
@@ -21,6 +22,8 @@ test("platform rules expose formal phase constraints", async ({ request }) => {
   expect(body.usdtDefaults.networks).toEqual(["TRC20", "ERC20"]);
   expect(body.platformFeeRules).toEqual({ minFeeBps: 0, maxFeeBps: 5000, defaultFeeBps: 1000 });
   expect(body.settlementRules).toEqual({ defaultHoldDays: 7, minHoldDays: 0, maxHoldDays: 90 });
+  expect(body.identity).toEqual({ provider: "better-auth", sessionStore: "database", credentials: true });
+  expect(body.social).toEqual({ follows: true, likes: true, bookmarks: true, comments: true, notifications: true });
   expect(Object.keys(body.paymentProviders)).toEqual([
     "stripe",
     "paypal",

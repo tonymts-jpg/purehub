@@ -17,6 +17,8 @@ export function GET() {
     settlementRules: SETTLEMENT_RULES,
     paymentProviders: PAYMENT_PROVIDERS,
     usdtDefaults: DEFAULT_USDT_CONFIG,
-    adminRoles: ADMIN_ROLE_LABELS
+    adminRoles: ADMIN_ROLE_LABELS,
+    identity: { provider: "better-auth", sessionStore: "database", credentials: true },
+    social: { follows: true, likes: true, bookmarks: true, comments: true, notifications: true }
   });
 }

@@ -7,13 +7,13 @@ export const dynamic = "force-dynamic";
 const schema = z.object({ name: z.string().min(3), holdDays: z.number().int().min(0).max(90) });
 
 export async function GET(request: Request) {
-  const auth = requireAdmin(request, "transactions");
+  const auth = await requireAdmin(request, "transactions");
   if (!auth.ok) return auth.response;
   return NextResponse.json({ configs: await listSettlementConfigs() });
 }
 
 export async function POST(request: Request) {
-  const auth = requireAdmin(request, "transactions");
+  const auth = await requireAdmin(request, "transactions");
   if (!auth.ok) return auth.response;
   try {
     return NextResponse.json({ config: await createSettlementConfig(auth.admin, schema.parse(await request.json())) }, { status: 201 });

@@ -7,13 +7,13 @@ export const dynamic = "force-dynamic";
 const schema = z.object({ id: z.string(), status: z.enum(["approved", "rejected"]), reviewNote: z.string().max(500).optional() });
 
 export async function GET(request: Request) {
-  const auth = requireAdmin(request, "transactions");
+  const auth = await requireAdmin(request, "transactions");
   if (!auth.ok) return auth.response;
   return NextResponse.json({ cases: await listKycCases() });
 }
 
 export async function PATCH(request: Request) {
-  const auth = requireAdmin(request, "transactions");
+  const auth = await requireAdmin(request, "transactions");
   if (!auth.ok) return auth.response;
   try {
     return NextResponse.json({ case: await reviewKycCase(auth.admin, schema.parse(await request.json())) });

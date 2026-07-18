@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
@@ -14,7 +14,7 @@ export default function PostsDashboard() {
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch("/api/dashboard/summary?creatorId=c1", { signal: controller.signal })
+    fetch("/api/dashboard/summary", { signal: controller.signal })
       .then((response) => response.ok ? response.json() : Promise.reject(response))
       .then((body: { posts: Post[] }) => setApiPosts(body.posts))
       .catch(() => setApiPosts(null));

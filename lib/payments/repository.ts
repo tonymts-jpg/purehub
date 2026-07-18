@@ -84,12 +84,12 @@ export async function activatePlatformFeeConfig(admin: AdminContext, id: string)
 }
 
 export async function createOrder(input: {
-  buyerUserId?: string;
+  buyerUserId: string;
   kind: OrderKind;
   itemId: string;
   currency?: string;
 }) {
-  const buyerUserId = input.buyerUserId ?? "fan-demo";
+  const buyerUserId = input.buyerUserId;
   if (!canUseDatabase()) {
     const amount = input.kind === "subscription" ? 48 : 100;
     const snapshot = feeSnapshot(amount, PHASE4_FALLBACK_FEE_CONFIG.feeBps);
@@ -158,7 +158,7 @@ export async function getOrder(id: string) {
   });
 }
 
-export async function createPaymentIntent(input: { orderId: string; provider: PaymentProvider }) {
+export async function createPaymentIntent(input: { orderId: string; provider: PaymentProvider; buyerUserId: string }) {
   if (!canUseDatabase()) {
     return {
       id: `intent-${Date.now()}`,
@@ -171,6 +171,7 @@ export async function createPaymentIntent(input: { orderId: string; provider: Pa
 
   const order = await prisma.order.findUnique({ where: { id: input.orderId } });
   if (!order) throw new Error("Order not found.");
+  if (order.buyerUserId !== input.buyerUserId) throw new Error("Order does not belong to the signed-in user.");
   if (order.status !== "pending") throw new Error("Order is not pending.");
 
   const channel = await prisma.paymentChannelConfig.findUnique({ where: { provider: input.provider } });
@@ -297,17 +298,33 @@ async function fulfillPaidOrder(tx: Prisma.TransactionClient, orderId: string, p
     }
   });
 
+  if (order.creatorUserId !== order.buyerUserId) {
+    await tx.notification.upsert({
+      where: { eventKey: `${order.kind}:${order.id}` },
+      update: {},
+      create: {
+        recipientUserId: order.creatorUserId,
+        actorUserId: order.buyerUserId,
+        type: order.kind === "subscription" ? "subscription" : "purchase",
+        eventKey: `${order.kind}:${order.id}`,
+        orderId: order.id,
+        postId: order.kind === "post_unlock" ? order.itemId : null
+      }
+    });
+  }
+
   return tx.order.update({
     where: { id: order.id },
     data: { status: "fulfilled", fulfilledAt: now }
   });
 }
 
-export async function confirmPaymentIntent(id: string, payload?: unknown) {
+export async function confirmPaymentIntent(id: string, buyerUserId: string, payload?: unknown) {
   if (!canUseDatabase()) return { id, status: "succeeded", order: { status: "fulfilled" } };
 
   const intent = await prisma.paymentIntent.findUnique({ where: { id }, include: { order: true } });
   if (!intent) throw new Error("Payment intent not found.");
+  if (intent.order.buyerUserId !== buyerUserId) throw new Error("Payment intent does not belong to the signed-in user.");
   const channel = await prisma.paymentChannelConfig.findUnique({ where: { provider: intent.provider } });
   const adapter = resolvePaymentAdapter(intent.provider as PaymentProvider, channel?.config);
   if (!adapter.supportsManualConfirmation) throw new Error("Provider does not support manual confirmation.");

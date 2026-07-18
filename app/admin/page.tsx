@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Activity, BadgeDollarSign, ClipboardList, CreditCard, Layers3, ShieldCheck, Users } from "lucide-react";
 import { PageHeader } from "@/components/app-shell";
 import type { AdminRole } from "@/lib/platform-config";
@@ -23,12 +23,7 @@ type KycCase = { id: string; status: string; legalName: string; countryCode: str
 type ReconciliationRun = { id: string; status: string; paymentCount: number; ledgerCount: number; walletCount: number; discrepancyCount: number; startedAt: string };
 type AuditLog = { id: string; actorRole: string; action: string; targetType: string; targetId: string; createdAt: string };
 
-const defaultToken = "purehub-admin-demo-token";
-const roles: AdminRole[] = ["super_admin", "ops_admin", "content_admin", "finance_admin", "support_admin", "analyst"];
-
 export default function AdminPage() {
-  const [token, setToken] = useState(defaultToken);
-  const [role, setRole] = useState<AdminRole>("super_admin");
   const [overview, setOverview] = useState<Overview | null>(null);
   const [users, setUsers] = useState<UserRow[]>([]);
   const [applications, setApplications] = useState<ApplicationRow[]>([]);
@@ -42,9 +37,9 @@ export default function AdminPage() {
   const [kycCases, setKycCases] = useState<KycCase[]>([]);
   const [reconciliationRuns, setReconciliationRuns] = useState<ReconciliationRun[]>([]);
   const [logs, setLogs] = useState<AuditLog[]>([]);
-  const [message, setMessage] = useState("输入管理员 token 后加载站务数据。");
+  const [message, setMessage] = useState("正在验证管理员会话。");
 
-  const headers = useMemo(() => ({ "content-type": "application/json", "x-admin-token": token, "x-admin-role": role }), [role, token]);
+  const headers = { "content-type": "application/json" };
 
   async function adminFetch<T>(url: string, init?: RequestInit): Promise<T> {
     const response = await fetch(url, { ...init, headers: { ...headers, ...(init?.headers ?? {}) } });
@@ -83,22 +78,15 @@ export default function AdminPage() {
       setReconciliationRuns(reconciliationBody.runs);
       setLogs(auditBody.logs);
       setMessage("站务数据已同步。");
-      localStorage.setItem("purehub-admin-token", token);
-      localStorage.setItem("purehub-admin-role", role);
     } catch (error) {
       setMessage(`无法加载站务数据：${error instanceof Error ? error.message : "unknown error"}`);
     }
   }
 
   useEffect(() => {
-    setToken(localStorage.getItem("purehub-admin-token") ?? defaultToken);
-    setRole((localStorage.getItem("purehub-admin-role") as AdminRole | null) ?? "super_admin");
-  }, []);
-
-  useEffect(() => {
     void loadAdmin();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [role]);
+  }, []);
 
   async function review(id: string, status: "approved" | "rejected") {
     await adminFetch(`/api/admin/creator-applications/${id}/review`, { method: "POST", body: JSON.stringify({ status }) });
@@ -186,17 +174,9 @@ export default function AdminPage() {
 
   return <div className="mx-auto max-w-7xl px-4 py-8 sm:px-8">
     <PageHeader title="站务后台" subtitle="Phase 5：支付、平衡账本、结算、退款、KYC、对账与私有媒体运营。"/>
-    <section className="mb-6 grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--card)] p-4 md:grid-cols-[1fr_220px_140px]">
-      <label className="text-sm font-bold">ADMIN_ACCESS_TOKEN
-        <input value={token} onChange={(event) => setToken(event.target.value)} className="mt-2 w-full rounded-md border border-[var(--line)] bg-transparent px-3 py-2 font-mono text-sm"/>
-      </label>
-      <label className="text-sm font-bold">管理角色
-        <select value={role} onChange={(event) => setRole(event.target.value as AdminRole)} className="mt-2 w-full rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-sm">
-          {roles.map((item) => <option key={item} value={item}>{item}</option>)}
-        </select>
-      </label>
+    <section className="mb-6 flex flex-wrap items-center gap-3 border-y border-[var(--line)] py-4">
       <button onClick={loadAdmin} className="self-end rounded-md bg-[var(--text)] px-4 py-2 text-sm font-black text-[var(--bg)]">同步</button>
-      <p role="status" className="md:col-span-3 text-sm muted">{message}</p>
+      <p role="status" className="text-sm muted">{message}</p>
     </section>
 
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">

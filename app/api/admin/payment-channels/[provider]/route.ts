@@ -19,7 +19,7 @@ const schema = z.object({
 const providers = ["stripe", "paypal", "card", "alipay_intl", "wechatpay_intl", "usdt"] as const;
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ provider: string }> }) {
-  const auth = requireAdmin(request, "payments");
+  const auth = await requireAdmin(request, "payments");
   if (!auth.ok) return auth.response;
 
   const { provider } = await params;

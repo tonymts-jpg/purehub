@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const auth = requireAdmin(request, "transactions");
+  const auth = await requireAdmin(request, "transactions");
   if (!auth.ok) return auth.response;
   try {
     const { id } = await params;

@@ -23,13 +23,16 @@ for (const check of checks) {
   console.log(`ok ${check.name} ${url}`);
 }
 
+const meResponse = await fetch(new URL("/api/me", baseUrl));
+if (meResponse.status !== 401) throw new Error(`identity boundary expected 401, got ${meResponse.status}`);
+console.log("ok identity-boundary /api/me");
+
 const adminToken = process.env.SMOKE_ADMIN_TOKEN || process.env.ADMIN_ACCESS_TOKEN;
 if (adminToken) {
   const url = new URL("/api/admin/finance/fee-configs", baseUrl);
   const response = await fetch(url, {
     headers: {
-      "x-admin-token": adminToken,
-      "x-admin-role": "finance_admin"
+      "x-admin-token": adminToken
     }
   });
   if (!response.ok) {
@@ -42,7 +45,7 @@ if (adminToken) {
   console.log(`ok finance-fee-configs ${url}`);
   for (const path of ["/api/admin/finance/settlement-configs", "/api/admin/finance/reconciliation"]) {
     const phase5Url = new URL(path, baseUrl);
-    const phase5Response = await fetch(phase5Url, { headers: { "x-admin-token": adminToken, "x-admin-role": "finance_admin" } });
+    const phase5Response = await fetch(phase5Url, { headers: { "x-admin-token": adminToken } });
     if (!phase5Response.ok) throw new Error(`phase5 finance check failed: ${phase5Response.status} at ${phase5Url}`);
     console.log(`ok phase5-finance ${phase5Url}`);
   }

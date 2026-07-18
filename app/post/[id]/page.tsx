@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useState } from "react";
+import { use, useEffect, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { BadgeCheck, Bookmark, Heart, LockKeyhole, MessageCircle, ShoppingBag } from "lucide-react";
@@ -9,6 +9,9 @@ import { getAllPosts, useDemoStore } from "@/lib/store";
 import { Avatar } from "@/components/app-shell";
 import { MediaGallery } from "@/components/media-gallery";
 import { PaymentModal } from "@/components/payment-modal";
+import { authClient } from "@/lib/auth-client";
+
+type ApiComment={id:string;content:string;createdAt:string;author:{name:string;avatar:string}};
 
 export default function PostPage({params}:{params:Promise<{id:string}>}) {
   const {id}=use(params);
@@ -16,19 +19,29 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
   const post=getAllPosts(store.customPosts).find(item=>item.id===id);
   const [comment,setComment]=useState("");
   const [paying,setPaying]=useState(false);
+  const [serverAccess,setServerAccess]=useState(false);
+  const [comments,setComments]=useState<ApiComment[]>([]);
+  const {data:session}=authClient.useSession();
+  const demoMode=process.env.NEXT_PUBLIC_DEMO_MODE==="true";
+  useEffect(()=>{
+    fetch(`/api/posts/${id}`).then(response=>response.ok?response.json():null).then(body=>body?.post&&setServerAccess(Boolean(body.post.hasAccess))).catch(()=>undefined);
+    fetch(`/api/posts/${id}/comments`).then(response=>response.ok?response.json():null).then(body=>body?.comments&&setComments(body.comments)).catch(()=>undefined);
+  },[id]);
 
   if(!post)return <div className="p-20 text-center">作品不存在</div>;
 
   const creator=creators.find(item=>item.id===post.creatorId)!;
   const subscribed=store.subscriptions.some(item=>item.creatorId===creator.id);
-  const unlocked=post.visibility==="free"||subscribed||store.unlocked.includes(post.id);
+  const unlocked=post.visibility==="free"||serverAccess||(demoMode&&(subscribed||store.unlocked.includes(post.id)));
   const handleLocked=()=>{
     if(post.visibility==="members")window.location.href=`/membership/${creator.handle}`;
     else setPaying(true);
   };
   const confirmPurchase=async()=>{
+    if(!session?.user&&demoMode){store.unlock(post.id,post.price||0);setPaying(false);return}
+    if(!session?.user){window.location.assign(`/sign-in?callbackUrl=${encodeURIComponent(window.location.pathname)}`);return}
     try{
-      const orderResponse=await fetch("/api/payments/orders",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({kind:"post_unlock",itemId:post.id,buyerUserId:"fan-demo"})});
+      const orderResponse=await fetch("/api/payments/orders",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({kind:"post_unlock",itemId:post.id})});
       if(!orderResponse.ok)throw new Error("order failed");
       const {order}=await orderResponse.json();
       const intentResponse=await fetch("/api/payments/intents",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({orderId:order.id,provider:"card"})});
@@ -36,11 +49,20 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
       const {intent}=await intentResponse.json();
       const confirmResponse=await fetch(`/api/payments/intents/${intent.id}/confirm`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({source:"post_modal"})});
       if(!confirmResponse.ok)throw new Error("confirm failed");
+      setServerAccess(true);
     }catch{
+      if(!demoMode){store.showToast("支付暂时不可用，请稍后重试。");return}
       store.showToast("Server payment unavailable, using local demo unlock.");
     }
-    store.unlock(post.id,post.price||0);
+    if(demoMode)store.unlock(post.id,post.price||0);
     setPaying(false);
+  };
+  const publishComment=async()=>{
+    if(!comment.trim())return;
+    if(!session?.user){window.location.assign(`/sign-in?callbackUrl=${encodeURIComponent(window.location.pathname)}`);return}
+    const response=await fetch(`/api/posts/${post.id}/comments`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({content:comment.trim()})});
+    if(!response.ok){store.showToast("评论发布失败");return}
+    const body=await response.json(); setComments(current=>[body.comment,...current]); setComment("");
   };
 
   return <div className="mx-auto max-w-5xl px-4 py-8 sm:px-8">
@@ -89,9 +111,9 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
           <h2 className="text-xl font-black">评论</h2>
           <div className="mt-4 flex gap-3">
             <input value={comment} onChange={event=>setComment(event.target.value)} placeholder="说说你的感受…" className="glass min-w-0 flex-1 rounded-full px-5 py-3 outline-none"/>
-            <button onClick={()=>{if(comment.trim()){store.showToast("评论已发布");setComment("")}}} className="rounded-full bg-ink px-5 text-sm font-bold text-white dark:bg-white dark:text-ink">发布</button>
+            <button onClick={publishComment} className="rounded-full bg-ink px-5 text-sm font-bold text-white dark:bg-white dark:text-ink">发布</button>
           </div>
-          <div className="mt-5 space-y-4">{post.comments.map(item=><div key={item.id} className="flex gap-3"><Avatar text={item.user[0]} small/><div className="rounded-2xl bg-black/[.035] px-4 py-3 dark:bg-white/[.05]"><p className="text-sm font-bold">{item.user}<span className="ml-2 text-xs font-normal muted">{item.time}</span></p><p className="mt-1 text-sm muted">{item.text}</p></div></div>)}</div>
+          <div className="mt-5 space-y-4">{comments.map(item=><div key={item.id} className="flex gap-3"><Avatar text={item.author.avatar||item.author.name[0]} small/><div className="rounded-2xl bg-black/[.035] px-4 py-3 dark:bg-white/[.05]"><p className="text-sm font-bold">{item.author.name}<span className="ml-2 text-xs font-normal muted">{new Date(item.createdAt).toLocaleString()}</span></p><p className="mt-1 text-sm muted">{item.content}</p></div></div>)}</div>
         </section>
       </article>
     </div>

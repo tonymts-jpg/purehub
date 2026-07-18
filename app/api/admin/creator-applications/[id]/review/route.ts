@@ -9,7 +9,7 @@ export const runtime = "nodejs";
 const schema = z.object({ status: z.enum(["approved", "rejected"]) });
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const auth = requireAdmin(request, "applications");
+  const auth = await requireAdmin(request, "applications");
   if (!auth.ok) return auth.response;
 
   const { id } = await params;

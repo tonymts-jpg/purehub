@@ -12,14 +12,14 @@ const schema = z.object({
 });
 
 export async function GET(request: Request) {
-  const auth = requireAdmin(request, "transactions");
+  const auth = await requireAdmin(request, "transactions");
   if (!auth.ok) return auth.response;
   const configs = await listPlatformFeeConfigs();
   return NextResponse.json({ configs });
 }
 
 export async function POST(request: Request) {
-  const auth = requireAdmin(request, "transactions");
+  const auth = await requireAdmin(request, "transactions");
   if (!auth.ok) return auth.response;
   try {
     const config = await createPlatformFeeConfig(auth.admin, schema.parse(await request.json()));

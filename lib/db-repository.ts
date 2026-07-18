@@ -104,51 +104,82 @@ async function withFallback<T>(operation: () => Promise<T>, fallback: () => T): 
   }
 }
 
-export async function getFeed(filters?: { category?: ContentCategory }): Promise<Post[]> {
+async function addViewerState(items: Post[], viewerId?: string): Promise<Post[]> {
+  if (!viewerId || !items.length || !canUseDatabase()) return items;
+  const ids = items.map((post) => post.id);
+  const creatorIds = [...new Set(items.map((post) => post.creatorId))];
+  const [likes, bookmarks, entitlements, subscriptions] = await Promise.all([
+    prisma.postLike.findMany({ where: { userId: viewerId, postId: { in: ids } }, select: { postId: true } }),
+    prisma.bookmark.findMany({ where: { userId: viewerId, postId: { in: ids } }, select: { postId: true } }),
+    prisma.entitlement.findMany({ where: { userId: viewerId, postId: { in: ids } }, select: { postId: true } }),
+    prisma.subscription.findMany({ where: { userId: viewerId, creatorId: { in: creatorIds }, status: "active" }, select: { creatorId: true } })
+  ]);
+  const liked = new Set(likes.map((item) => item.postId));
+  const bookmarked = new Set(bookmarks.map((item) => item.postId));
+  const unlocked = new Set(entitlements.map((item) => item.postId));
+  const subscribed = new Set(subscriptions.map((item) => item.creatorId));
+  return items.map((post) => ({ ...post, liked: liked.has(post.id), bookmarked: bookmarked.has(post.id), hasAccess: post.visibility === "free" || unlocked.has(post.id) || subscribed.has(post.creatorId) }));
+}
+
+export async function getFeed(filters?: { category?: ContentCategory; cursor?: string; take?: number }, viewerId?: string): Promise<Post[]> {
   return withFallback(
     async () => {
       const result = await prisma.post.findMany({
         where: filters?.category ? { category: filters.category } : undefined,
         include: postInclude,
-        orderBy: { createdAt: "desc" }
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        ...(filters?.take ? { take: filters.take + 1 } : {}),
+        ...(filters?.cursor ? { cursor: { id: filters.cursor }, skip: 1 } : {})
       });
-      return result.map(mapPost);
+      return addViewerState(result.map(mapPost), viewerId);
     },
-    () => filters?.category ? posts.filter((post) => post.category === filters.category) : posts
+    () => {
+      const filtered = filters?.category ? posts.filter((post) => post.category === filters.category) : posts;
+      const start = filters?.cursor ? Math.max(0, filtered.findIndex((post) => post.id === filters.cursor) + 1) : 0;
+      return filters?.take ? filtered.slice(start, start + filters.take + 1) : filtered.slice(start);
+    }
   );
 }
 
-export async function getPost(id: string): Promise<Post | null> {
+export async function getPost(id: string, viewerId?: string): Promise<Post | null> {
   return withFallback(
     async () => {
       const post = await prisma.post.findUnique({ where: { id }, include: postInclude });
-      return post ? mapPost(post) : null;
+      return post ? (await addViewerState([mapPost(post)], viewerId))[0] : null;
     },
     () => posts.find((post) => post.id === id) ?? null
   );
 }
 
-export async function getCreator(handle: string): Promise<CreatorProfile | null> {
+export async function getCreator(handle: string, viewerId?: string): Promise<CreatorProfile | null> {
   return withFallback(
     async () => {
       const creator = await prisma.user.findUnique({ where: { handle }, include: creatorInclude });
-      return creator ? mapCreator(creator) : null;
+      const mapped = creator ? mapCreator(creator) : null;
+      if (!mapped || !viewerId) return mapped;
+      return { ...mapped, following: Boolean(await prisma.follow.findUnique({ where: { userId_creatorId: { userId: viewerId, creatorId: mapped.id } } })) };
     },
     () => creators.find((creator) => creator.handle === handle) ?? null
   );
 }
 
-export async function getCreatorPosts(creatorId: string): Promise<Post[]> {
+export async function getCreatorPosts(creatorId: string, viewerId?: string, pagination?: { cursor?: string; take?: number }): Promise<Post[]> {
   return withFallback(
     async () => {
       const result = await prisma.post.findMany({
         where: { creatorId },
         include: postInclude,
-        orderBy: { createdAt: "desc" }
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        ...(pagination?.take ? { take: pagination.take + 1 } : {}),
+        ...(pagination?.cursor ? { cursor: { id: pagination.cursor }, skip: 1 } : {})
       });
-      return result.map(mapPost);
+      return addViewerState(result.map(mapPost), viewerId);
     },
-    () => posts.filter((post) => post.creatorId === creatorId)
+    () => {
+      const filtered = posts.filter((post) => post.creatorId === creatorId);
+      const start = pagination?.cursor ? Math.max(0, filtered.findIndex((post) => post.id === pagination.cursor) + 1) : 0;
+      return pagination?.take ? filtered.slice(start, start + pagination.take + 1) : filtered.slice(start);
+    }
   );
 }
 
@@ -306,6 +337,7 @@ export async function createCreatorApplication(input: {
       id: userId,
       name: "Pure 粉丝",
       handle: fanHandle,
+      email: `${fanHandle}@staging.purehub.local`,
       avatar: "P",
       role: "fan",
       creatorStatus: "pending"

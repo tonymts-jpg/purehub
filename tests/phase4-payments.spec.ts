@@ -1,13 +1,9 @@
 import { expect, test, type APIRequestContext } from "@playwright/test";
+import { signInCreator, signInFan, signInSupport } from "./auth-helpers";
 
 const adminHeaders = {
   "x-admin-token": process.env.ADMIN_ACCESS_TOKEN ?? "purehub-admin-demo-token",
   "x-admin-role": "super_admin"
-};
-
-const supportHeaders = {
-  ...adminHeaders,
-  "x-admin-role": "support_admin"
 };
 
 async function hasDatabase(request: APIRequestContext) {
@@ -22,9 +18,9 @@ async function hasDatabase(request: APIRequestContext) {
 }
 
 async function createPaidPost(request: APIRequestContext, price: number) {
+  await signInCreator(request);
   const post = await request.post("/api/posts", {
     data: {
-      creatorId: "c1",
       title: `Phase 4 paid post ${Date.now()}`,
       excerpt: "Phase 4 payment test post.",
       content: "This post is created by the Phase 4 payment test.",
@@ -55,8 +51,9 @@ async function activateFee(request: APIRequestContext, feeBps: number) {
 }
 
 async function payOrder(request: APIRequestContext, itemId: string, kind: "post_unlock" | "subscription" = "post_unlock") {
+  await signInFan(request);
   const order = await request.post("/api/payments/orders", {
-    data: { buyerUserId: "fan-demo", kind, itemId }
+    data: { kind, itemId }
   });
   expect(order.ok()).toBeTruthy();
   const orderBody = await order.json();
@@ -81,8 +78,9 @@ test("phase 4 payment channel must be enabled before creating an intent", async 
   test.skip(!(await hasDatabase(request)), "Phase 4 payment APIs require the seeded database.");
 
   const post = await createPaidPost(request, 100);
+  await signInFan(request);
   const order = await request.post("/api/payments/orders", {
-    data: { buyerUserId: "fan-demo", kind: "post_unlock", itemId: post.id }
+    data: { kind: "post_unlock", itemId: post.id }
   });
   expect(order.ok()).toBeTruthy();
   const orderBody = await order.json();
@@ -140,8 +138,9 @@ test("phase 4 manual confirmation is idempotent and subscriptions fulfill", asyn
   });
   await activateFee(request, 1000);
 
+  await signInFan(request);
   const order = await request.post("/api/payments/orders", {
-    data: { buyerUserId: "fan-demo", kind: "subscription", itemId: "p12" }
+    data: { kind: "subscription", itemId: "p12" }
   });
   expect(order.ok()).toBeTruthy();
   const orderBody = await order.json();
@@ -164,14 +163,16 @@ test("phase 4 manual confirmation is idempotent and subscriptions fulfill", asyn
 test("phase 4 finance admin can review payouts and support admin cannot", async ({ request }) => {
   test.skip(!(await hasDatabase(request)), "Phase 4 payout APIs require the seeded database.");
 
+  await signInCreator(request);
   const payout = await request.post("/api/payout-requests", {
-    data: { userId: "c1", amount: 100, channel: "alipay" }
+    data: { amount: 100, channel: "alipay" }
   });
   expect(payout.ok()).toBeTruthy();
   const payoutBody = await payout.json();
 
+  await signInSupport(request);
   const forbidden = await request.patch("/api/admin/finance/payout-requests", {
-    headers: supportHeaders,
+    headers: { "x-admin-role": "super_admin" },
     data: { id: payoutBody.payout.id, status: "approved" }
   });
   expect(forbidden.status()).toBe(403);

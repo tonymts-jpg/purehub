@@ -5,12 +5,20 @@ services:
       dockerfile: Dockerfile
       args:
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
+        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://127.0.0.1}
+        NEXT_PUBLIC_DEMO_MODE: ${NEXT_PUBLIC_DEMO_MODE:-false}
     image: ${PUREHUB_IMAGE:-purehub-web:local}
     restart: unless-stopped
     environment:
       APP_ENV: ${APP_ENV:-staging}
-      PUREHUB_PHASE: ${PUREHUB_PHASE:-phase-5}
+      PUREHUB_PHASE: ${PUREHUB_PHASE:-phase-6}
       NEXT_PUBLIC_APP_VERSION: ${NEXT_PUBLIC_APP_VERSION:-0.1.0}
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://127.0.0.1}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://127.0.0.1}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET is required}
+      BETTER_AUTH_SECURE_COOKIES: ${BETTER_AUTH_SECURE_COOKIES:-false}
+      DEMO_ACCOUNT_PASSWORD: ${DEMO_ACCOUNT_PASSWORD:?DEMO_ACCOUNT_PASSWORD is required}
+      SERVICE_ADMIN_USER_ID: ${SERVICE_ADMIN_USER_ID:-admin-demo}
       ADMIN_ACCESS_TOKEN: ${ADMIN_ACCESS_TOKEN:?ADMIN_ACCESS_TOKEN is required}
       WORKER_ACCESS_TOKEN: ${WORKER_ACCESS_TOKEN:?WORKER_ACCESS_TOKEN is required}
       OBJECT_STORAGE_ENDPOINT: http://minio:9000
@@ -46,7 +54,7 @@ services:
     command: ["node", "scripts/worker.mjs"]
     environment:
       APP_ENV: ${APP_ENV:-staging}
-      PUREHUB_PHASE: ${PUREHUB_PHASE:-phase-5}
+      PUREHUB_PHASE: ${PUREHUB_PHASE:-phase-6}
       WORKER_ACCESS_TOKEN: ${WORKER_ACCESS_TOKEN:?WORKER_ACCESS_TOKEN is required}
       WORKER_HEALTH_PORT: 4001
       DB_HOST: postgres

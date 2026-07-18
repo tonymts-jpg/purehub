@@ -25,9 +25,10 @@ test("core pages are reachable", async ({ page }) => {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await expect(page.locator("article").first()).toBeVisible();
   await page.goto("/explore", { waitUntil: "domcontentloaded" });
-  await expect(page.locator("main")).toBeVisible();
+  await expect(page.locator("main").first()).toBeVisible();
   await page.goto("/dashboard", { waitUntil: "domcontentloaded" });
-  await expect(page.locator("main")).toBeVisible();
+  await expect(page).toHaveURL(/\/sign-in\?callbackUrl=%2Fdashboard/);
+  await expect(page.locator("main").first()).toBeVisible();
 });
 
 test("demo state can be reset", async ({ page }) => {

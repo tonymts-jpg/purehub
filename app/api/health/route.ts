@@ -45,6 +45,7 @@ export async function GET() {
       version: process.env.NEXT_PUBLIC_APP_VERSION ?? "0.1.0",
       locales: SUPPORTED_LOCALES,
       paymentProviders: Object.keys(PAYMENT_PROVIDERS),
+      capabilities: { databaseSessions: true, credentialAuth: true, socialInteractions: true, notifications: true },
       dependencies,
       timestamp: new Date().toISOString()
     },

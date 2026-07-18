@@ -1,11 +1,10 @@
 import { expect, test, type APIRequestContext, type TestInfo } from "@playwright/test";
+import { signInCreator, signInFan, signInSupport } from "./auth-helpers";
 
 const adminHeaders = {
   "x-admin-token": process.env.ADMIN_ACCESS_TOKEN ?? "purehub-admin-demo-token",
   "x-admin-role": "finance_admin"
 };
-const supportHeaders = { ...adminHeaders, "x-admin-role": "support_admin" };
-
 async function requireDatabase(request: APIRequestContext, testInfo: TestInfo) {
   test.skip(testInfo.project.name === "mobile", "Phase 5 finance mutations run once against the shared staging database.");
   const health = await request.get("/api/health");
@@ -29,9 +28,9 @@ async function activateSettlement(request: APIRequestContext, holdDays: number) 
 }
 
 async function createPost(request: APIRequestContext, mediaAssetIds?: string[]) {
+  await signInCreator(request);
   const response = await request.post("/api/posts", {
     data: {
-      creatorId: "c1",
       title: `Phase 5 paid post ${Date.now()} ${Math.random()}`,
       excerpt: "Phase 5 commercial readiness test post.",
       content: "This paid post verifies ledger, refunds, settlement, and private media access.",
@@ -49,7 +48,8 @@ async function createPost(request: APIRequestContext, mediaAssetIds?: string[]) 
 
 async function pay(request: APIRequestContext, itemId: string) {
   await enableCard(request);
-  const created = await request.post("/api/payments/orders", { data: { buyerUserId: "fan-demo", kind: "post_unlock", itemId } });
+  await signInFan(request);
+  const created = await request.post("/api/payments/orders", { data: { kind: "post_unlock", itemId } });
   expect(created.ok()).toBeTruthy();
   const order = (await created.json()).order;
   const intentResponse = await request.post("/api/payments/intents", { data: { orderId: order.id, provider: "card" } });
@@ -117,39 +117,44 @@ test("phase 5 full refund is idempotent and revokes access", async ({ request },
 
 test("phase 5 payout moves available through reserved to clearing", async ({ request }, testInfo) => {
   await requireDatabase(request, testInfo);
-  const before = await request.get("/api/dashboard/summary?creatorId=c1");
+  await signInCreator(request);
+  const before = await request.get("/api/dashboard/summary");
   const beforeWallet = await before.json();
-  const created = await request.post("/api/payout-requests", { data: { userId: "c1", amount: 100, channel: "alipay" } });
+  const created = await request.post("/api/payout-requests", { data: { amount: 100, channel: "alipay" } });
   expect(created.ok()).toBeTruthy();
   const payout = (await created.json()).payout;
-  const reserved = await (await request.get("/api/dashboard/summary?creatorId=c1")).json();
+  const reserved = await (await request.get("/api/dashboard/summary")).json();
   expect(reserved.balance).toBe(beforeWallet.balance - 100);
   expect(reserved.reserved).toBe(beforeWallet.reserved + 100);
   expect((await request.patch("/api/admin/finance/payout-requests", { headers: adminHeaders, data: { id: payout.id, status: "approved" } })).ok()).toBeTruthy();
   expect((await request.patch("/api/admin/finance/payout-requests", { headers: adminHeaders, data: { id: payout.id, status: "paid" } })).ok()).toBeTruthy();
-  const paid = await (await request.get("/api/dashboard/summary?creatorId=c1")).json();
+  const paid = await (await request.get("/api/dashboard/summary")).json();
   expect(paid.reserved).toBe(beforeWallet.reserved);
 });
 
 test("phase 5 KYC, private media access, and reconciliation enforce finance boundaries", async ({ request }, testInfo) => {
   await requireDatabase(request, testInfo);
-  const submitted = await request.post("/api/creator/kyc", { data: { userId: "c2", legalName: "Phase Five Creator", countryCode: "CN", documentKeys: ["kyc/c2/phase5-test.enc"] } });
+  await signInCreator(request, "chenmo");
+  const submitted = await request.post("/api/creator/kyc", { data: { legalName: "Phase Five Creator", countryCode: "CN", documentKeys: ["kyc/c2/phase5-test.enc"] } });
   expect(submitted.ok()).toBeTruthy();
-  const forbidden = await request.get("/api/admin/finance/kyc-cases", { headers: supportHeaders });
+  await signInSupport(request);
+  const forbidden = await request.get("/api/admin/finance/kyc-cases", { headers: { "x-admin-role": "super_admin" } });
   expect(forbidden.status()).toBe(403);
   const cases = await request.get("/api/admin/finance/kyc-cases", { headers: adminHeaders });
   const kyc = (await cases.json()).cases.find((item: { userId: string }) => item.userId === "c2");
   expect((await request.patch("/api/admin/finance/kyc-cases", { headers: adminHeaders, data: { id: kyc.id, status: "approved" } })).ok()).toBeTruthy();
 
-  const prepared = await request.post("/api/uploads/presign", { data: { userId: "c1", fileName: "phase5-private.jpg", mimeType: "image/jpeg", sizeBytes: 100, kind: "image", visibility: "purchase" } });
+  await signInCreator(request);
+  const prepared = await request.post("/api/uploads/presign", { data: { fileName: "phase5-private.jpg", mimeType: "image/jpeg", sizeBytes: 100, kind: "image", visibility: "purchase" } });
   expect(prepared.ok()).toBeTruthy();
   const upload = await prepared.json();
-  expect((await request.post("/api/uploads/complete", { data: { assetId: upload.assetId, userId: "c1", simulate: true, width: 100, height: 100 } })).ok()).toBeTruthy();
+  expect((await request.post("/api/uploads/complete", { data: { assetId: upload.assetId, simulate: true, width: 100, height: 100 } })).ok()).toBeTruthy();
   const post = await createPost(request, [upload.assetId]);
+  await signInFan(request);
   expect((await request.get(`/api/media/${upload.assetId}/access`)).status()).toBe(403);
   await activateSettlement(request, 7);
   await pay(request, post.id);
-  expect((await request.get(`/api/media/${upload.assetId}/access?userId=fan-demo`)).ok()).toBeTruthy();
+  expect((await request.get(`/api/media/${upload.assetId}/access`)).ok()).toBeTruthy();
 
   const reconciliation = await request.post("/api/admin/finance/reconciliation", { headers: adminHeaders });
   expect(reconciliation.ok()).toBeTruthy();

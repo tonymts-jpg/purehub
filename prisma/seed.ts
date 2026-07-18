@@ -1,5 +1,6 @@
 ﻿import { Prisma, PrismaClient } from "@prisma/client";
 import { creators, posts, transactions } from "../lib/data";
+import { hashPassword } from "better-auth/crypto";
 
 const prisma = new PrismaClient();
 const json = (value: unknown) => value as Prisma.InputJsonValue;
@@ -12,6 +13,12 @@ const levelForFollowers = (followers: number) => {
 
 async function main() {
   await prisma.$transaction([
+    prisma.notification.deleteMany(),
+    prisma.postComment.deleteMany(),
+    prisma.postLike.deleteMany(),
+    prisma.session.deleteMany(),
+    prisma.account.deleteMany(),
+    prisma.verification.deleteMany(),
     prisma.ledgerEntry.deleteMany(),
     prisma.ledgerTransaction.deleteMany(),
     prisma.ledgerAccount.deleteMany(),
@@ -185,6 +192,7 @@ async function main() {
       id: "fan-demo",
       name: "Pure 粉丝",
       handle: "pure-fan",
+      email: "fan@purehub.local",
       avatar: "P",
       role: "fan",
       creatorStatus: "none",
@@ -197,6 +205,7 @@ async function main() {
       id: "admin-demo",
       name: "PureHub Admin",
       handle: "purehub-admin",
+      email: "admin@purehub.local",
       avatar: "A",
       role: "admin",
       creatorStatus: "none",
@@ -206,6 +215,20 @@ async function main() {
           status: "active"
         }
       },
+      walletBalance: { create: { available: 0, pending: 0, currency: "CNY" } }
+    }
+  });
+
+  await prisma.user.create({
+    data: {
+      id: "support-demo",
+      name: "PureHub Support",
+      handle: "purehub-support",
+      email: "support@purehub.local",
+      avatar: "S",
+      role: "admin",
+      creatorStatus: "none",
+      adminAccounts: { create: { role: "support_admin", status: "active" } },
       walletBalance: { create: { available: 0, pending: 0, currency: "CNY" } }
     }
   });
@@ -227,6 +250,7 @@ async function main() {
         id: creator.id,
         name: creator.name,
         handle: creator.handle,
+        email: `${creator.handle}@purehub.local`,
         avatar: creator.avatar,
         role: "creator",
         creatorStatus: "approved",
@@ -257,6 +281,19 @@ async function main() {
       }
     });
   }
+
+  const demoPassword = process.env.DEMO_ACCOUNT_PASSWORD ?? (process.env.NODE_ENV === "production" ? "" : "PureHubDemo!2026");
+  if (!demoPassword) throw new Error("DEMO_ACCOUNT_PASSWORD is required when seeding production-like environments.");
+  const password = await hashPassword(demoPassword);
+  await prisma.account.createMany({
+    data: ["fan-demo", "admin-demo", "support-demo", ...creators.map((creator) => creator.id)].map((userId) => ({
+      id: `credential-${userId}`,
+      accountId: userId,
+      providerId: "credential",
+      userId,
+      password
+    }))
+  });
 
   await prisma.kycCase.create({
     data: {

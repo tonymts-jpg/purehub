@@ -11,7 +11,7 @@ export interface MembershipPlan {
 }
 export interface CreatorProfile extends User {
   bio: string; category: ContentCategory; followers: number; members: number; cover: string;
-  verified: boolean; plans: MembershipPlan[];
+  verified: boolean; plans: MembershipPlan[]; following?: boolean;
 }
 export interface Comment { id: string; user: string; text: string; time: string; }
 export interface MediaAsset {
@@ -21,6 +21,7 @@ export interface Post {
   id: string; creatorId: string; title: string; excerpt: string; content: string;
   cover: string; category: ContentCategory; tags: string[]; visibility: Visibility;
   price?: number; likes: number; comments: Comment[]; createdAt: string; media: MediaAsset[];
+  liked?: boolean; bookmarked?: boolean; hasAccess?: boolean;
 }
 export interface Product { id: string; creatorId: string; title: string; price: number; cover: string; }
 export interface Subscription { id: string; creatorId: string; planId: string; startedAt: string; }
