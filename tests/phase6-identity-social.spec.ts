@@ -1,5 +1,5 @@
 import { expect, test, type APIRequestContext, type TestInfo } from "@playwright/test";
-import { hasDatabase, signInCreator, signInFan, signInSupport } from "./auth-helpers";
+import { authHeaders, hasDatabase, signInCreator, signInFan, signInSupport } from "./auth-helpers";
 
 const password = process.env.DEMO_ACCOUNT_PASSWORD ?? "PureHubDemo!2026";
 
@@ -26,6 +26,7 @@ test("phase 6 credential auth creates secure database sessions", async ({ reques
   const email = `phase6-${suffix}@purehub.local`;
   const handle = `phase6-${suffix}`.slice(0, 30);
   const registered = await request.post("/api/auth/sign-up/email", {
+    headers: authHeaders,
     data: { name: "Phase Six Fan", email, password, handle }
   });
   expect(registered.ok(), await registered.text()).toBeTruthy();
@@ -41,14 +42,15 @@ test("phase 6 credential auth creates secure database sessions", async ({ reques
   expect(meBody.user.role).toBe("fan");
 
   const duplicate = await request.post("/api/auth/sign-up/email", {
+    headers: authHeaders,
     data: { name: "Duplicate", email, password, handle: `${handle}-x`.slice(0, 30) }
   });
   expect(duplicate.ok()).toBeFalsy();
 
-  expect((await request.post("/api/auth/sign-out")).ok()).toBeTruthy();
+  expect((await request.post("/api/auth/sign-out", { headers: authHeaders })).ok()).toBeTruthy();
   expect((await request.get("/api/me")).status()).toBe(401);
-  expect((await request.post("/api/auth/sign-in/email", { data: { email, password: "DefinitelyWrong!2026" } })).status()).toBe(401);
-  expect((await request.post("/api/auth/sign-in/email", { data: { email, password } })).ok()).toBeTruthy();
+  expect((await request.post("/api/auth/sign-in/email", { headers: authHeaders, data: { email, password: "DefinitelyWrong!2026" } })).status()).toBe(401);
+  expect((await request.post("/api/auth/sign-in/email", { headers: authHeaders, data: { email, password } })).ok()).toBeTruthy();
 });
 
 test("phase 6 server authorization rejects spoofed identities and role headers", async ({ request }, testInfo) => {

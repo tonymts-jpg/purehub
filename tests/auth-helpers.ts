@@ -1,9 +1,12 @@
 import { expect, type APIRequestContext } from "@playwright/test";
 
 const password = process.env.DEMO_ACCOUNT_PASSWORD ?? "PureHubDemo!2026";
+export const authHeaders = {
+  origin: new URL(process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3001").origin
+};
 
 export async function signIn(request: APIRequestContext, email: string) {
-  const response = await request.post("/api/auth/sign-in/email", { data: { email, password } });
+  const response = await request.post("/api/auth/sign-in/email", { headers: authHeaders, data: { email, password } });
   expect(response.ok(), await response.text()).toBeTruthy();
 }
 

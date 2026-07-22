@@ -2,6 +2,7 @@
 import path from "node:path";
 import { expect, test } from "@playwright/test";
 import { CONTENT_CATEGORIES } from "../lib/categories";
+import { hasDatabase, signInFan } from "./auth-helpers";
 
 test("default gallery assets are complete", async () => {
   const seen = new Set<string>();
@@ -69,6 +70,14 @@ test("member-only post previews lead fans to membership unlock", async ({ page }
 });
 
 test("single purchase unlocks full post gallery after payment", async ({ page }) => {
+  if (await hasDatabase(page.request)) {
+    await signInFan(page.request);
+    const channel = await page.request.patch("/api/admin/payment-channels/card", {
+      headers: { "x-admin-token": process.env.ADMIN_ACCESS_TOKEN ?? "purehub-admin-demo-token" },
+      data: { enabled: true, mode: "test", statusNote: "phase6_ui_purchase", config: { adapter: "manual_confirm" } }
+    });
+    expect(channel.ok(), await channel.text()).toBeTruthy();
+  }
   await page.goto("/post/post-4");
   const gallery = page.getByTestId("post-detail-gallery");
   await expect(gallery.locator("button")).toHaveCount(8);
