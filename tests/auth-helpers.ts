@@ -5,8 +5,23 @@ export const authHeaders = {
   origin: new URL(process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3001").origin
 };
 
+export async function postSignIn(request: APIRequestContext, email: string, credentialPassword: string) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await request.post("/api/auth/sign-in/email", {
+      headers: authHeaders,
+      data: { email, password: credentialPassword }
+    });
+    if (response.status() !== 429) return response;
+
+    const retryAfter = Number(response.headers()["x-retry-after"] ?? "10");
+    await new Promise((resolve) => setTimeout(resolve, (Math.max(1, retryAfter) + 1) * 1000));
+  }
+
+  throw new Error(`Sign in remained rate limited for ${email} after 3 attempts.`);
+}
+
 export async function signIn(request: APIRequestContext, email: string) {
-  const response = await request.post("/api/auth/sign-in/email", { headers: authHeaders, data: { email, password } });
+  const response = await postSignIn(request, email, password);
   expect(response.ok(), await response.text()).toBeTruthy();
 }
 

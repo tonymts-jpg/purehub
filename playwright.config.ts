@@ -5,7 +5,7 @@ const baseURL = deployedBaseURL ?? "http://localhost:3001";
 
 export default defineConfig({
   testDir:"./tests",
-  workers: 2,
+  workers: deployedBaseURL ? 1 : 2,
   use:{baseURL,trace:"on-first-retry"},
   webServer:deployedBaseURL ? undefined : {
     command:"npm run dev -- -p 3001",

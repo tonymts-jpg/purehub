@@ -1,5 +1,5 @@
 import { expect, test, type APIRequestContext, type TestInfo } from "@playwright/test";
-import { authHeaders, hasDatabase, signInCreator, signInFan, signInSupport } from "./auth-helpers";
+import { authHeaders, hasDatabase, postSignIn, signInCreator, signInFan, signInSupport } from "./auth-helpers";
 
 const password = process.env.DEMO_ACCOUNT_PASSWORD ?? "PureHubDemo!2026";
 
@@ -54,8 +54,8 @@ test("phase 6 credential auth creates secure database sessions", async ({ reques
     `sign-out failed: status=${signOut.status()} body=${signOutBody} retry-after=${signOut.headers()["x-retry-after"] ?? "none"} set-cookie=${signOut.headers()["set-cookie"] ?? "none"}`
   ).toBeTruthy();
   expect((await request.get("/api/me")).status()).toBe(401);
-  expect((await request.post("/api/auth/sign-in/email", { headers: authHeaders, data: { email, password: "DefinitelyWrong!2026" } })).status()).toBe(401);
-  expect((await request.post("/api/auth/sign-in/email", { headers: authHeaders, data: { email, password } })).ok()).toBeTruthy();
+  expect((await postSignIn(request, email, "DefinitelyWrong!2026")).status()).toBe(401);
+  expect((await postSignIn(request, email, password)).ok()).toBeTruthy();
 });
 
 test("phase 6 server authorization rejects spoofed identities and role headers", async ({ request }, testInfo) => {
