@@ -47,7 +47,7 @@ test("phase 6 credential auth creates secure database sessions", async ({ reques
   });
   expect(duplicate.ok()).toBeFalsy();
 
-  const signOut = await request.post("/api/auth/sign-out", { headers: authHeaders });
+  const signOut = await request.post("/api/auth/sign-out", { headers: authHeaders, data: {} });
   const signOutBody = await signOut.text();
   expect(
     signOut.ok(),
