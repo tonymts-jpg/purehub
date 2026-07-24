@@ -8,7 +8,6 @@ import {
   requireEmptyChannelMutation,
   requireEmptyChannelQuery
 } from "@/lib/channels/http";
-import { ChannelRepositoryError } from "@/lib/channels/repository";
 import { enforceSameOrigin } from "@/lib/session";
 import { requestSearchReindex } from "@/lib/search/repository";
 
@@ -29,9 +28,6 @@ export async function POST(request: Request) {
     const result = await requestSearchReindex(auth.admin);
     return NextResponse.json(result, { status: result.enqueued ? 202 : 200 });
   } catch (error) {
-    if (error instanceof ChannelRepositoryError) {
-      return NextResponse.json({ error: error.message }, { status: error.status });
-    }
     if (error instanceof TypeError) {
       return NextResponse.json({ error: error.message }, { status: 400 });
     }

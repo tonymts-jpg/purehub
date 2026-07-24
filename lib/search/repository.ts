@@ -4,7 +4,6 @@ import type {
   SearchResult
 } from "@/lib/channels/types";
 import type { AdminContext } from "@/lib/admin-auth";
-import { retrySerializableOperation } from "@/lib/channels/repository";
 import { prisma } from "@/lib/prisma";
 import {
   SEARCH_ENTITY_TYPES,
@@ -424,7 +423,7 @@ export async function requestSearchReindex(admin: AdminContext): Promise<{
   progress: { stage: string; cursor: string | null };
   enqueued: boolean;
 }> {
-  return retrySerializableOperation(() => prisma.$transaction(async (tx) => {
+  return prisma.$transaction(async (tx) => {
     await tx.$queryRaw`
       SELECT 1 AS "locked"
       FROM pg_advisory_xact_lock(hashtext('purehub:phase7:search-reindex'))
@@ -484,7 +483,7 @@ export async function requestSearchReindex(admin: AdminContext): Promise<{
       progress: { stage: job.entityType ?? "post-source", cursor: job.entityId },
       enqueued: true
     };
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
 }
 
 export async function searchEntities(

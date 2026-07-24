@@ -52,8 +52,11 @@ import {
   deleteIndexJobKey,
   indexEntityJobKey,
   materializeChannelJobKey,
+  phase7JobLeaseWhere,
   phase7JobBackoffSeconds,
-  reindexAllJobKey
+  phase7NextLeaseAvailableAt,
+  reindexAllJobKey,
+  settlePhase7JobLease
 } from "../lib/channels/jobs";
 import { prisma } from "../lib/prisma";
 import { reviewApplicationFromAdmin } from "../lib/admin-repository";
@@ -2328,6 +2331,29 @@ test("phase 7 search producer keys and bounded reindex stages are deterministic"
   expect(advanceSearchReindexStage("creator-document")).toBe("channel-document");
   expect(advanceSearchReindexStage("channel-document")).toBe("done");
   expect(() => advanceSearchReindexStage("all-at-once")).toThrow(TypeError);
+
+  const lockedAt = new Date("2026-07-24T12:34:56.000Z");
+  expect(phase7JobLeaseWhere({
+    id: "job-1",
+    status: "processing",
+    lockedAt,
+    attempts: 3
+  })).toEqual({
+    id: "job-1",
+    status: "processing",
+    lockedAt,
+    attempts: 3
+  });
+  expect(() => phase7JobLeaseWhere({
+    id: "job-1",
+    status: "processing",
+    lockedAt: null,
+    attempts: 3
+  })).toThrow(TypeError);
+  expect(phase7NextLeaseAvailableAt(
+    lockedAt,
+    new Date(lockedAt)
+  ).getTime()).toBe(lockedAt.getTime() + 1);
 });
 
 test("phase 7 search API rejects malformed input and forged identity without database access", async ({ request }) => {
@@ -2412,9 +2438,12 @@ test("phase 7 PostgreSQL search ranks safe entities, paginates, reindexes, and e
       firstReindex.json(),
       secondReindex.json()
     ]);
+    reindexJobs.push(...new Set([
+      firstCandidate.job?.id,
+      secondCandidate.job?.id
+    ].filter((id): id is string => typeof id === "string")));
     const firstReindexBody = firstCandidate.enqueued ? firstCandidate : secondCandidate;
     const secondReindexBody = firstCandidate.enqueued ? secondCandidate : firstCandidate;
-    reindexJobs.push(firstReindexBody.job.id);
     expect(secondReindexBody.job.id).toBe(firstReindexBody.job.id);
     expect(secondReindexBody.enqueued).toBeFalsy();
     expect(firstReindexBody.progress).toEqual({ stage: "post-source", cursor: null });
@@ -2683,6 +2712,7 @@ test("phase 7 search producers, leases, retries, and interleavings converge dura
   const recentLeaseKey = `index:channel:${channelId}:recent-${nonce}`;
   const retryKey = `index:post:missing-${nonce}:2026-07-24T00:00:00.000Z`;
   const reindexKey = `reindex-all:interleave-${nonce}`;
+  const maxAttemptKey = `index:channel:${channelId}:max-attempt-${nonce}`;
   const createdPostIds: string[] = [];
   const testStartedAt = new Date();
   let databaseReady = false;
@@ -2903,6 +2933,81 @@ test("phase 7 search producers, leases, retries, and interleavings converge dura
       select: { status: true, attempts: true }
     })).toEqual({ status: "processing", attempts: 1 });
 
+    const staleLockedAt = new Date("2026-07-24T00:00:00.000Z");
+    const reclaimedLockedAt = new Date("2026-07-24T00:10:00.000Z");
+    const staleOutcomes = [
+      { kind: "completed" as const },
+      {
+        kind: "progress" as const,
+        stage: "creator-source",
+        cursor: "c1"
+      },
+      { kind: "failed" as const }
+    ];
+    for (const [index, outcome] of staleOutcomes.entries()) {
+      const row = await prisma.channelJob.create({
+        data: {
+          idempotencyKey: `index:channel:${channelId}:stale-${index}-${nonce}`,
+          kind: "index_entity",
+          entityType: "channel",
+          entityId: channelId,
+          status: "processing",
+          attempts: 2,
+          lockedAt: staleLockedAt
+        }
+      });
+      const staleLease = {
+        id: row.id,
+        status: row.status,
+        lockedAt: row.lockedAt,
+        attempts: row.attempts
+      };
+      await prisma.channelJob.update({
+        where: { id: row.id },
+        data: { attempts: 3, lockedAt: reclaimedLockedAt }
+      });
+      expect(await settlePhase7JobLease(staleLease, outcome)).toBeFalsy();
+      expect(await prisma.channelJob.findUniqueOrThrow({
+        where: { id: row.id },
+        select: {
+          status: true,
+          attempts: true,
+          lockedAt: true,
+          entityType: true,
+          entityId: true
+        }
+      })).toEqual({
+        status: "processing",
+        attempts: 3,
+        lockedAt: reclaimedLockedAt,
+        entityType: "channel",
+        entityId: channelId
+      });
+    }
+
+    const maxAttempt = await prisma.channelJob.create({
+      data: {
+        idempotencyKey: maxAttemptKey,
+        kind: "index_entity",
+        entityType: "channel",
+        entityId: channelId,
+        status: "processing",
+        attempts: 8,
+        lockedAt: new Date(0),
+        lastError: "stale source detail"
+      }
+    });
+    await runWorker();
+    expect(await prisma.channelJob.findUniqueOrThrow({
+      where: { id: maxAttempt.id },
+      select: { status: true, attempts: true, lockedAt: true, lastError: true }
+    })).toEqual({
+      status: "failed",
+      attempts: 8,
+      lockedAt: null,
+      lastError: "Phase 7 job failed after the maximum retry attempts."
+    });
+
     const retry = await prisma.channelJob.create({
       data: {
         idempotencyKey: retryKey,
@@ -2937,7 +3042,7 @@ test("phase 7 search producers, leases, retries, and interleavings converge dura
         where: {
           OR: [
             { entityId: { in: [fanId, creatorId, channelId, ...createdPostIds] } },
-            { idempotencyKey: { in: [recentLeaseKey, retryKey, reindexKey] } },
+            { idempotencyKey: { in: [recentLeaseKey, retryKey, reindexKey, maxAttemptKey] } },
             { entityType: "creator", entityId: "c1", createdAt: { gte: testStartedAt } }
           ]
         }

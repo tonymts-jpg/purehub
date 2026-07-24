@@ -48,6 +48,96 @@ export function phase7JobBackoffSeconds(attempts: number): number {
   return Math.min(3600, 2 ** attempts * 15);
 }
 
+type Phase7JobLease = {
+  id: string;
+  status: string;
+  lockedAt: Date | null;
+  attempts: number;
+};
+
+type Phase7JobLeaseOutcome =
+  | { kind: "completed" }
+  | { kind: "progress"; stage: string; cursor: string | null }
+  | { kind: "failed" };
+
+export function phase7JobLeaseWhere(lease: Phase7JobLease): Prisma.ChannelJobWhereInput {
+  if (
+    !lease.id
+    || lease.status !== "processing"
+    || !(lease.lockedAt instanceof Date)
+    || !Number.isFinite(lease.lockedAt.getTime())
+    || !Number.isInteger(lease.attempts)
+    || lease.attempts < 1
+  ) {
+    throw new TypeError("Phase 7 job lease is invalid.");
+  }
+  return {
+    id: lease.id,
+    status: "processing",
+    lockedAt: lease.lockedAt,
+    attempts: lease.attempts
+  };
+}
+
+export function phase7NextLeaseAvailableAt(
+  lockedAt: Date,
+  now = new Date()
+): Date {
+  if (
+    !(lockedAt instanceof Date)
+    || !Number.isFinite(lockedAt.getTime())
+    || !(now instanceof Date)
+    || !Number.isFinite(now.getTime())
+  ) {
+    throw new TypeError("Phase 7 job lease timestamps are invalid.");
+  }
+  return new Date(Math.max(now.getTime(), lockedAt.getTime() + 1));
+}
+
+export async function settlePhase7JobLease(
+  lease: Phase7JobLease,
+  outcome: Phase7JobLeaseOutcome
+): Promise<boolean> {
+  let data: Prisma.ChannelJobUpdateManyMutationInput;
+  if (outcome.kind === "completed") {
+    data = {
+      status: "completed",
+      completedAt: new Date(),
+      lockedAt: null,
+      lastError: null
+    };
+  } else if (outcome.kind === "progress") {
+    data = {
+      status: "pending",
+      attempts: 0,
+      availableAt: phase7NextLeaseAvailableAt(lease.lockedAt!),
+      lockedAt: null,
+      completedAt: null,
+      lastError: null,
+      entityType: outcome.stage,
+      entityId: outcome.cursor
+    };
+  } else {
+    const terminal = lease.attempts >= MAX_JOB_ATTEMPTS;
+    data = {
+      status: "failed",
+      availableAt: new Date(
+        Date.now() + phase7JobBackoffSeconds(lease.attempts) * 1000
+      ),
+      lockedAt: null,
+      completedAt: null,
+      lastError: terminal
+        ? "Phase 7 job failed after the maximum retry attempts."
+        : "Phase 7 job execution failed and is scheduled for retry."
+    };
+  }
+  const result = await prisma.channelJob.updateMany({
+    where: phase7JobLeaseWhere(lease),
+    data
+  });
+  return result.count === 1;
+}
+
 function postRuleWhere(rules: Array<{ kind: string; value: string }>): Prisma.PostWhereInput[] {
   return rules.map((rule) => {
     if (rule.kind === "category") return { category: rule.value };
@@ -172,6 +262,22 @@ async function claimPhase7Jobs(limit: number) {
       return await prisma.$transaction(async (tx) => {
         const now = new Date();
         const leaseExpiredAt = new Date(now.getTime() - PHASE7_JOB_LEASE_MS);
+        await tx.channelJob.updateMany({
+          where: {
+            status: "processing",
+            attempts: { gte: MAX_JOB_ATTEMPTS },
+            OR: [
+              { lockedAt: null },
+              { lockedAt: { lte: leaseExpiredAt } }
+            ]
+          },
+          data: {
+            status: "failed",
+            lockedAt: null,
+            completedAt: null,
+            lastError: "Phase 7 job failed after the maximum retry attempts."
+          }
+        });
         const claimable = {
           OR: [
             {
@@ -289,47 +395,20 @@ export async function runPhase7Jobs(limit = 25): Promise<{
     try {
       const execution = await executePhase7Job(job);
       if (execution.completed) {
-        await prisma.channelJob.update({
-          where: { id: job.id },
-          data: {
-            status: "completed",
-            completedAt: new Date(),
-            lockedAt: null,
-            lastError: null
-          }
-        });
-        completed += 1;
+        if (await settlePhase7JobLease(job, { kind: "completed" })) {
+          completed += 1;
+        }
       } else {
-        await prisma.channelJob.update({
-          where: { id: job.id },
-          data: {
-            status: "pending",
-            attempts: 0,
-            availableAt: new Date(),
-            lockedAt: null,
-            completedAt: null,
-            lastError: null,
-            entityType: execution.stage,
-            entityId: execution.cursor
-          }
+        await settlePhase7JobLease(job, {
+          kind: "progress",
+          stage: execution.stage,
+          cursor: execution.cursor
         });
       }
     } catch {
-      const terminal = job.attempts >= MAX_JOB_ATTEMPTS;
-      const backoffSeconds = phase7JobBackoffSeconds(job.attempts);
-      await prisma.channelJob.update({
-        where: { id: job.id },
-        data: {
-          status: "failed",
-          availableAt: new Date(Date.now() + backoffSeconds * 1000),
-          lockedAt: null,
-          completedAt: null,
-          lastError: terminal
-            ? "Phase 7 job failed after the maximum retry attempts."
-            : "Phase 7 job execution failed and is scheduled for retry."
-        }
-      });
-      failed += 1;
+      if (await settlePhase7JobLease(job, { kind: "failed" })) {
+        failed += 1;
+      }
     }
   }
   return { claimed: jobs.length, completed, failed };
