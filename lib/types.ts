@@ -1,5 +1,15 @@
 import type { ContentCategory } from "./categories";
 
+export type {
+  ChannelAccess,
+  ChannelDetailDto,
+  ChannelDto,
+  ChannelPostDto,
+  ChannelRole,
+  CreateChannelInput,
+  ListChannelsInput
+} from "./channels/types";
+
 export type Role = "fan" | "creator";
 export type Visibility = "free" | "members" | "purchase";
 

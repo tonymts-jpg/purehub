@@ -12,9 +12,9 @@ const DEFAULT_ADMIN_TOKEN = "purehub-admin-demo-token";
 const adminRoles: AdminRole[] = ["super_admin", "ops_admin", "content_admin", "finance_admin", "support_admin", "analyst"];
 
 export const ADMIN_SECTIONS: Record<AdminRole, string[]> = {
-  super_admin: ["overview", "users", "applications", "levels", "pricing", "transactions", "payments", "audit"],
-  ops_admin: ["overview", "users", "applications", "levels", "pricing", "audit"],
-  content_admin: ["overview", "applications", "levels", "audit"],
+  super_admin: ["overview", "users", "applications", "levels", "pricing", "transactions", "payments", "channels", "audit"],
+  ops_admin: ["overview", "users", "applications", "levels", "pricing", "channels", "audit"],
+  content_admin: ["overview", "applications", "levels", "channels", "audit"],
   finance_admin: ["overview", "transactions", "payments", "audit"],
   support_admin: ["overview", "users", "applications"],
   analyst: ["overview", "audit"]
