@@ -1,5 +1,5 @@
 import { Prisma } from "@prisma/client";
-import { ADMIN_SECTIONS, type AdminContext } from "@/lib/admin-auth";
+import { CHANNEL_ADMIN_ROLES, isChannelAdminRole, type AdminContext } from "@/lib/admin-auth";
 import { prisma } from "@/lib/prisma";
 import { getChannelAccess, resolveChannelAccess } from "./auth";
 import {
@@ -9,18 +9,21 @@ import {
   CHANNEL_VISIBILITIES,
   type ChannelAccess,
   type ChannelCursor,
-  type ChannelDetailDto,
+  type ChannelDetailResultDto,
   type ChannelDto,
   type ChannelJobInput,
   type ChannelLevelId,
+  type ChannelListItemDto,
   type ChannelPostDto,
   type ChannelPostPolicy,
   type ChannelStatus,
   type ChannelVisibility,
   type CreateChannelInput,
   type ListChannelsInput,
+  channelCursorMatchesScope,
   encodeChannelCursor,
   parseChannelCursor,
+  projectChannelSafeSummary,
   validateChannelInput
 } from "./types";
 
@@ -58,7 +61,7 @@ function isChannelLevelId(value: string | null): value is ChannelLevelId {
 }
 
 function adminCanMutateChannels(admin: AdminContext) {
-  return ADMIN_SECTIONS[admin.role].includes("channels");
+  return isChannelAdminRole(admin.role);
 }
 
 async function requireActiveAdmin(tx: Prisma.TransactionClient, admin: AdminContext) {
@@ -151,11 +154,90 @@ function normalizeLimit(value: number | undefined, maximum = 50) {
   return value;
 }
 
-function decodeRequiredCursor(value: string | undefined): ChannelCursor | null {
+function decodeRequiredCursor(
+  value: string | undefined,
+  scope: ChannelCursor["scope"],
+  channelId?: string
+): ChannelCursor | null {
   if (!value) return null;
   const cursor = parseChannelCursor(value);
   if (!cursor) throw new ChannelRepositoryError("Channel cursor is invalid.", 400);
+  if (!channelCursorMatchesScope(cursor, scope, channelId)) {
+    throw new ChannelRepositoryError("Channel cursor does not belong to this resource.", 400);
+  }
   return cursor;
+}
+
+export function channelListAfterPredicate(cursor: ChannelCursor): Prisma.ChannelWhereInput {
+  const createdAt = new Date(cursor.createdAt);
+  return {
+    OR: [
+      { createdAt: { lt: createdAt } },
+      { createdAt, id: { lt: cursor.id } }
+    ]
+  };
+}
+
+export function channelFeedAfterPredicate(cursor: ChannelCursor): Prisma.ChannelPostWhereInput {
+  const publishedAt = new Date(cursor.createdAt);
+  const publicationTail: Prisma.ChannelPostWhereInput = {
+    OR: [
+      { post: { createdAt: { lt: publishedAt } } },
+      { post: { createdAt: publishedAt }, id: { lt: cursor.id } }
+    ]
+  };
+  const positionTail: Prisma.ChannelPostWhereInput = cursor.position === null
+    ? { position: null, AND: [publicationTail] }
+    : {
+        OR: [
+          { position: { gt: cursor.position } },
+          { position: null },
+          { position: cursor.position, AND: [publicationTail] }
+        ]
+      };
+
+  if (cursor.pinnedAt === null) {
+    return { pinnedAt: null, AND: [positionTail] };
+  }
+  const pinnedAt = new Date(cursor.pinnedAt);
+  return {
+    OR: [
+      { pinnedAt: { lt: pinnedAt } },
+      { pinnedAt: null },
+      { pinnedAt, AND: [positionTail] }
+    ]
+  };
+}
+
+export function isChannelSelfReview(actorUserId: string, ownerUserId: string): boolean {
+  return actorUserId === ownerUserId;
+}
+
+export function isSerializableConflict(error: unknown): boolean {
+  return typeof error === "object"
+    && error !== null
+    && "code" in error
+    && (error as { code?: unknown }).code === "P2034";
+}
+
+export async function retrySerializableOperation<T>(
+  operation: () => Promise<T>,
+  maxAttempts = 3
+): Promise<T> {
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 5) {
+    throw new TypeError("Serializable transaction attempts must be between 1 and 5.");
+  }
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isSerializableConflict(error)) throw error;
+      if (attempt === maxAttempts) {
+        conflict("Channel creation conflicted with another quota update. Please retry.");
+      }
+    }
+  }
+  throw new ChannelRepositoryError("Serializable transaction retry failed.", 409);
 }
 
 export async function getCreatorChannelQuota(userId: string): Promise<{
@@ -191,7 +273,7 @@ export async function createChannel(
   if (admin && admin.actorUserId !== actorUserId) denied("Administrator identity does not match the channel actor.");
 
   try {
-    return await prisma.$transaction(async (tx) => {
+    return await retrySerializableOperation(() => prisma.$transaction(async (tx) => {
       if (admin) {
         await requireActiveAdmin(tx, admin);
       } else {
@@ -269,9 +351,9 @@ export async function createChannel(
         status,
         visibility,
         role: admin ? null : "owner",
-        isAdmin: Boolean(admin)
+        adminRole: admin?.role ?? null
       }));
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
   } catch (error) {
     if (error instanceof ChannelRepositoryError) throw error;
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
@@ -333,7 +415,7 @@ export async function submitChannel(actorUserId: string, channelId: string): Pro
       status: "pending",
       visibility: updated.visibility as ChannelVisibility,
       role: "owner",
-      isAdmin: false
+      adminRole: null
     }));
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 }
@@ -361,6 +443,9 @@ export async function reviewChannel(
     if (!channel) notFound();
     if (channel.kind !== "creator" || channel.status !== "pending") {
       conflict("Only pending creator channels may be reviewed.");
+    }
+    if (isChannelSelfReview(admin.actorUserId, channel.ownerUserId)) {
+      denied("Channel owners cannot review their own creator channel.");
     }
 
     const status = decision === "approved" ? "active" : "rejected";
@@ -423,9 +508,9 @@ export async function reviewChannel(
 export async function listChannels(
   input: ListChannelsInput,
   viewerUserId: string | null
-): Promise<{ channels: ChannelDto[]; nextCursor: string | null }> {
+): Promise<{ channels: ChannelListItemDto[]; nextCursor: string | null }> {
   const limit = normalizeLimit(input.limit);
-  const cursor = decodeRequiredCursor(input.cursor);
+  const cursor = decodeRequiredCursor(input.cursor, "channel-list");
   if (input.kind && !CHANNEL_KINDS.some((kind) => kind === input.kind)) {
     throw new ChannelRepositoryError("Channel kind is invalid.", 400);
   }
@@ -437,17 +522,24 @@ export async function listChannels(
   }
 
   const activeAdmin = viewerUserId
-    ? await prisma.adminAccount.findFirst({
-        where: { userId: viewerUserId, status: "active", user: { status: "active" } },
-        select: { id: true }
+      ? await prisma.adminAccount.findFirst({
+        where: {
+          userId: viewerUserId,
+          status: "active",
+          role: { in: [...CHANNEL_ADMIN_ROLES] },
+          user: { status: "active" }
+        },
+        orderBy: { createdAt: "asc" },
+        select: { role: true }
       })
     : null;
+  const hasAdminVisibility = Boolean(activeAdmin && isChannelAdminRole(activeAdmin.role));
   const where: Prisma.ChannelWhereInput = {
     ...(input.kind ? { kind: input.kind } : {}),
     ...(input.visibility ? { visibility: input.visibility } : {})
   };
 
-  if (activeAdmin) {
+  if (hasAdminVisibility) {
     if (input.status) where.status = input.status;
   } else {
     where.status = "active";
@@ -464,23 +556,26 @@ export async function listChannels(
   }
 
   const rows = await prisma.channel.findMany({
-    where,
+    where: cursor ? { AND: [where, channelListAfterPredicate(cursor)] } : where,
     include: channelOwnerInclude,
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    take: limit + 1,
-    ...(cursor ? { cursor: { id: cursor.id }, skip: 1 } : {})
+    take: limit + 1
   });
   const hasMore = rows.length > limit;
   if (hasMore) rows.pop();
-  const channels = await Promise.all(rows.map(async (channel) => mapChannel(
-    channel,
-    await getChannelAccess(viewerUserId, channel.id)
-  )));
+  const channels = await Promise.all(rows.map(async (channel) => {
+    const access = await getChannelAccess(viewerUserId, channel.id);
+    return !access.canRead
+      ? projectChannelSafeSummary(channel)
+      : mapChannel(channel, access);
+  }));
   const last = rows.at(-1);
   return {
     channels,
     nextCursor: hasMore && last
       ? encodeChannelCursor({
+          scope: "channel-list",
+          channelId: null,
           pinnedAt: null,
           position: null,
           createdAt: last.createdAt.toISOString(),
@@ -494,13 +589,13 @@ export async function getChannelBySlug(
   slug: string,
   viewerUserId: string | null,
   cursorValue?: string
-): Promise<ChannelDetailDto> {
-  const cursor = decodeRequiredCursor(cursorValue);
+): Promise<ChannelDetailResultDto> {
   const channel = await prisma.channel.findUnique({
     where: { slug },
     include: channelOwnerInclude
   });
   if (!channel) notFound();
+  const cursor = decodeRequiredCursor(cursorValue, "channel-feed", channel.id);
 
   const access = await getChannelAccess(viewerUserId, channel.id);
   const maySeeSafeSummary = channel.status === "active"
@@ -509,7 +604,7 @@ export async function getChannelBySlug(
   if (!access.canRead && !maySeeSafeSummary) notFound();
 
   if (!access.canRead) {
-    return { ...mapChannel(channel, access), posts: [], nextCursor: null };
+    return projectChannelSafeSummary(channel);
   }
 
   const excluded = await prisma.channelPostExclusion.findMany({
@@ -518,9 +613,14 @@ export async function getChannelBySlug(
   });
   const postRows = await prisma.channelPost.findMany({
     where: {
-      channelId: channel.id,
-      status: "active",
-      ...(excluded.length ? { postId: { notIn: excluded.map((item) => item.postId) } } : {})
+      AND: [
+        {
+          channelId: channel.id,
+          status: "active",
+          ...(excluded.length ? { postId: { notIn: excluded.map((item) => item.postId) } } : {})
+        },
+        ...(cursor ? [channelFeedAfterPredicate(cursor)] : [])
+      ]
     },
     include: {
       post: {
@@ -541,11 +641,10 @@ export async function getChannelBySlug(
     orderBy: [
       { pinnedAt: { sort: "desc", nulls: "last" } },
       { position: { sort: "asc", nulls: "last" } },
-      { createdAt: "desc" },
+      { post: { createdAt: "desc" } },
       { id: "desc" }
     ],
-    take: 21,
-    ...(cursor ? { cursor: { id: cursor.id }, skip: 1 } : {})
+    take: 21
   });
   const hasMore = postRows.length > 20;
   if (hasMore) postRows.pop();
@@ -568,9 +667,11 @@ export async function getChannelBySlug(
     posts,
     nextCursor: hasMore && last
       ? encodeChannelCursor({
+          scope: "channel-feed",
+          channelId: channel.id,
           pinnedAt: last.pinnedAt?.toISOString() ?? null,
           position: last.position,
-          createdAt: last.createdAt.toISOString(),
+          createdAt: last.post.createdAt.toISOString(),
           id: last.id
         })
       : null

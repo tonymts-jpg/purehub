@@ -1,4 +1,6 @@
+import { CHANNEL_ADMIN_ROLES, isChannelAdminRole } from "@/lib/admin-auth";
 import { prisma } from "@/lib/prisma";
+import type { AdminRole } from "@/lib/platform-config";
 import type { ChannelAccess, ChannelRole, ChannelStatus, ChannelVisibility } from "./types";
 import { CHANNEL_ROLES } from "./types";
 
@@ -18,9 +20,9 @@ export function resolveChannelAccess(input: {
   status: ChannelStatus;
   visibility: ChannelVisibility;
   role: ChannelRole | null;
-  isAdmin: boolean;
+  adminRole: AdminRole | null;
 }): ChannelAccess {
-  if (input.isAdmin) {
+  if (input.adminRole && isChannelAdminRole(input.adminRole)) {
     return { canRead: true, canManage: true, canCurate: true, canManageMembers: true, role: null };
   }
   if (input.status === "suspended" || input.status === "archived") return { ...noAccess };
@@ -70,13 +72,19 @@ export async function getChannelAccess(userId: string | null, channelId: string)
   });
   if (!channel) return { ...noAccess };
 
-  let isAdmin = false;
+  let adminRole: AdminRole | null = null;
   if (userId) {
     const admin = await prisma.adminAccount.findFirst({
-      where: { userId, status: "active", user: { status: "active" } },
-      select: { id: true }
+      where: {
+        userId,
+        status: "active",
+        role: { in: [...CHANNEL_ADMIN_ROLES] },
+        user: { status: "active" }
+      },
+      orderBy: { createdAt: "asc" },
+      select: { role: true }
     });
-    isAdmin = Boolean(admin);
+    if (admin && isChannelAdminRole(admin.role)) adminRole = admin.role;
   }
 
   const membershipRole = channel.memberships?.[0]?.role;
@@ -85,6 +93,6 @@ export async function getChannelAccess(userId: string | null, channelId: string)
     status: channel.status as ChannelStatus,
     visibility: channel.visibility as ChannelVisibility,
     role,
-    isAdmin
+    adminRole
   });
 }

@@ -3,9 +3,12 @@ import type { ContentCategory } from "./categories";
 export type {
   ChannelAccess,
   ChannelDetailDto,
+  ChannelDetailResultDto,
   ChannelDto,
+  ChannelListItemDto,
   ChannelPostDto,
   ChannelRole,
+  ChannelSafeSummaryDto,
   CreateChannelInput,
   ListChannelsInput
 } from "./channels/types";

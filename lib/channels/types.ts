@@ -27,6 +27,8 @@ export type ChannelAccess = {
 };
 
 export type ChannelCursor = {
+  scope: "channel-list" | "channel-feed";
+  channelId: string | null;
   pinnedAt: string | null;
   position: number | null;
   createdAt: string;
@@ -116,6 +118,19 @@ export type ChannelDetailDto = ChannelDto & {
   nextCursor: string | null;
 };
 
+export type ChannelSafeSummaryDto = {
+  slug: string;
+  name: string;
+  description: string;
+  kind: ChannelKind;
+  visibility: "private";
+  discoverability: "discoverable";
+  status: "active";
+};
+
+export type ChannelListItemDto = ChannelDto | ChannelSafeSummaryDto;
+export type ChannelDetailResultDto = ChannelDetailDto | ChannelSafeSummaryDto;
+
 export type ChannelJobInput = {
   idempotencyKey: string;
   kind: "materialize_channel" | "index_entity" | "delete_index" | "reindex_all";
@@ -172,6 +187,9 @@ export function parseChannelCursor(value?: string): ChannelCursor | null {
   try {
     const decoded: unknown = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
     if (!isRecord(decoded)) return null;
+    if (decoded.scope !== "channel-list" && decoded.scope !== "channel-feed") return null;
+    if (decoded.scope === "channel-list" && decoded.channelId !== null) return null;
+    if (decoded.scope === "channel-feed" && (typeof decoded.channelId !== "string" || !decoded.channelId)) return null;
     if (decoded.pinnedAt !== null && !isIsoDate(decoded.pinnedAt)) return null;
     if (
       decoded.position !== null
@@ -183,6 +201,8 @@ export function parseChannelCursor(value?: string): ChannelCursor | null {
     ) return null;
     if (!isIsoDate(decoded.createdAt) || typeof decoded.id !== "string" || !decoded.id) return null;
     return {
+      scope: decoded.scope,
+      channelId: decoded.channelId as string | null,
       pinnedAt: decoded.pinnedAt,
       position: decoded.position as number | null,
       createdAt: decoded.createdAt,
@@ -197,6 +217,44 @@ export function encodeChannelCursor(value: ChannelCursor): string {
   const valid = parseChannelCursor(Buffer.from(JSON.stringify(value)).toString("base64url"));
   if (!valid) throw new TypeError("Channel cursor is invalid.");
   return Buffer.from(JSON.stringify(valid)).toString("base64url");
+}
+
+export function channelCursorMatchesScope(
+  cursor: ChannelCursor,
+  scope: ChannelCursor["scope"],
+  channelId?: string
+): boolean {
+  if (cursor.scope !== scope) return false;
+  if (scope === "channel-list") return cursor.channelId === null;
+  return typeof channelId === "string" && cursor.channelId === channelId;
+}
+
+export function projectChannelSafeSummary(input: {
+  slug: string;
+  name: string;
+  description: string;
+  kind: string;
+  visibility: string;
+  discoverability: string;
+  status: string;
+} & Record<string, unknown>): ChannelSafeSummaryDto {
+  if (
+    input.visibility !== "private"
+    || input.discoverability !== "discoverable"
+    || input.status !== "active"
+    || !CHANNEL_KINDS.some((kind) => kind === input.kind)
+  ) {
+    throw new TypeError("Only active discoverable private channels have a safe summary.");
+  }
+  return {
+    slug: input.slug,
+    name: input.name,
+    description: input.description,
+    kind: input.kind as ChannelKind,
+    visibility: "private",
+    discoverability: "discoverable",
+    status: "active"
+  };
 }
 
 export function normalizeChannelSlug(value: string): string {

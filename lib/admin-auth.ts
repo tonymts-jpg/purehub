@@ -10,6 +10,8 @@ export type AdminContext = {
 
 const DEFAULT_ADMIN_TOKEN = "purehub-admin-demo-token";
 const adminRoles: AdminRole[] = ["super_admin", "ops_admin", "content_admin", "finance_admin", "support_admin", "analyst"];
+export const CHANNEL_ADMIN_ROLES = ["super_admin", "ops_admin", "content_admin"] as const;
+export type ChannelAdminRole = (typeof CHANNEL_ADMIN_ROLES)[number];
 
 export const ADMIN_SECTIONS: Record<AdminRole, string[]> = {
   super_admin: ["overview", "users", "applications", "levels", "pricing", "transactions", "payments", "channels", "audit"],
@@ -65,4 +67,8 @@ export async function requireAdmin(request: Request, section?: string): Promise<
 
 export function adminPermissions(role: AdminRole) {
   return ADMIN_SECTIONS[role];
+}
+
+export function isChannelAdminRole(role: string): role is ChannelAdminRole {
+  return CHANNEL_ADMIN_ROLES.some((channelRole) => channelRole === role);
 }
