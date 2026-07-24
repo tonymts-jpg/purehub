@@ -5,7 +5,13 @@ import { hashPassword } from "better-auth/crypto";
 const prisma = new PrismaClient();
 const json = (value: unknown) => value as Prisma.InputJsonValue;
 
-const levelForFollowers = (followers: number) => {
+type SeededCreatorLevelId = "level-1" | "level-2" | "level-3";
+
+const seededCreatorLevelOverrides: Readonly<Partial<Record<string, SeededCreatorLevelId>>> = Object.freeze({
+  c1: "level-2"
+});
+
+const levelForFollowers = (followers: number): SeededCreatorLevelId => {
   if (followers >= 100_000) return "level-3";
   if (followers >= 50_000) return "level-2";
   return "level-1";
@@ -272,7 +278,7 @@ async function main() {
             members: creator.members,
             cover: creator.cover,
             verified: creator.verified,
-            levelId: creator.id === "c1" ? "level-2" : levelForFollowers(creator.followers),
+            levelId: seededCreatorLevelOverrides[creator.id] ?? levelForFollowers(creator.followers),
             plans: {
               create: creator.plans.map((plan) => ({
                 id: plan.id,
