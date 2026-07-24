@@ -16,39 +16,43 @@ async function runPhase5(action = "all") {
   if (!workerToken) throw new Error("WORKER_ACCESS_TOKEN is required.");
   const response = await fetch(`${webBaseUrl}/api/internal/phase5/run?action=${action}`, { method: "POST", headers: { "x-worker-token": workerToken } });
   if (!response.ok) throw new Error(`Phase 5 worker action ${action} failed with ${response.status}.`);
-  taskState.phase5.lastRunAt = new Date().toISOString();
-  taskState.phase5.lastError = null;
 }
 
 async function runPhase7() {
   if (!workerToken) throw new Error("WORKER_ACCESS_TOKEN is required.");
   const response = await fetch(`${webBaseUrl}/api/internal/phase7/run`, { method: "POST", headers: { "x-worker-token": workerToken } });
   if (!response.ok) throw new Error(`Phase 7 worker run failed with ${response.status}.`);
-  taskState.phase7.lastRunAt = new Date().toISOString();
-  taskState.phase7.lastError = null;
 }
 
 async function runSubsystem(name, operation) {
   try {
     await operation();
+    taskState[name].lastRunAt = new Date().toISOString();
+    taskState[name].lastError = null;
+    return true;
   } catch (error) {
     const message = error instanceof Error ? error.message : `Unknown ${name} worker error`;
     taskState[name].lastError = message;
     console.error(message);
+    return false;
   }
 }
 
 async function tick() {
-  await Promise.all([
+  const [phase5Succeeded] = await Promise.all([
     runSubsystem("phase5", () => runPhase5("all")),
     runSubsystem("phase7", runPhase7)
   ]);
   const lastReconciliation = taskState.lastReconciliationAt ? new Date(taskState.lastReconciliationAt).getTime() : 0;
   if (Date.now() - lastReconciliation >= 24 * 60 * 60 * 1000) {
-    await runSubsystem("phase5", async () => {
+    try {
       await runPhase5("reconcile");
       taskState.lastReconciliationAt = new Date().toISOString();
-    });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown Phase 5 reconciliation error";
+      if (phase5Succeeded) taskState.phase5.lastError = message;
+      console.error(message);
+    }
   }
   taskState.lastRunAt = new Date().toISOString();
   taskState.lastError = taskState.phase5.lastError ?? taskState.phase7.lastError;

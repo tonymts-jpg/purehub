@@ -2187,11 +2187,11 @@ function encodeCurationCursor(cursor: CurationCursor) {
   return Buffer.from(JSON.stringify(cursor)).toString("base64url");
 }
 
-async function requireCurationActor(
+async function requireCurationAccess(
   tx: Prisma.TransactionClient,
   actorUserId: string,
   channelId: string,
-  allowMember: boolean
+  options: { allowMember: boolean; mutation: boolean }
 ) {
   const channel = await tx.channel.findUnique({
     where: { id: channelId },
@@ -2207,7 +2207,6 @@ async function requireCurationActor(
     }
   });
   if (!channel) notFound();
-  if (channel.status !== "active") conflict("Channel curation requires an active channel.");
   const membershipRole = channel.memberships[0]?.role as ChannelRole | undefined;
   const admin = await tx.adminAccount.findFirst({
     where: {
@@ -2221,16 +2220,71 @@ async function requireCurationActor(
   const curator = Boolean(admin && isChannelAdminRole(admin.role))
     || membershipRole === "owner"
     || membershipRole === "editor";
-  if (!curator && !(allowMember && membershipRole === "member")) {
-    denied(allowMember
-      ? "Only a channel owner, editor, or active member may submit a post."
-      : "Only a channel owner or editor may curate this channel.");
+  if (!curator && !(options.allowMember && membershipRole === "member")) {
+    notFound();
+  }
+  if (options.mutation && channel.status !== "active") {
+    conflict("Channel curation requires an active channel.");
   }
   return {
     channel,
     role: curator ? (membershipRole ?? "admin") : "member",
     curator
   };
+}
+
+function isCurationSerializationConflict(error: unknown): boolean {
+  return typeof error === "object"
+    && error !== null
+    && "code" in error
+    && ["P2002", "P2034"].includes(String((error as { code?: unknown }).code));
+}
+
+async function retryCurationSerializableOperation<T>(operation: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isCurationSerializationConflict(error)) throw error;
+      if (attempt === 3) conflict("Channel curation conflicted with another update. Please retry.");
+    }
+  }
+  conflict("Channel curation conflicted with another update. Please retry.");
+}
+
+async function normalizeChannelPostPositions(
+  tx: Prisma.TransactionClient,
+  channelId: string,
+  targetId: string,
+  desiredPosition: number | null
+) {
+  const rows = await tx.channelPost.findMany({
+    where: {
+      channelId,
+      status: "active",
+      OR: [{ position: { not: null } }, { id: targetId }]
+    },
+    orderBy: [
+      { position: { sort: "asc", nulls: "last" } },
+      { createdAt: "asc" },
+      { id: "asc" }
+    ],
+    select: { id: true }
+  });
+  const ordered = rows.filter(({ id }) => id !== targetId);
+  if (desiredPosition !== null && rows.some(({ id }) => id === targetId)) {
+    const insertionIndex = Math.max(0, Math.min(desiredPosition, ordered.length));
+    ordered.splice(insertionIndex, 0, { id: targetId });
+  }
+  for (let position = 0; position < ordered.length; position += 1) {
+    await tx.channelPost.update({
+      where: { id: ordered[position].id },
+      data: { position }
+    });
+  }
+  if (desiredPosition === null) {
+    await tx.channelPost.update({ where: { id: targetId }, data: { position: null } });
+  }
 }
 
 function mapChannelPostMutation(row: {
@@ -2276,41 +2330,67 @@ export async function addChannelPost(
   channelId: string,
   input: ChannelPostMutationInput
 ) {
-  return prisma.$transaction(async (tx) => {
-    const actor = await requireCurationActor(tx, actorUserId, channelId, true);
+  return retryCurationSerializableOperation(() => prisma.$transaction(async (tx) => {
+    const actor = await requireCurationAccess(tx, actorUserId, channelId, {
+      allowMember: true,
+      mutation: true
+    });
     const post = await tx.post.findUnique({ where: { id: input.postId }, select: { id: true } });
     if (!post) throw new ChannelRepositoryError("Published post not found.", 404);
+    const existing = await tx.channelPost.findUnique({
+      where: { channelId_postId: { channelId, postId: input.postId } },
+      select: { id: true, status: true, source: true }
+    });
+    if (!actor.curator) {
+      if (Object.hasOwn(input, "position") || Object.hasOwn(input, "pinned")) {
+        denied("Channel members cannot set ordering or pin state.");
+      }
+      if (existing) conflict("Channel members cannot replace an existing channel post.");
+    }
     const exclusion = await tx.channelPostExclusion.findUnique({
       where: { channelId_postId: { channelId, postId: input.postId } },
       select: { id: true }
     });
     if (exclusion) conflict("Excluded posts cannot be actively added to the channel.");
     const status = actor.curator || actor.channel.memberPostPolicy === "direct" ? "active" : "pending";
-    const existing = await tx.channelPost.findUnique({
-      where: { channelId_postId: { channelId, postId: input.postId } },
-      select: { id: true, status: true, source: true }
-    });
-    const channelPost = await tx.channelPost.upsert({
-      where: { channelId_postId: { channelId, postId: input.postId } },
-      update: {
-        source: "manual",
-        status,
-        ...(Object.hasOwn(input, "position") ? { position: input.position } : {}),
-        ...(Object.hasOwn(input, "pinned") ? { pinnedAt: input.pinned ? new Date() : null } : {}),
-        addedByUserId: actorUserId,
-        reviewedByUserId: status === "active" ? actorUserId : null
-      },
-      create: {
-        channelId,
-        postId: input.postId,
-        source: "manual",
-        status,
-        position: input.position ?? null,
-        pinnedAt: input.pinned ? new Date() : null,
-        addedByUserId: actorUserId,
-        reviewedByUserId: status === "active" ? actorUserId : null
-      }
-    });
+    let channelPost = actor.curator
+      ? await tx.channelPost.upsert({
+          where: { channelId_postId: { channelId, postId: input.postId } },
+          update: {
+            source: "manual",
+            status,
+            ...(Object.hasOwn(input, "position") ? { position: input.position } : {}),
+            ...(Object.hasOwn(input, "pinned") ? { pinnedAt: input.pinned ? new Date() : null } : {}),
+            addedByUserId: actorUserId,
+            reviewedByUserId: actorUserId
+          },
+          create: {
+            channelId,
+            postId: input.postId,
+            source: "manual",
+            status,
+            position: input.position ?? null,
+            pinnedAt: input.pinned ? new Date() : null,
+            addedByUserId: actorUserId,
+            reviewedByUserId: actorUserId
+          }
+        })
+      : await tx.channelPost.create({
+          data: {
+            channelId,
+            postId: input.postId,
+            source: "manual",
+            status,
+            position: null,
+            pinnedAt: null,
+            addedByUserId: actorUserId,
+            reviewedByUserId: status === "active" ? actorUserId : null
+          }
+        });
+    if (actor.curator && Object.hasOwn(input, "position")) {
+      await normalizeChannelPostPositions(tx, channelId, channelPost.id, input.position ?? null);
+      channelPost = await tx.channelPost.findUniqueOrThrow({ where: { id: channelPost.id } });
+    }
     await tx.auditLog.create({
       data: {
         actorUserId,
@@ -2329,7 +2409,7 @@ export async function addChannelPost(
       }
     });
     return mapChannelPostMutation(channelPost);
-  });
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
 }
 
 export async function updateChannelPost(
@@ -2338,8 +2418,11 @@ export async function updateChannelPost(
   channelPostId: string,
   input: ChannelPostPatchInput
 ) {
-  return prisma.$transaction(async (tx) => {
-    const actor = await requireCurationActor(tx, actorUserId, channelId, false);
+  return retryCurationSerializableOperation(() => prisma.$transaction(async (tx) => {
+    const actor = await requireCurationAccess(tx, actorUserId, channelId, {
+      allowMember: false,
+      mutation: true
+    });
     const current = await tx.channelPost.findFirst({ where: { id: channelPostId, channelId } });
     if (!current) throw new ChannelRepositoryError("Channel post not found.", 404);
     if (input.status === "active") {
@@ -2349,17 +2432,7 @@ export async function updateChannelPost(
       });
       if (exclusion) conflict("Excluded posts cannot be activated.");
     }
-    if (typeof input.position === "number") {
-      await tx.channelPost.updateMany({
-        where: {
-          channelId,
-          id: { not: current.id },
-          position: { gte: input.position, lt: MAX_CHANNEL_POSITION }
-        },
-        data: { position: { increment: 1 } }
-      });
-    }
-    const channelPost = await tx.channelPost.update({
+    let channelPost = await tx.channelPost.update({
       where: { id: current.id },
       data: {
         ...(Object.hasOwn(input, "position") ? { position: input.position } : {}),
@@ -2370,6 +2443,11 @@ export async function updateChannelPost(
         } : {})
       }
     });
+    if (Object.hasOwn(input, "position") || (input.status !== undefined && channelPost.position !== null)) {
+      const desiredPosition = channelPost.status === "active" ? channelPost.position : null;
+      await normalizeChannelPostPositions(tx, channelId, channelPost.id, desiredPosition);
+      channelPost = await tx.channelPost.findUniqueOrThrow({ where: { id: channelPost.id } });
+    }
     await tx.auditLog.create({
       data: {
         actorUserId,
@@ -2388,7 +2466,7 @@ export async function updateChannelPost(
       }
     });
     return mapChannelPostMutation(channelPost);
-  });
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
 }
 
 export async function removeChannelPost(actorUserId: string, channelId: string, channelPostId: string) {
@@ -2402,7 +2480,10 @@ export async function listDashboardChannelPosts(
 ) {
   const limit = normalizeLimit(input.limit);
   const cursor = decodeRequiredCursor(input.cursor, "channel-feed", channelId);
-  await prisma.$transaction((tx) => requireCurationActor(tx, actorUserId, channelId, false));
+  await prisma.$transaction((tx) => requireCurationAccess(tx, actorUserId, channelId, {
+    allowMember: false,
+    mutation: false
+  }));
   const rows = await prisma.channelPost.findMany({
     where: {
       AND: [
@@ -2443,7 +2524,10 @@ export async function createChannelRule(
   input: ChannelRuleMutationInput
 ) {
   return prisma.$transaction(async (tx) => {
-    const actor = await requireCurationActor(tx, actorUserId, channelId, false);
+    const actor = await requireCurationAccess(tx, actorUserId, channelId, {
+      allowMember: false,
+      mutation: true
+    });
     const rule = await tx.channelRule.create({
       data: { channelId, ...input, createdByUserId: actorUserId }
     });
@@ -2469,7 +2553,10 @@ export async function updateChannelRule(
   input: Partial<ChannelRuleMutationInput>
 ) {
   return prisma.$transaction(async (tx) => {
-    const actor = await requireCurationActor(tx, actorUserId, channelId, false);
+    const actor = await requireCurationAccess(tx, actorUserId, channelId, {
+      allowMember: false,
+      mutation: true
+    });
     const current = await tx.channelRule.findFirst({ where: { id: ruleId, channelId } });
     if (!current) throw new ChannelRepositoryError("Channel rule not found.", 404);
     const rule = await tx.channelRule.update({ where: { id: current.id }, data: input });
@@ -2490,7 +2577,10 @@ export async function updateChannelRule(
 
 export async function deleteChannelRule(actorUserId: string, channelId: string, ruleId: string) {
   return prisma.$transaction(async (tx) => {
-    const actor = await requireCurationActor(tx, actorUserId, channelId, false);
+    const actor = await requireCurationAccess(tx, actorUserId, channelId, {
+      allowMember: false,
+      mutation: true
+    });
     const current = await tx.channelRule.findFirst({ where: { id: ruleId, channelId } });
     if (!current) return { changed: false };
     await tx.channelRule.delete({ where: { id: current.id } });
@@ -2516,7 +2606,10 @@ export async function listChannelRules(
 ) {
   const limit = normalizeLimit(input.limit);
   const cursor = parseCurationCursor(input.cursor, "channel-rules", channelId);
-  await prisma.$transaction((tx) => requireCurationActor(tx, actorUserId, channelId, false));
+  await prisma.$transaction((tx) => requireCurationAccess(tx, actorUserId, channelId, {
+    allowMember: false,
+    mutation: false
+  }));
   const rows = await prisma.channelRule.findMany({
     where: {
       channelId,
@@ -2546,8 +2639,11 @@ export async function createChannelExclusion(
   channelId: string,
   input: ChannelExclusionMutationInput
 ) {
-  return prisma.$transaction(async (tx) => {
-    const actor = await requireCurationActor(tx, actorUserId, channelId, false);
+  return retryCurationSerializableOperation(() => prisma.$transaction(async (tx) => {
+    const actor = await requireCurationAccess(tx, actorUserId, channelId, {
+      allowMember: false,
+      mutation: true
+    });
     const post = await tx.post.findUnique({ where: { id: input.postId }, select: { id: true } });
     if (!post) throw new ChannelRepositoryError("Published post not found.", 404);
     const exclusion = await tx.channelPostExclusion.upsert({
@@ -2571,7 +2667,7 @@ export async function createChannelExclusion(
       }
     });
     return { ...exclusion, createdAt: exclusion.createdAt.toISOString() };
-  });
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
 }
 
 export async function deleteChannelExclusion(
@@ -2579,8 +2675,11 @@ export async function deleteChannelExclusion(
   channelId: string,
   exclusionId: string
 ) {
-  return prisma.$transaction(async (tx) => {
-    const actor = await requireCurationActor(tx, actorUserId, channelId, false);
+  return retryCurationSerializableOperation(() => prisma.$transaction(async (tx) => {
+    const actor = await requireCurationAccess(tx, actorUserId, channelId, {
+      allowMember: false,
+      mutation: true
+    });
     const current = await tx.channelPostExclusion.findFirst({ where: { id: exclusionId, channelId } });
     if (!current) return { changed: false };
     await tx.channelPostExclusion.delete({ where: { id: current.id } });
@@ -2596,7 +2695,7 @@ export async function deleteChannelExclusion(
       }
     });
     return { changed: true };
-  });
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
 }
 
 export async function listChannelExclusions(
@@ -2606,7 +2705,10 @@ export async function listChannelExclusions(
 ) {
   const limit = normalizeLimit(input.limit);
   const cursor = parseCurationCursor(input.cursor, "channel-exclusions", channelId);
-  await prisma.$transaction((tx) => requireCurationActor(tx, actorUserId, channelId, false));
+  await prisma.$transaction((tx) => requireCurationAccess(tx, actorUserId, channelId, {
+    allowMember: false,
+    mutation: false
+  }));
   const rows = await prisma.channelPostExclusion.findMany({
     where: {
       channelId,

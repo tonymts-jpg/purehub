@@ -1865,6 +1865,8 @@ test("phase 7 curation resolves manual, member, rule, exclusion, and worker prec
   const ownerRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
   const editorRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
   const memberRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const outsiderRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const adminRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
   const workerRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
   const nonce = `${Date.now().toString(36)}${Math.floor(Math.random() * 1_000_000).toString(36)}`;
   const channelId = `phase7-curation-${nonce}`;
@@ -1874,6 +1876,8 @@ test("phase 7 curation resolves manual, member, rule, exclusion, and worker prec
     await signInCreator(ownerRequest, "chenmo");
     await signInCreator(editorRequest);
     await signInFan(memberRequest);
+    await signInCreator(outsiderRequest, "momo");
+    await signInAdmin(adminRequest);
     await prisma.channel.create({
       data: {
         id: channelId,
@@ -1905,11 +1909,26 @@ test("phase 7 curation resolves manual, member, rule, exclusion, and worker prec
     expect(manual.status(), await manual.text()).toBe(201);
     const manualPost = (await manual.json()).channelPost;
     auditTargetIds.push(manualPost.id);
-    expect(manualPost).toMatchObject({ postId: "post-1", source: "manual", status: "active", position: 2 });
+    expect(manualPost).toMatchObject({ postId: "post-1", source: "manual", status: "active", position: 0 });
     expect(manualPost.pinnedAt).toEqual(expect.any(String));
 
+    const memberOverwrite = await memberRequest.post(`/api/dashboard/channels/${channelId}/posts`, {
+      data: { postId: "post-1" }
+    });
+    expect(memberOverwrite.status(), await memberOverwrite.text()).toBe(409);
+    expect(await prisma.channelPost.findUniqueOrThrow({
+      where: { channelId_postId: { channelId, postId: "post-1" } },
+      select: { source: true, status: true, position: true, addedByUserId: true }
+    })).toEqual({ source: "manual", status: "active", position: 0, addedByUserId: "c2" });
+
+    const memberOrdering = await memberRequest.post(`/api/dashboard/channels/${channelId}/posts`, {
+      data: { postId: "post-2", position: 1, pinned: true }
+    });
+    expect(memberOrdering.status(), await memberOrdering.text()).toBe(403);
+    expect(await prisma.channelPost.count({ where: { channelId, postId: "post-2" } })).toBe(0);
+
     const direct = await memberRequest.post(`/api/dashboard/channels/${channelId}/posts`, {
-      data: { postId: "post-2", position: 1 }
+      data: { postId: "post-2" }
     });
     expect(direct.status(), await direct.text()).toBe(201);
     const directPost = (await direct.json()).channelPost;
@@ -1995,7 +2014,7 @@ test("phase 7 curation resolves manual, member, rule, exclusion, and worker prec
     const feed = await ownerRequest.get(`/api/dashboard/channels/${channelId}/posts?limit=2`);
     expect(feed.ok(), await feed.text()).toBeTruthy();
     const feedBody = await feed.json();
-    expect(feedBody.channelPosts[0]).toMatchObject({ postId: "post-1", position: 2 });
+    expect(feedBody.channelPosts[0]).toMatchObject({ postId: "post-1", position: 0 });
     expect(feedBody.nextCursor).toEqual(expect.any(String));
     const secondFeed = await ownerRequest.get(
       `/api/dashboard/channels/${channelId}/posts?limit=2&cursor=${encodeURIComponent(feedBody.nextCursor)}`
@@ -2006,10 +2025,26 @@ test("phase 7 curation resolves manual, member, rule, exclusion, and worker prec
       .not.toEqual(expect.arrayContaining(feedBody.channelPosts.map(({ id }: { id: string }) => id)));
 
     await prisma.channel.update({ where: { id: channelId }, data: { status: "suspended", suspendedAt: new Date() } });
+    for (const reader of [ownerRequest, editorRequest, adminRequest]) {
+      for (const resource of ["posts", "rules", "exclusions"]) {
+        const readable = await reader.get(`/api/dashboard/channels/${channelId}/${resource}`);
+        expect(readable.ok(), `${resource}: ${await readable.text()}`).toBeTruthy();
+      }
+    }
+    const suspendedMemberRead = await memberRequest.get(`/api/dashboard/channels/${channelId}/posts`);
+    expect(suspendedMemberRead.status(), await suspendedMemberRead.text()).toBe(404);
     const blocked = await ownerRequest.post(`/api/dashboard/channels/${channelId}/posts`, {
       data: { postId: "post-4" }
     });
     expect(blocked.status(), await blocked.text()).toBe(409);
+    const hiddenInactive = await outsiderRequest.post(`/api/dashboard/channels/${channelId}/posts`, {
+      data: { postId: "post-4" }
+    });
+    const missing = await outsiderRequest.post("/api/dashboard/channels/definitely-missing-curation/posts", {
+      data: { postId: "post-4" }
+    });
+    expect(hiddenInactive.status(), await hiddenInactive.text()).toBe(404);
+    expect(missing.status(), await missing.text()).toBe(404);
   } finally {
     const curationRows = await prisma.channelPost.findMany({ where: { channelId }, select: { id: true } });
     const ruleRows = await prisma.channelRule.findMany({ where: { channelId }, select: { id: true } });
@@ -2025,7 +2060,126 @@ test("phase 7 curation resolves manual, member, rule, exclusion, and worker prec
     await ownerRequest.dispose();
     await editorRequest.dispose();
     await memberRequest.dispose();
+    await outsiderRequest.dispose();
+    await adminRequest.dispose();
     await workerRequest.dispose();
+  }
+});
+
+test("phase 7 concurrent materializers claim once and exclusions remain authoritative", async ({}, testInfo) => {
+  const probe = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  try {
+    await requirePhase7(probe, testInfo);
+  } finally {
+    await probe.dispose();
+  }
+  const ownerRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const workerA = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const workerB = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const nonce = `${Date.now().toString(36)}${Math.floor(Math.random() * 1_000_000).toString(36)}`;
+  const channelId = `phase7-race-${nonce}`;
+  const firstJobKey = `materialize:${channelId}:2026-07-24T00:00:00.000Z`;
+  const secondJobKey = `materialize:${channelId}:2026-07-24T00:00:01.000Z`;
+  try {
+    await signInCreator(ownerRequest, "chenmo");
+    const post = await prisma.post.findUniqueOrThrow({
+      where: { id: "post-1" },
+      select: { category: true }
+    });
+    await prisma.channel.create({
+      data: {
+        id: channelId,
+        slug: `phase7-race-${nonce}`,
+        name: "Phase Seven Curation Race",
+        description: "Temporary concurrent materialization acceptance channel.",
+        kind: "creator",
+        visibility: "private",
+        discoverability: "hidden",
+        status: "active",
+        ownerUserId: "c2",
+        createdByUserId: "c2",
+        reviewedByAdminId: "admin-demo",
+        reviewedAt: new Date(),
+        memberships: {
+          create: { userId: "c2", role: "owner", status: "active", reviewedByUserId: "admin-demo", reviewedAt: new Date() }
+        },
+        rules: {
+          create: { kind: "category", value: post.category, enabled: true, createdByUserId: "c2" }
+        },
+        jobs: {
+          create: { idempotencyKey: firstJobKey, kind: "materialize_channel" }
+        }
+      }
+    });
+    const workerToken = process.env.WORKER_ACCESS_TOKEN;
+    expect(workerToken, "WORKER_ACCESS_TOKEN is required for Phase 7 worker acceptance.").toBeTruthy();
+    const headers = { "x-worker-token": workerToken! };
+    const [firstRun, secondRun] = await Promise.all([
+      workerA.post("/api/internal/phase7/run?limit=1", { headers }),
+      workerB.post("/api/internal/phase7/run?limit=1", { headers })
+    ]);
+    expect(firstRun.ok(), await firstRun.text()).toBeTruthy();
+    expect(secondRun.ok(), await secondRun.text()).toBeTruthy();
+    expect(await prisma.channelJob.findUniqueOrThrow({
+      where: { idempotencyKey: firstJobKey },
+      select: { status: true, attempts: true }
+    })).toEqual({ status: "completed", attempts: 1 });
+    expect(await prisma.channelPost.count({ where: { channelId, postId: "post-1" } })).toBe(1);
+
+    await prisma.channelPost.deleteMany({ where: { channelId } });
+    await prisma.channelJob.create({
+      data: { idempotencyKey: secondJobKey, kind: "materialize_channel", channelId }
+    });
+    const [excluded, materialized] = await Promise.all([
+      ownerRequest.post(`/api/dashboard/channels/${channelId}/exclusions`, {
+        data: { postId: "post-1", reason: "Concurrent exclusion must win." }
+      }),
+      workerA.post("/api/internal/phase7/run?limit=1", { headers })
+    ]);
+    expect(excluded.status(), await excluded.text()).toBe(201);
+    expect(materialized.ok(), await materialized.text()).toBeTruthy();
+    expect(await prisma.channelPostExclusion.count({ where: { channelId, postId: "post-1" } })).toBe(1);
+    const resolved = await prisma.channelPost.findUnique({
+      where: { channelId_postId: { channelId, postId: "post-1" } },
+      select: { status: true }
+    });
+    expect(resolved === null || resolved.status === "removed").toBeTruthy();
+
+    const exclusionId = (await excluded.json()).exclusion.id;
+    const removeExclusion = await ownerRequest.delete(
+      `/api/dashboard/channels/${channelId}/exclusions/${exclusionId}`
+    );
+    expect(removeExclusion.ok(), await removeExclusion.text()).toBeTruthy();
+    await prisma.channelPost.deleteMany({ where: { channelId, postId: "post-1" } });
+    const [manualRace, exclusionRace] = await Promise.all([
+      ownerRequest.post(`/api/dashboard/channels/${channelId}/posts`, {
+        data: { postId: "post-1", position: 0 }
+      }),
+      ownerRequest.post(`/api/dashboard/channels/${channelId}/exclusions`, {
+        data: { postId: "post-1", reason: "Concurrent manual exclusion must win." }
+      })
+    ]);
+    expect([201, 409]).toContain(manualRace.status());
+    expect(exclusionRace.status(), await exclusionRace.text()).toBe(201);
+    expect(await prisma.channelPostExclusion.count({ where: { channelId, postId: "post-1" } })).toBe(1);
+    const manualResolved = await prisma.channelPost.findUnique({
+      where: { channelId_postId: { channelId, postId: "post-1" } },
+      select: { status: true }
+    });
+    expect(manualResolved === null || manualResolved.status === "removed").toBeTruthy();
+  } finally {
+    const [posts, rules, exclusions] = await Promise.all([
+      prisma.channelPost.findMany({ where: { channelId }, select: { id: true } }),
+      prisma.channelRule.findMany({ where: { channelId }, select: { id: true } }),
+      prisma.channelPostExclusion.findMany({ where: { channelId }, select: { id: true } })
+    ]);
+    await prisma.auditLog.deleteMany({
+      where: { targetId: { in: [channelId, ...posts.map(({ id }) => id), ...rules.map(({ id }) => id), ...exclusions.map(({ id }) => id)] } }
+    });
+    await prisma.channel.deleteMany({ where: { id: channelId } });
+    await ownerRequest.dispose();
+    await workerA.dispose();
+    await workerB.dispose();
   }
 });
 
@@ -2037,16 +2191,26 @@ test("phase 7 worker retains an eight-attempt terminal failure without leaking i
     await probe.dispose();
   }
   const workerRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
-  const idempotencyKey = `phase7-terminal-${Date.now().toString(36)}`;
+  const nonce = Date.now().toString(36);
+  const idempotencyKey = `phase7-terminal-${nonce}`;
+  const placeholderKey = `index:post:phase7-placeholder-${nonce}:2026-07-24T00:00:00.000Z`;
   try {
     const job = await prisma.channelJob.create({
       data: {
         idempotencyKey,
-        kind: "unsupported_test_kind",
+        kind: "materialize_channel",
         status: "failed",
         attempts: 7,
         availableAt: new Date(0),
         lastError: "source secret must be replaced"
+      }
+    });
+    await prisma.channelJob.create({
+      data: {
+        idempotencyKey: placeholderKey,
+        kind: "index_entity",
+        entityType: "post",
+        entityId: `phase7-placeholder-${nonce}`
       }
     });
     const workerToken = process.env.WORKER_ACCESS_TOKEN;
@@ -2059,6 +2223,10 @@ test("phase 7 worker retains an eight-attempt terminal failure without leaking i
     expect(terminal).toMatchObject({ status: "failed", attempts: 8 });
     expect(terminal.lastError).toBe("Phase 7 job failed after the maximum retry attempts.");
     expect(terminal.lastError).not.toContain("source secret");
+    expect(await prisma.channelJob.findUniqueOrThrow({
+      where: { idempotencyKey: placeholderKey },
+      select: { status: true, attempts: true }
+    })).toEqual({ status: "pending", attempts: 0 });
 
     const repeated = await workerRequest.post("/api/internal/phase7/run", {
       headers: { "x-worker-token": workerToken! }
@@ -2069,7 +2237,7 @@ test("phase 7 worker retains an eight-attempt terminal failure without leaking i
       select: { attempts: true }
     })).toEqual({ attempts: 8 });
   } finally {
-    await prisma.channelJob.deleteMany({ where: { idempotencyKey } });
+    await prisma.channelJob.deleteMany({ where: { idempotencyKey: { in: [idempotencyKey, placeholderKey] } } });
     await workerRequest.dispose();
   }
 });

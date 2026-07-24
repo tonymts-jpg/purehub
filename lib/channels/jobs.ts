@@ -49,12 +49,30 @@ function postRuleWhere(rules: Array<{ kind: string; value: string }>): Prisma.Po
   });
 }
 
+function isMaterializationConflict(error: unknown): boolean {
+  return typeof error === "object"
+    && error !== null
+    && "code" in error
+    && ["P2002", "P2034"].includes(String((error as { code?: unknown }).code));
+}
+
+async function retryMaterialization<T>(operation: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isMaterializationConflict(error) || attempt === 3) throw error;
+    }
+  }
+  throw new Error("Channel materialization retry failed.");
+}
+
 export async function materializeChannel(channelId: string): Promise<{
   matched: number;
   activated: number;
   removed: number;
 }> {
-  return prisma.$transaction(async (tx) => {
+  return retryMaterialization(() => prisma.$transaction(async (tx) => {
     const channel = await tx.channel.findUnique({
       where: { id: channelId },
       select: {
@@ -84,6 +102,17 @@ export async function materializeChannel(channelId: string): Promise<{
 
     let activated = 0;
     for (const postId of eligibleIds) {
+      const exclusion = await tx.channelPostExclusion.findUnique({
+        where: { channelId_postId: { channelId, postId } },
+        select: { id: true }
+      });
+      if (exclusion) {
+        await tx.channelPost.updateMany({
+          where: { channelId, postId, status: { not: "removed" } },
+          data: { status: "removed", reviewedByUserId: channel.ownerUserId }
+        });
+        continue;
+      }
       const existing = await tx.channelPost.findUnique({
         where: { channelId_postId: { channelId, postId } },
         select: { id: true, source: true, status: true }
@@ -126,7 +155,7 @@ export async function materializeChannel(channelId: string): Promise<{
       data: { status: "removed", reviewedByUserId: channel.ownerUserId }
     });
     return { matched: eligibleIds.size, activated, removed: removed.count };
-  });
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
 }
 
 async function claimPhase7Jobs(limit: number) {
@@ -137,6 +166,7 @@ async function claimPhase7Jobs(limit: number) {
         const candidates = await tx.channelJob.findMany({
           where: {
             status: { in: ["pending", "failed"] },
+            kind: "materialize_channel",
             attempts: { lt: MAX_JOB_ATTEMPTS },
             availableAt: { lte: now }
           },
