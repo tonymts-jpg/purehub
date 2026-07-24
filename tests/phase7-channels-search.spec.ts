@@ -2390,6 +2390,7 @@ test("phase 7 PostgreSQL search ranks safe entities, paginates, reindexes, and e
   const jobChannelId = `phase7-search-job-${nonce}`;
   const privateLeakId = "post-3";
   const reindexJobs: string[] = [];
+  const reindexAuditTargets: string[] = [];
   const auditIds: string[] = [];
   let databaseReady = false;
   try {
@@ -2433,17 +2434,41 @@ test("phase 7 PostgreSQL search ranks safe entities, paginates, reindexes, and e
         data: {}
       })
     ]);
-    expect([firstReindex.status(), secondReindex.status()].sort()).toEqual([200, 202]);
     const [firstCandidate, secondCandidate] = await Promise.all([
-      firstReindex.json(),
-      secondReindex.json()
+      firstReindex.json().catch(() => null as unknown),
+      secondReindex.json().catch(() => null as unknown)
     ]);
-    reindexJobs.push(...new Set([
-      firstCandidate.job?.id,
-      secondCandidate.job?.id
-    ].filter((id): id is string => typeof id === "string")));
-    const firstReindexBody = firstCandidate.enqueued ? firstCandidate : secondCandidate;
-    const secondReindexBody = firstCandidate.enqueued ? secondCandidate : firstCandidate;
+    const returnedJobIds = [firstCandidate, secondCandidate]
+      .map((candidate) => {
+        if (!candidate || typeof candidate !== "object" || !("job" in candidate)) {
+          return null;
+        }
+        const job = candidate.job;
+        if (!job || typeof job !== "object" || !("id" in job)) return null;
+        return typeof job.id === "string" ? job.id : null;
+      })
+      .filter((id): id is string => id !== null);
+    reindexJobs.push(...returnedJobIds);
+    reindexAuditTargets.push(...returnedJobIds);
+
+    expect([firstReindex.status(), secondReindex.status()].sort()).toEqual([200, 202]);
+    expect(firstCandidate).toMatchObject({
+      job: { id: expect.any(String) },
+      enqueued: expect.any(Boolean)
+    });
+    expect(secondCandidate).toMatchObject({
+      job: { id: expect.any(String) },
+      enqueued: expect.any(Boolean)
+    });
+    type ReindexResponseBody = {
+      job: { id: string };
+      progress: { stage: string; cursor: string | null };
+      enqueued: boolean;
+    };
+    const firstBody = firstCandidate as ReindexResponseBody;
+    const secondBody = secondCandidate as ReindexResponseBody;
+    const firstReindexBody = firstBody.enqueued ? firstBody : secondBody;
+    const secondReindexBody = firstBody.enqueued ? secondBody : firstBody;
     expect(secondReindexBody.job.id).toBe(firstReindexBody.job.id);
     expect(secondReindexBody.enqueued).toBeFalsy();
     expect(firstReindexBody.progress).toEqual({ stage: "post-source", cursor: null });
@@ -2665,12 +2690,15 @@ test("phase 7 PostgreSQL search ranks safe entities, paginates, reindexes, and e
   } finally {
     const channels = [hiddenId, suspendedId, jobChannelId];
     if (databaseReady) {
+      const uniqueAuditIds = [...new Set(auditIds)];
+      const uniqueReindexAuditTargets = [...new Set(reindexAuditTargets)];
+      const uniqueReindexJobs = [...new Set(reindexJobs)];
       await prisma.auditLog.deleteMany({
         where: {
           OR: [
-            { id: { in: auditIds } },
+            { id: { in: uniqueAuditIds } },
             { targetId: { in: channels } },
-            { targetId: { in: reindexJobs } }
+            { targetId: { in: uniqueReindexAuditTargets } }
           ]
         }
       });
@@ -2685,7 +2713,7 @@ test("phase 7 PostgreSQL search ranks safe entities, paginates, reindexes, and e
       await prisma.channelJob.deleteMany({
         where: {
           OR: [
-            { id: { in: reindexJobs } },
+            { id: { in: uniqueReindexJobs } },
             { entityId: { in: channels } }
           ]
         }
