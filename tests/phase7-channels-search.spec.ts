@@ -3099,3 +3099,116 @@ test("phase 7 search producers, leases, retries, and interleavings converge dura
     await worker.dispose();
   }
 });
+
+test("phase 7 channel UI and search UI expose responsive public routes", async ({ page }) => {
+  await page.goto("/channels");
+  await expect(page.getByRole("heading", { name: "探索频道" })).toBeVisible();
+  await expect(page.locator("body")).not.toHaveCSS("overflow-x", "scroll");
+
+  await page.goto("/search?q=yuki");
+  await expect(page.getByRole("heading", { name: "统一搜索" })).toBeVisible();
+  for (const tab of ["全部", "作品", "创作者", "频道"]) {
+    await expect(page.getByRole("tab", { name: tab })).toBeVisible();
+  }
+});
+
+test("phase 7 channel UI renders safe cards and a member-only private feed", async ({ page, request }, testInfo) => {
+  test.skip(!(await hasDatabase(request)), "Phase 7 channel UI requires the seeded PostgreSQL database.");
+
+  await page.goto("/channels");
+  await expect(page.getByTestId("channel-card").filter({ hasText: "PureHub Official" })).toBeVisible();
+  await expect(page.getByTestId("channel-card").filter({ hasText: "Yuki Studio" })).toBeVisible();
+  const privateCard = page.getByTestId("channel-card").filter({ hasText: "Private Curators" });
+  await expect(privateCard).toBeVisible();
+  await expect(privateCard.getByRole("link", { name: "申请加入" })).toBeVisible();
+
+  await page.goto("/channels/private-curators");
+  await expect(page.getByRole("button", { name: "申请加入频道" })).toBeVisible();
+  await expect(page.getByTestId("channel-feed")).toHaveCount(0);
+  await page.route("**/api/channels/private-curators/join-requests", async (route) => {
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "Temporary membership failure." })
+    });
+  });
+  await page.getByRole("button", { name: "申请加入频道" }).click();
+  await expect(page.getByRole("button", { name: "申请加入频道" })).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("Temporary membership failure.");
+  await page.unroute("**/api/channels/private-curators/join-requests");
+
+  await signInFan(page.request);
+  await page.goto("/channels/private-curators");
+  await expect(page.getByTestId("channel-feed")).toBeVisible();
+  await expect(page.getByTestId("channel-feed").getByRole("article")).toHaveCount(1);
+
+  if (testInfo.project.name === "mobile") {
+    const viewportWidth = page.viewportSize()?.width ?? 393;
+    for (const locator of [page.getByTestId("channel-header"), page.getByTestId("channel-feed")]) {
+      const box = await locator.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(viewportWidth + 1);
+    }
+  }
+});
+
+test("phase 7 channel UI returns not-found for an anonymous hidden private channel", async ({ page, request }, testInfo) => {
+  test.skip(!(await hasDatabase(request)), "Phase 7 hidden channel UI requires the seeded PostgreSQL database.");
+  const suffix = `${testInfo.project.name}-${Date.now().toString(36)}`;
+  const channelId = `phase7-ui-hidden-${suffix}`;
+  const slug = `phase7-ui-hidden-${suffix}`.slice(0, 50);
+
+  await prisma.channel.create({
+    data: {
+      id: channelId,
+      slug,
+      name: "Hidden UI Fixture",
+      description: "This private channel must not leak through the public page.",
+      kind: "creator",
+      visibility: "private",
+      discoverability: "hidden",
+      status: "active",
+      ownerUserId: "c2",
+      createdByUserId: "c2"
+    }
+  });
+
+  try {
+    const response = await page.goto(`/channels/${slug}`);
+    expect(response?.status()).toBe(404);
+    await expect(page.getByText("Hidden UI Fixture")).toHaveCount(0);
+  } finally {
+    await prisma.channel.deleteMany({ where: { id: channelId } });
+  }
+});
+
+test("phase 7 search UI filters typed results and appends a stable cursor page", async ({ page, request }, testInfo) => {
+  test.skip(!(await hasDatabase(request)), "Phase 7 search UI requires the seeded PostgreSQL database.");
+
+  await page.goto("/search?q=yuki");
+  await expect(page.getByRole("heading", { name: "统一搜索" })).toBeVisible();
+  await expect(page.getByTestId("search-result").first()).toBeVisible();
+  await page.getByRole("tab", { name: "创作者" }).click();
+  await expect(page).toHaveURL(/type=creator/);
+  await expect(page.getByTestId("search-result").first()).toHaveAttribute("data-result-type", "creator");
+
+  await page.goto("/search?q=cosplay");
+  const firstResult = page.getByTestId("search-result").first();
+  await expect(firstResult).toBeVisible();
+  const before = await firstResult.boundingBox();
+  const beforeCount = await page.getByTestId("search-result").count();
+  const loadMore = page.getByRole("button", { name: "加载更多搜索结果" });
+  if (await loadMore.count()) {
+    await loadMore.click();
+    await expect.poll(() => page.getByTestId("search-result").count()).toBeGreaterThan(beforeCount);
+    const after = await firstResult.boundingBox();
+    expect(after?.y).toBe(before?.y);
+  }
+
+  if (testInfo.project.name === "mobile") {
+    const viewportWidth = page.viewportSize()?.width ?? 393;
+    const bodyWidth = await page.locator("body").evaluate((body) => body.scrollWidth);
+    expect(bodyWidth).toBeLessThanOrEqual(viewportWidth);
+  }
+});

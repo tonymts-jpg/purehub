@@ -2,13 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Bell, BookOpen, Compass, Home, LayoutDashboard, LogIn, LogOut, Moon, PlusCircle, ShieldCheck, Sparkles, Sun, UserPlus, UserRound } from "lucide-react";
+import { Bell, BookOpen, Compass, Home, LayoutDashboard, LogIn, LogOut, Moon, PlusCircle, Radio, Search, ShieldCheck, Sparkles, Sun, UserPlus, UserRound } from "lucide-react";
 import { useDemoStore } from "@/lib/store";
 import { useEffect } from "react";
 import { authClient } from "@/lib/auth-client";
 
 const nav = [
   {href:"/",label:"首页",icon:Home},{href:"/explore",label:"探索",icon:Compass},
+  {href:"/channels",label:"频道",icon:Radio},{href:"/search",label:"搜索",icon:Search},
   {href:"/library",label:"收藏库",icon:BookOpen},{href:"/notifications",label:"通知",icon:Bell},
   {href:"/become-creator",label:"成为博主",icon:UserPlus}
 ];
@@ -50,7 +51,7 @@ export function AppShell({children}:{children:React.ReactNode}) {
     </header>
     <main className="pb-24 lg:ml-64 lg:pb-0">{children}</main>
     <nav className="fixed bottom-0 left-0 right-0 z-30 flex items-center justify-around border-t border-[var(--line)] bg-[var(--bg)]/92 px-2 py-2 backdrop-blur-xl lg:hidden">
-      {[nav[0],nav[1],nav[4],{href:"/dashboard",label:"工作台",icon:UserRound}].map(({href,label,icon:Icon})=><Link key={href} href={href} className={`flex min-w-16 flex-col items-center gap-1 rounded-xl py-2 text-[10px] font-semibold ${pathname===href?"text-violet":"muted"}`}><Icon size={20}/>{label}</Link>)}
+      {[nav[0],nav[1],nav[2],{href:"/dashboard",label:"工作台",icon:UserRound}].map(({href,label,icon:Icon})=><Link key={href} href={href} className={`flex min-w-16 flex-col items-center gap-1 rounded-xl py-2 text-[10px] font-semibold ${pathname===href?"text-violet":"muted"}`}><Icon size={20}/>{label}</Link>)}
     </nav>
     {toast&&<div role="status" className="fixed bottom-24 left-1/2 z-50 -translate-x-1/2 rounded-2xl bg-ink px-5 py-3 text-sm font-semibold text-white shadow-2xl dark:bg-white dark:text-ink">{toast}</div>}
   </div>
