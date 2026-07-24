@@ -3,10 +3,15 @@ import { ADMIN_SECTIONS, isChannelAdminRole } from "../lib/admin-auth";
 import { resolveChannelAccess } from "../lib/channels/auth";
 import {
   CHANNEL_QUOTAS,
+  assertNoChannelIdentityOverrides,
   channelCursorMatchesScope,
   encodeChannelCursor,
   parseChannelCursor,
   projectChannelSafeSummary,
+  resolveChannelLifecycleTransition,
+  validateChannelPatchInput,
+  validateChannelTakeoverInput,
+  validateQuotaOverrideInput,
   validateChannelInput
 } from "../lib/channels/types";
 import {
@@ -17,7 +22,7 @@ import {
   isSerializableConflict,
   retrySerializableOperation
 } from "../lib/channels/repository";
-import { hasDatabase, signInAdmin, signInCreator, signInFan, signInSupport } from "./auth-helpers";
+import { authHeaders, hasDatabase, signInAdmin, signInCreator, signInFan, signInSupport } from "./auth-helpers";
 
 async function requirePhase7(request: APIRequestContext, testInfo: TestInfo) {
   test.skip(testInfo.project.name === "mobile", "Phase 7 channel mutations run once against the shared staging database.");
@@ -206,6 +211,228 @@ test("phase 7 review separation and serializable quota retry are deterministic",
     name: ChannelRepositoryError.name,
     status: 409
   });
+});
+
+test("phase 7 lifecycle transition rules are strict and idempotent", () => {
+  expect(resolveChannelLifecycleTransition("suspend", "active"))
+    .toEqual({ status: "suspended", changed: true, jobKind: "delete_index" });
+  expect(resolveChannelLifecycleTransition("suspend", "suspended"))
+    .toEqual({ status: "suspended", changed: false, jobKind: null });
+  expect(resolveChannelLifecycleTransition("restore", "suspended"))
+    .toEqual({ status: "active", changed: true, jobKind: "index_entity" });
+  expect(resolveChannelLifecycleTransition("restore", "active"))
+    .toEqual({ status: "active", changed: false, jobKind: null });
+  expect(resolveChannelLifecycleTransition("archive", "pending"))
+    .toEqual({ status: "archived", changed: true, jobKind: "delete_index" });
+  expect(resolveChannelLifecycleTransition("archive", "archived"))
+    .toEqual({ status: "archived", changed: false, jobKind: null });
+  expect(() => resolveChannelLifecycleTransition("suspend", "draft")).toThrow("Only active channels");
+  expect(() => resolveChannelLifecycleTransition("restore", "rejected")).toThrow("Only suspended channels");
+});
+
+test("phase 7 lifecycle input helpers reject forged identities and invalid targets", () => {
+  expect(() => assertNoChannelIdentityOverrides({ ownerUserId: "c2" })).toThrow("ownerUserId");
+  expect(() => assertNoChannelIdentityOverrides({ createdByUserId: "c2" })).toThrow("createdByUserId");
+  expect(() => assertNoChannelIdentityOverrides({ userId: "c2" })).toThrow("userId");
+  expect(() => assertNoChannelIdentityOverrides({ actorId: "c2" })).toThrow("actorId");
+  expect(() => assertNoChannelIdentityOverrides({}, new URLSearchParams("actorUserId=c2"))).toThrow("actorUserId");
+
+  expect(validateChannelPatchInput({
+    name: "Updated Channel",
+    visibility: "private",
+    discoverability: "hidden"
+  })).toEqual({
+    name: "Updated Channel",
+    visibility: "private",
+    discoverability: "hidden"
+  });
+  expect(validateChannelPatchInput({ status: "archived" }, true)).toEqual({ status: "archived" });
+  expect(() => validateChannelPatchInput({ status: "active" }, true)).toThrow("archived");
+  expect(() => validateChannelPatchInput({ ownerUserId: "c2" })).toThrow("ownerUserId");
+
+  expect(validateChannelTakeoverInput({ newOwnerUserId: "c2" })).toEqual({ newOwnerUserId: "c2" });
+  expect(() => validateChannelTakeoverInput({ userId: "c2" })).toThrow("userId");
+
+  expect(validateQuotaOverrideInput({ maxChannels: 7, reason: "Approved capacity increase" }))
+    .toEqual({ maxChannels: 7, reason: "Approved capacity increase" });
+  expect(() => validateQuotaOverrideInput({ userId: "c1", maxChannels: 7, reason: "forged" })).toThrow("userId");
+  expect(() => validateQuotaOverrideInput({ maxChannels: -1, reason: "invalid" })).toThrow("maxChannels");
+  expect(() => validateQuotaOverrideInput({ maxChannels: 7, reason: " " })).toThrow("reason");
+});
+
+test("phase 7 lifecycle routes create, review, transfer, suspend, restore, and archive atomically", async ({}, testInfo) => {
+  const creatorRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const adminRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  try {
+    await requirePhase7(creatorRequest, testInfo);
+    await signInCreator(creatorRequest);
+    await signInAdmin(adminRequest);
+
+    const nonce = Date.now().toString(36);
+    const creatorCreate = await creatorRequest.post("/api/dashboard/channels", {
+      headers: authHeaders,
+      data: { ...validCreatorChannel, slug: `lifecycle-creator-${nonce}` }
+    });
+    expect(creatorCreate.status(), await creatorCreate.text()).toBe(201);
+    const creatorChannel = (await creatorCreate.json()).channel;
+    expect(creatorChannel).toMatchObject({ kind: "creator", status: "draft", ownerUserId: "c1" });
+
+    const dashboard = await creatorRequest.get("/api/dashboard/channels");
+    expect(dashboard.ok(), await dashboard.text()).toBeTruthy();
+    expect((await dashboard.json()).channels.map((channel: { id: string }) => channel.id)).toContain(creatorChannel.id);
+
+    const submitted = await creatorRequest.post(`/api/dashboard/channels/${creatorChannel.id}/submit`, {
+      headers: authHeaders
+    });
+    expect(submitted.ok(), await submitted.text()).toBeTruthy();
+    expect((await submitted.json()).channel.status).toBe("pending");
+
+    const reviewed = await adminRequest.post(`/api/admin/channels/${creatorChannel.id}/review`, {
+      headers: authHeaders,
+      data: { decision: "approved", note: "Lifecycle acceptance approved." }
+    });
+    expect(reviewed.ok(), await reviewed.text()).toBeTruthy();
+    expect((await reviewed.json()).channel).toMatchObject({
+      status: "active",
+      reviewNote: "Lifecycle acceptance approved."
+    });
+
+    const officialCreate = await adminRequest.post("/api/admin/channels", {
+      headers: authHeaders,
+      data: {
+        ...validCreatorChannel,
+        slug: `lifecycle-official-${nonce}`,
+        visibility: "public",
+        discoverability: "discoverable"
+      }
+    });
+    expect(officialCreate.status(), await officialCreate.text()).toBe(201);
+    const official = (await officialCreate.json()).channel;
+    expect(official).toMatchObject({ kind: "official", status: "active", ownerUserId: "admin-demo" });
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const takeover = await adminRequest.post(`/api/admin/channels/${official.id}/takeover`, {
+        headers: authHeaders,
+        data: { newOwnerUserId: "c1" }
+      });
+      expect(takeover.ok(), await takeover.text()).toBeTruthy();
+      expect((await takeover.json()).channel.ownerUserId).toBe("c1");
+    }
+
+    for (const action of ["suspend", "restore"] as const) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const response = await adminRequest.post(`/api/admin/channels/${official.id}/${action}`, {
+          headers: authHeaders
+        });
+        expect(response.ok(), await response.text()).toBeTruthy();
+      }
+    }
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const archived = await adminRequest.patch(`/api/admin/channels/${official.id}`, {
+        headers: authHeaders,
+        data: { status: "archived" }
+      });
+      expect(archived.ok(), await archived.text()).toBeTruthy();
+      expect((await archived.json()).channel.status).toBe("archived");
+    }
+
+    const detail = await adminRequest.get(`/api/admin/channels/${official.id}`);
+    expect(detail.ok(), await detail.text()).toBeTruthy();
+    const detailBody = await detail.json();
+    expect(detailBody.memberships.filter((membership: { role: string; status: string }) =>
+      membership.role === "owner" && membership.status === "active"
+    )).toHaveLength(1);
+    expect(detailBody.memberships.find((membership: { userId: string }) => membership.userId === "c1"))
+      .toMatchObject({ role: "owner", status: "active" });
+    expect(detailBody.auditLogs.some((audit: { action: string }) => audit.action === "channel.takeover")).toBeTruthy();
+  } finally {
+    await creatorRequest.dispose();
+    await adminRequest.dispose();
+  }
+});
+
+test("phase 7 lifecycle rejects self-review, self-restore, and forged mutation identities", async ({}, testInfo) => {
+  const creatorRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const adminRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  try {
+    await requirePhase7(creatorRequest, testInfo);
+    await signInCreator(creatorRequest);
+    await signInAdmin(adminRequest);
+    const nonce = Date.now().toString(36);
+
+    const forged = await creatorRequest.post("/api/dashboard/channels", {
+      headers: authHeaders,
+      data: { ...validCreatorChannel, slug: `lifecycle-forged-${nonce}`, ownerUserId: "admin-demo" }
+    });
+    expect(forged.status(), await forged.text()).toBe(400);
+
+    const created = await creatorRequest.post("/api/dashboard/channels", {
+      headers: authHeaders,
+      data: { ...validCreatorChannel, slug: `lifecycle-self-${nonce}` }
+    });
+    expect(created.status(), await created.text()).toBe(201);
+    const channel = (await created.json()).channel;
+    const submitted = await creatorRequest.post(`/api/dashboard/channels/${channel.id}/submit`, {
+      headers: authHeaders
+    });
+    expect(submitted.ok(), await submitted.text()).toBeTruthy();
+
+    const takeover = await adminRequest.post(`/api/admin/channels/${channel.id}/takeover`, {
+      headers: authHeaders,
+      data: { newOwnerUserId: "admin-demo" }
+    });
+    expect(takeover.ok(), await takeover.text()).toBeTruthy();
+
+    const selfReview = await adminRequest.post(`/api/admin/channels/${channel.id}/review`, {
+      headers: authHeaders,
+      data: { decision: "approved", note: "Must be rejected as self-review." }
+    });
+    expect(selfReview.status(), await selfReview.text()).toBe(403);
+
+    const officialCreate = await adminRequest.post("/api/admin/channels", {
+      headers: authHeaders,
+      data: {
+        ...validCreatorChannel,
+        slug: `lifecycle-self-restore-${nonce}`,
+        visibility: "public",
+        discoverability: "discoverable"
+      }
+    });
+    expect(officialCreate.status(), await officialCreate.text()).toBe(201);
+    const official = (await officialCreate.json()).channel;
+    const suspended = await adminRequest.post(`/api/admin/channels/${official.id}/suspend`, {
+      headers: authHeaders
+    });
+    expect(suspended.ok(), await suspended.text()).toBeTruthy();
+    const selfRestore = await adminRequest.post(`/api/admin/channels/${official.id}/restore`, {
+      headers: authHeaders
+    });
+    expect(selfRestore.status(), await selfRestore.text()).toBe(403);
+    const officialTakeover = await adminRequest.post(`/api/admin/channels/${official.id}/takeover`, {
+      headers: authHeaders,
+      data: { newOwnerUserId: "c1" }
+    });
+    expect(officialTakeover.ok(), await officialTakeover.text()).toBeTruthy();
+    const restored = await adminRequest.post(`/api/admin/channels/${official.id}/restore`, {
+      headers: authHeaders
+    });
+    expect(restored.ok(), await restored.text()).toBeTruthy();
+
+    const archive = await adminRequest.patch(`/api/admin/channels/${channel.id}`, {
+      headers: authHeaders,
+      data: { status: "archived" }
+    });
+    expect(archive.ok(), await archive.text()).toBeTruthy();
+    const archiveOfficial = await adminRequest.patch(`/api/admin/channels/${official.id}`, {
+      headers: authHeaders,
+      data: { status: "archived" }
+    });
+    expect(archiveOfficial.ok(), await archiveOfficial.text()).toBeTruthy();
+  } finally {
+    await creatorRequest.dispose();
+    await adminRequest.dispose();
+  }
 });
 
 test("phase 7 private discoverable route exposes safe summary only", async ({ request }, testInfo) => {

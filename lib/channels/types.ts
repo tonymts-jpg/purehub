@@ -182,6 +182,154 @@ function enumValue<T extends readonly string[]>(value: unknown, values: T, field
   return value as T[number];
 }
 
+const CHANNEL_IDENTITY_FIELDS = [
+  "userId",
+  "actorId",
+  "ownerUserId",
+  "ownerId",
+  "createdByUserId",
+  "createdById",
+  "actorUserId",
+  "adminId",
+  "adminUserId",
+  "createdByAdminId",
+  "reviewedByAdminId",
+  "reviewedByUserId",
+  "addedByUserId",
+  "excludedByUserId",
+  "invitedByUserId",
+  "acceptedByUserId"
+] as const;
+
+export type ChannelPatchInput = {
+  slug?: string;
+  name?: string;
+  description?: string;
+  visibility?: ChannelVisibility;
+  discoverability?: ChannelDiscoverability;
+  memberPostPolicy?: ChannelPostPolicy;
+  avatarAssetId?: string | null;
+  coverAssetId?: string | null;
+  status?: "archived";
+};
+
+export type ChannelLifecycleAction = "suspend" | "restore" | "archive";
+
+export function assertNoChannelIdentityOverrides(
+  input: unknown,
+  searchParams?: URLSearchParams,
+  additionalFields: readonly string[] = []
+): void {
+  const forbidden = [...CHANNEL_IDENTITY_FIELDS, ...additionalFields];
+  if (isRecord(input)) {
+    const field = forbidden.find((candidate) => Object.hasOwn(input, candidate));
+    if (field) throw new TypeError(`${field} is derived from authenticated context and must not be supplied.`);
+  }
+  if (searchParams) {
+    const field = forbidden.find((candidate) => searchParams.has(candidate));
+    if (field) throw new TypeError(`${field} is derived from authenticated context and must not be supplied.`);
+  }
+}
+
+export function resolveChannelLifecycleTransition(
+  action: ChannelLifecycleAction,
+  status: ChannelStatus
+): { status: ChannelStatus; changed: boolean; jobKind: "index_entity" | "delete_index" | null } {
+  if (action === "suspend") {
+    if (status === "suspended") return { status, changed: false, jobKind: null };
+    if (status !== "active") throw new TypeError("Only active channels may be suspended.");
+    return { status: "suspended", changed: true, jobKind: "delete_index" };
+  }
+  if (action === "restore") {
+    if (status === "active") return { status, changed: false, jobKind: null };
+    if (status !== "suspended") throw new TypeError("Only suspended channels may be restored.");
+    return { status: "active", changed: true, jobKind: "index_entity" };
+  }
+  if (action === "archive") {
+    if (status === "archived") return { status, changed: false, jobKind: null };
+    return { status: "archived", changed: true, jobKind: "delete_index" };
+  }
+  throw new TypeError("Channel lifecycle action is invalid.");
+}
+
+export function validateChannelPatchInput(input: unknown, allowArchive = false): ChannelPatchInput {
+  if (!isRecord(input)) throw new TypeError("Channel update must be an object.");
+  assertNoChannelIdentityOverrides(input);
+
+  const allowed = new Set([
+    "slug",
+    "name",
+    "description",
+    "visibility",
+    "discoverability",
+    "memberPostPolicy",
+    "avatarAssetId",
+    "coverAssetId",
+    ...(allowArchive ? ["status"] : [])
+  ]);
+  const unknownField = Object.keys(input).find((field) => !allowed.has(field));
+  if (unknownField) throw new TypeError(`${unknownField} is not allowed in a channel update.`);
+  if (Object.keys(input).length === 0) throw new TypeError("Channel update must include at least one field.");
+
+  const result: ChannelPatchInput = {};
+  if (input.slug !== undefined) result.slug = normalizeChannelSlug(typeof input.slug === "string" ? input.slug : "");
+  if (input.name !== undefined) {
+    const name = typeof input.name === "string" ? input.name.trim() : "";
+    if (name.length < 3 || name.length > 80) throw new TypeError("Channel name must be 3-80 characters.");
+    result.name = name;
+  }
+  if (input.description !== undefined) {
+    const description = typeof input.description === "string" ? input.description.trim() : "";
+    if (description.length > 1000) throw new TypeError("Channel description must be at most 1000 characters.");
+    result.description = description;
+  }
+  if (input.visibility !== undefined) {
+    result.visibility = enumValue(input.visibility, CHANNEL_VISIBILITIES, "Channel visibility");
+  }
+  if (input.discoverability !== undefined) {
+    result.discoverability = enumValue(input.discoverability, CHANNEL_DISCOVERABILITY, "Channel discoverability");
+  }
+  if (input.memberPostPolicy !== undefined) {
+    result.memberPostPolicy = enumValue(input.memberPostPolicy, CHANNEL_POST_POLICIES, "Member post policy");
+  }
+  if (input.avatarAssetId !== undefined) result.avatarAssetId = optionalAssetId(input.avatarAssetId, "avatarAssetId");
+  if (input.coverAssetId !== undefined) result.coverAssetId = optionalAssetId(input.coverAssetId, "coverAssetId");
+  if (input.status !== undefined) {
+    if (!allowArchive || input.status !== "archived") {
+      throw new TypeError("Only archived status is allowed through channel update.");
+    }
+    result.status = "archived";
+  }
+  return result;
+}
+
+export function validateChannelTakeoverInput(input: unknown): { newOwnerUserId: string } {
+  if (!isRecord(input)) throw new TypeError("Channel takeover input must be an object.");
+  assertNoChannelIdentityOverrides(input, undefined, ["userId"]);
+  if (Object.keys(input).some((field) => field !== "newOwnerUserId")) {
+    throw new TypeError("Channel takeover accepts only newOwnerUserId.");
+  }
+  const newOwnerUserId = typeof input.newOwnerUserId === "string" ? input.newOwnerUserId.trim() : "";
+  if (!newOwnerUserId || newOwnerUserId.length > 191) {
+    throw new TypeError("newOwnerUserId must be a non-empty user ID.");
+  }
+  return { newOwnerUserId };
+}
+
+export function validateQuotaOverrideInput(input: unknown): { maxChannels: number; reason: string } {
+  if (!isRecord(input)) throw new TypeError("Quota override input must be an object.");
+  assertNoChannelIdentityOverrides(input, undefined, ["userId"]);
+  if (Object.keys(input).some((field) => field !== "maxChannels" && field !== "reason")) {
+    throw new TypeError("Quota override accepts only maxChannels and reason.");
+  }
+  if (!Number.isInteger(input.maxChannels) || (input.maxChannels as number) < 0 || (input.maxChannels as number) > 100) {
+    throw new TypeError("maxChannels must be an integer between 0 and 100.");
+  }
+  const reason = typeof input.reason === "string" ? input.reason.trim() : "";
+  if (!reason || reason.length > 500) throw new TypeError("reason must be 1-500 characters.");
+  return { maxChannels: input.maxChannels as number, reason };
+}
+
 export function parseChannelCursor(value?: string): ChannelCursor | null {
   if (!value) return null;
   try {

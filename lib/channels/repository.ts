@@ -13,7 +13,9 @@ import {
   type ChannelDto,
   type ChannelJobInput,
   type ChannelLevelId,
+  type ChannelLifecycleAction,
   type ChannelListItemDto,
+  type ChannelPatchInput,
   type ChannelPostDto,
   type ChannelPostPolicy,
   type ChannelStatus,
@@ -24,6 +26,9 @@ import {
   encodeChannelCursor,
   parseChannelCursor,
   projectChannelSafeSummary,
+  resolveChannelLifecycleTransition,
+  validateChannelPatchInput,
+  validateQuotaOverrideInput,
   validateChannelInput
 } from "./types";
 
@@ -505,12 +510,37 @@ export async function reviewChannel(
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 }
 
-export async function listChannels(
-  input: ListChannelsInput,
-  viewerUserId: string | null
-): Promise<{ channels: ChannelListItemDto[]; nextCursor: string | null }> {
-  const limit = normalizeLimit(input.limit);
-  const cursor = decodeRequiredCursor(input.cursor, "channel-list");
+const adminChannelAccess: ChannelAccess = {
+  canRead: true,
+  canManage: true,
+  canCurate: true,
+  canManageMembers: true,
+  role: null
+};
+
+async function enqueueLifecycleJob(
+  tx: Prisma.TransactionClient,
+  channel: { id: string; updatedAt: Date },
+  kind: "index_entity" | "delete_index"
+) {
+  const version = channel.updatedAt.toISOString();
+  await enqueueChannelJob(tx, {
+    idempotencyKey: `${kind === "index_entity" ? "index" : "delete-index"}:channel:${channel.id}:${version}`,
+    kind,
+    channelId: channel.id,
+    entityType: "channel",
+    entityId: channel.id
+  });
+  if (kind === "index_entity") {
+    await enqueueChannelJob(tx, {
+      idempotencyKey: `materialize:${channel.id}:${version}`,
+      kind: "materialize_channel",
+      channelId: channel.id
+    });
+  }
+}
+
+function validateListInput(input: ListChannelsInput) {
   if (input.kind && !CHANNEL_KINDS.some((kind) => kind === input.kind)) {
     throw new ChannelRepositoryError("Channel kind is invalid.", 400);
   }
@@ -520,6 +550,457 @@ export async function listChannels(
   if (input.status && !CHANNEL_STATUSES.some((status) => status === input.status)) {
     throw new ChannelRepositoryError("Channel status is invalid.", 400);
   }
+}
+
+export async function listCreatorChannels(
+  actorUserId: string,
+  input: ListChannelsInput = {}
+): Promise<{ channels: ChannelDto[]; nextCursor: string | null }> {
+  validateListInput(input);
+  const limit = normalizeLimit(input.limit);
+  const cursor = decodeRequiredCursor(input.cursor, "channel-list");
+  const where: Prisma.ChannelWhereInput = {
+    ownerUserId: actorUserId,
+    ...(input.kind ? { kind: input.kind } : {}),
+    ...(input.visibility ? { visibility: input.visibility } : {}),
+    ...(input.status ? { status: input.status } : {}),
+    NOT: { status: { in: ["suspended", "archived"] } }
+  };
+  const rows = await prisma.channel.findMany({
+    where: cursor ? { AND: [where, channelListAfterPredicate(cursor)] } : where,
+    include: channelOwnerInclude,
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: limit + 1
+  });
+  const hasMore = rows.length > limit;
+  if (hasMore) rows.pop();
+  const channels = rows.map((channel) => mapChannel(channel, resolveChannelAccess({
+    status: channel.status as ChannelStatus,
+    visibility: channel.visibility as ChannelVisibility,
+    role: "owner",
+    adminRole: null
+  })));
+  const last = rows.at(-1);
+  return {
+    channels,
+    nextCursor: hasMore && last
+      ? encodeChannelCursor({
+          scope: "channel-list",
+          channelId: null,
+          pinnedAt: null,
+          position: null,
+          createdAt: last.createdAt.toISOString(),
+          id: last.id
+        })
+      : null
+  };
+}
+
+export async function getCreatorChannelById(actorUserId: string, channelId: string): Promise<ChannelDto> {
+  const channel = await prisma.channel.findUnique({
+    where: { id: channelId },
+    include: {
+      ...channelOwnerInclude,
+      memberships: {
+        where: { userId: actorUserId, role: "owner", status: "active", user: { status: "active" } },
+        select: { id: true }
+      }
+    }
+  });
+  if (!channel) notFound();
+  if (channel.ownerUserId !== actorUserId || channel.memberships.length !== 1) {
+    denied("Only the active channel owner may access this dashboard channel.");
+  }
+  const access = resolveChannelAccess({
+    status: channel.status as ChannelStatus,
+    visibility: channel.visibility as ChannelVisibility,
+    role: "owner",
+    adminRole: null
+  });
+  if (!access.canRead) denied("Channel status does not permit owner access.");
+  return mapChannel(channel, access);
+}
+
+export async function updateCreatorChannel(
+  actorUserId: string,
+  channelId: string,
+  input: ChannelPatchInput
+): Promise<ChannelDto> {
+  const validated = validateChannelPatchInput(input);
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const channel = await tx.channel.findUnique({
+        where: { id: channelId },
+        include: {
+          ...channelOwnerInclude,
+          memberships: {
+            where: { userId: actorUserId, role: "owner", status: "active", user: { status: "active" } },
+            select: { id: true }
+          }
+        }
+      });
+      if (!channel) notFound();
+      if (channel.ownerUserId !== actorUserId || channel.memberships.length !== 1) {
+        denied("Only the active channel owner may update this channel.");
+      }
+      if (!["draft", "rejected", "active"].includes(channel.status)) {
+        conflict("Pending, suspended, and archived channels cannot be edited by their owner.");
+      }
+
+      const visibility = validated.visibility ?? channel.visibility;
+      const updated = await tx.channel.update({
+        where: { id: channelId },
+        data: {
+          slug: validated.slug,
+          name: validated.name,
+          description: validated.description,
+          visibility: validated.visibility,
+          discoverability: visibility === "public" ? "discoverable" : validated.discoverability,
+          memberPostPolicy: validated.memberPostPolicy,
+          avatarAssetId: validated.avatarAssetId,
+          coverAssetId: validated.coverAssetId
+        },
+        include: channelOwnerInclude
+      });
+      await tx.auditLog.create({
+        data: {
+          actorUserId,
+          actorRole: "creator",
+          action: "channel.update",
+          targetType: "channel",
+          targetId: channelId,
+          metadata: validated as Prisma.InputJsonValue
+        }
+      });
+      await enqueueLifecycleJob(tx, updated, updated.status === "active" ? "index_entity" : "delete_index");
+      return mapChannel(updated, resolveChannelAccess({
+        status: updated.status as ChannelStatus,
+        visibility: updated.visibility as ChannelVisibility,
+        role: "owner",
+        adminRole: null
+      }));
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  } catch (error) {
+    if (error instanceof ChannelRepositoryError) throw error;
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      conflict("Channel slug is already in use.");
+    }
+    throw error;
+  }
+}
+
+export async function getAdminChannelById(admin: AdminContext, channelId: string) {
+  if (!adminCanMutateChannels(admin)) denied("Admin role is not allowed for channel access.");
+  const account = await prisma.adminAccount.findFirst({
+    where: {
+      userId: admin.actorUserId,
+      role: admin.role,
+      status: "active",
+      user: { status: "active" }
+    },
+    select: { id: true }
+  });
+  if (!account) denied("Active administrator access is required.");
+  const channel = await prisma.channel.findUnique({
+    where: { id: channelId },
+    include: channelOwnerInclude
+  });
+  if (!channel) notFound();
+  const [memberships, auditLogs] = await Promise.all([
+    prisma.channelMembership.findMany({
+      where: { channelId },
+      orderBy: [{ role: "asc" }, { createdAt: "asc" }],
+      select: {
+        id: true,
+        userId: true,
+        role: true,
+        status: true,
+        createdAt: true,
+        updatedAt: true,
+        user: { select: { id: true, name: true, handle: true, avatar: true } }
+      }
+    }),
+    prisma.auditLog.findMany({
+      where: { targetType: "channel", targetId: channelId },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: 100
+    })
+  ]);
+  return { channel: mapChannel(channel, adminChannelAccess), memberships, auditLogs };
+}
+
+export async function updateAdminChannel(
+  admin: AdminContext,
+  channelId: string,
+  input: ChannelPatchInput
+): Promise<ChannelDto> {
+  const validated = validateChannelPatchInput(input, true);
+  try {
+    return await prisma.$transaction(async (tx) => {
+      await requireActiveAdmin(tx, admin);
+      const channel = await tx.channel.findUnique({
+        where: { id: channelId },
+        include: channelOwnerInclude
+      });
+      if (!channel) notFound();
+
+      if (validated.status === "archived") {
+        const transition = resolveChannelLifecycleTransition("archive", channel.status as ChannelStatus);
+        if (!transition.changed && Object.keys(validated).length === 1) {
+          return mapChannel(channel, adminChannelAccess);
+        }
+      }
+      if (channel.status === "archived" && Object.keys(validated).some((field) => field !== "status")) {
+        conflict("Archived channels cannot be edited.");
+      }
+
+      const visibility = validated.visibility ?? channel.visibility;
+      const updated = await tx.channel.update({
+        where: { id: channelId },
+        data: {
+          slug: validated.slug,
+          name: validated.name,
+          description: validated.description,
+          visibility: validated.visibility,
+          discoverability: visibility === "public" ? "discoverable" : validated.discoverability,
+          memberPostPolicy: validated.memberPostPolicy,
+          avatarAssetId: validated.avatarAssetId,
+          coverAssetId: validated.coverAssetId,
+          status: validated.status,
+          suspendedAt: validated.status === "archived" ? null : undefined
+        },
+        include: channelOwnerInclude
+      });
+      await tx.auditLog.create({
+        data: {
+          actorUserId: admin.actorUserId,
+          actorRole: admin.role,
+          action: validated.status === "archived" ? "channel.archive" : "channel.update",
+          targetType: "channel",
+          targetId: channelId,
+          metadata: {
+            previousStatus: channel.status,
+            ...validated
+          } as Prisma.InputJsonValue
+        }
+      });
+      await enqueueLifecycleJob(tx, updated, updated.status === "active" ? "index_entity" : "delete_index");
+      return mapChannel(updated, adminChannelAccess);
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  } catch (error) {
+    if (error instanceof ChannelRepositoryError) throw error;
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      conflict("Channel slug is already in use.");
+    }
+    throw error;
+  }
+}
+
+export async function transitionChannel(
+  admin: AdminContext,
+  channelId: string,
+  action: Exclude<ChannelLifecycleAction, "archive">
+): Promise<ChannelDto> {
+  return prisma.$transaction(async (tx) => {
+    await requireActiveAdmin(tx, admin);
+    const channel = await tx.channel.findUnique({
+      where: { id: channelId },
+      include: channelOwnerInclude
+    });
+    if (!channel) notFound();
+    if (action === "restore" && isChannelSelfReview(admin.actorUserId, channel.ownerUserId)) {
+      denied("Channel owners cannot restore their own channel.");
+    }
+
+    let transition: ReturnType<typeof resolveChannelLifecycleTransition>;
+    try {
+      transition = resolveChannelLifecycleTransition(action, channel.status as ChannelStatus);
+    } catch (error) {
+      if (error instanceof TypeError) conflict(error.message);
+      throw error;
+    }
+    if (!transition.changed) return mapChannel(channel, adminChannelAccess);
+
+    const updated = await tx.channel.update({
+      where: { id: channelId },
+      data: {
+        status: transition.status,
+        suspendedAt: action === "suspend" ? new Date() : null
+      },
+      include: channelOwnerInclude
+    });
+    await tx.auditLog.create({
+      data: {
+        actorUserId: admin.actorUserId,
+        actorRole: admin.role,
+        action: `channel.${action}`,
+        targetType: "channel",
+        targetId: channelId,
+        metadata: { previousStatus: channel.status, status: transition.status }
+      }
+    });
+    if (transition.jobKind) await enqueueLifecycleJob(tx, updated, transition.jobKind);
+    return mapChannel(updated, adminChannelAccess);
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+}
+
+export async function takeoverChannel(
+  admin: AdminContext,
+  channelId: string,
+  newOwnerUserId: string
+): Promise<ChannelDto> {
+  return prisma.$transaction(async (tx) => {
+    await requireActiveAdmin(tx, admin);
+    const channel = await tx.channel.findUnique({
+      where: { id: channelId },
+      include: channelOwnerInclude
+    });
+    if (!channel) notFound();
+    const newOwner = await tx.user.findUnique({
+      where: { id: newOwnerUserId },
+      select: { id: true, status: true }
+    });
+    if (!newOwner || newOwner.status !== "active") {
+      throw new ChannelRepositoryError("New channel owner was not found or is inactive.", 404);
+    }
+
+    const [existingOwnerRoleCount, existingTargetMembership] = await Promise.all([
+      tx.channelMembership.count({
+        where: { channelId, role: "owner" }
+      }),
+      tx.channelMembership.findUnique({
+        where: { channelId_userId: { channelId, userId: newOwnerUserId } },
+        select: { role: true, status: true }
+      })
+    ]);
+    if (
+      channel.ownerUserId === newOwnerUserId
+      && existingOwnerRoleCount === 1
+      && existingTargetMembership?.role === "owner"
+      && existingTargetMembership.status === "active"
+    ) {
+      return mapChannel(channel, adminChannelAccess);
+    }
+
+    await tx.channelMembership.updateMany({
+      where: { channelId, role: "owner", userId: { not: newOwnerUserId } },
+      data: { role: "member" }
+    });
+    await tx.channelMembership.upsert({
+      where: { channelId_userId: { channelId, userId: newOwnerUserId } },
+      update: {
+        role: "owner",
+        status: "active",
+        reviewedByUserId: admin.actorUserId,
+        reviewedAt: new Date()
+      },
+      create: {
+        channelId,
+        userId: newOwnerUserId,
+        role: "owner",
+        status: "active",
+        invitedByUserId: admin.actorUserId,
+        reviewedByUserId: admin.actorUserId,
+        reviewedAt: new Date()
+      }
+    });
+
+    const changed = channel.ownerUserId !== newOwnerUserId;
+    const updated = await tx.channel.update({
+      where: { id: channelId },
+      data: { ownerUserId: newOwnerUserId },
+      include: channelOwnerInclude
+    });
+    const activeOwnerCount = await tx.channelMembership.count({
+      where: { channelId, role: "owner", status: "active" }
+    });
+    if (activeOwnerCount !== 1) conflict("Channel takeover could not establish exactly one active owner.");
+
+    await tx.auditLog.create({
+      data: {
+        actorUserId: admin.actorUserId,
+        actorRole: admin.role,
+        action: "channel.takeover",
+        targetType: "channel",
+        targetId: channelId,
+        metadata: {
+          previousOwnerUserId: channel.ownerUserId,
+          newOwnerUserId,
+          repairedOwnerMemberships: !changed
+        }
+      }
+    });
+    await enqueueLifecycleJob(tx, updated, updated.status === "active" ? "index_entity" : "delete_index");
+    return mapChannel(updated, adminChannelAccess);
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+}
+
+export async function setChannelQuotaOverride(
+  admin: AdminContext,
+  userId: string,
+  input: { maxChannels: number; reason: string }
+) {
+  const validated = validateQuotaOverrideInput(input);
+  return prisma.$transaction(async (tx) => {
+    await requireActiveAdmin(tx, admin);
+    const target = await tx.user.findUnique({
+      where: { id: userId },
+      select: { role: true, creatorStatus: true, status: true }
+    });
+    if (!target) throw new ChannelRepositoryError("Creator not found.", 404);
+    if (target.status !== "active" || target.role !== "creator" || target.creatorStatus !== "approved") {
+      throw new ChannelRepositoryError("Quota overrides require an active approved creator.", 409);
+    }
+    await creatorQuota(tx, userId);
+    const quotaOverride = await tx.channelQuotaOverride.upsert({
+      where: { userId },
+      update: {
+        maxChannels: validated.maxChannels,
+        reason: validated.reason,
+        createdByAdminId: admin.actorUserId
+      },
+      create: {
+        userId,
+        maxChannels: validated.maxChannels,
+        reason: validated.reason,
+        createdByAdminId: admin.actorUserId
+      }
+    });
+    await tx.auditLog.create({
+      data: {
+        actorUserId: admin.actorUserId,
+        actorRole: admin.role,
+        action: "channel.quota_override",
+        targetType: "user",
+        targetId: userId,
+        metadata: validated
+      }
+    });
+    const quota = await creatorQuota(tx, userId);
+    return { quotaOverride, quota };
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+}
+
+export async function getAdminChannelQuota(admin: AdminContext, userId: string) {
+  if (!adminCanMutateChannels(admin)) denied("Admin role is not allowed for channel access.");
+  const target = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { role: true, creatorStatus: true, status: true }
+  });
+  if (!target) throw new ChannelRepositoryError("Creator not found.", 404);
+  if (target.status !== "active" || target.role !== "creator" || target.creatorStatus !== "approved") {
+    throw new ChannelRepositoryError("Quota overrides require an active approved creator.", 409);
+  }
+  return getCreatorChannelQuota(userId);
+}
+
+export async function listChannels(
+  input: ListChannelsInput,
+  viewerUserId: string | null
+): Promise<{ channels: ChannelListItemDto[]; nextCursor: string | null }> {
+  validateListInput(input);
+  const limit = normalizeLimit(input.limit);
+  const cursor = decodeRequiredCursor(input.cursor, "channel-list");
 
   const activeAdmin = viewerUserId
       ? await prisma.adminAccount.findFirst({

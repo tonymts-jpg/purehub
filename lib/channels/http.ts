@@ -1,0 +1,47 @@
+import { NextResponse } from "next/server";
+import { ChannelRepositoryError } from "./repository";
+import type { ListChannelsInput } from "./types";
+
+export async function readChannelJson(request: Request, optional = false): Promise<unknown> {
+  if (optional && request.body === null) return {};
+  try {
+    return await request.json();
+  } catch {
+    if (optional) return {};
+    throw new TypeError("Request body must be valid JSON.");
+  }
+}
+
+export function requireEmptyChannelMutation(input: unknown): void {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    throw new TypeError("Request body must be an object.");
+  }
+  const fields = Object.keys(input);
+  if (fields.length) throw new TypeError(`This mutation does not accept ${fields[0]}.`);
+}
+
+export function channelListInput(request: Request): ListChannelsInput {
+  const searchParams = new URL(request.url).searchParams;
+  const cursor = searchParams.get("cursor");
+  const kind = searchParams.get("kind");
+  const visibility = searchParams.get("visibility");
+  const status = searchParams.get("status");
+  const limit = searchParams.get("limit");
+  return {
+    ...(cursor ? { cursor } : {}),
+    ...(kind ? { kind: kind as ListChannelsInput["kind"] } : {}),
+    ...(visibility ? { visibility: visibility as ListChannelsInput["visibility"] } : {}),
+    ...(status ? { status: status as ListChannelsInput["status"] } : {}),
+    ...(limit !== null ? { limit: Number(limit) } : {})
+  };
+}
+
+export function channelRouteError(error: unknown): NextResponse {
+  if (error instanceof ChannelRepositoryError) {
+    return NextResponse.json({ error: error.message }, { status: error.status });
+  }
+  if (error instanceof TypeError) {
+    return NextResponse.json({ error: error.message }, { status: 400 });
+  }
+  throw error;
+}
