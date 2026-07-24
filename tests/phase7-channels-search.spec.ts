@@ -42,8 +42,19 @@ import {
   isChannelSelfReview,
   isSerializableConflict,
   retryMembershipSerializableOperation,
-  retrySerializableOperation
+  retrySerializableOperation,
+  validateChannelExclusionMutationInput,
+  validateChannelPostMutationInput,
+  validateChannelPostPatchInput,
+  validateChannelRuleMutationInput
 } from "../lib/channels/repository";
+import {
+  deleteIndexJobKey,
+  indexEntityJobKey,
+  materializeChannelJobKey,
+  phase7JobBackoffSeconds,
+  reindexAllJobKey
+} from "../lib/channels/jobs";
 import { prisma } from "../lib/prisma";
 import {
   authHeaders,
@@ -1796,5 +1807,269 @@ test("phase 7 ACL resolves admin, owner, editor, member, and non-member permissi
     } finally {
       await context.dispose();
     }
+  }
+});
+
+test("phase 7 curation and worker routes enforce their authentication boundaries", async ({ request }) => {
+  const curation = await request.post("/api/dashboard/channels/channel-yuki-studio/posts", {
+    data: { postId: "post-1" }
+  });
+  expect(curation.status(), await curation.text()).toBe(401);
+
+  const worker = await request.post("/api/internal/phase7/run");
+  expect(worker.status(), await worker.text()).toBe(401);
+});
+
+test("phase 7 curation validation and durable job helpers are strict and deterministic", () => {
+  const version = new Date("2026-07-24T12:34:56.000Z");
+  expect(materializeChannelJobKey("channel-1", version))
+    .toBe("materialize:channel-1:2026-07-24T12:34:56.000Z");
+  expect(indexEntityJobKey("post", "post-1", version))
+    .toBe("index:post:post-1:2026-07-24T12:34:56.000Z");
+  expect(deleteIndexJobKey("channel", "channel-1", version))
+    .toBe("delete-index:channel:channel-1:2026-07-24T12:34:56.000Z");
+  expect(reindexAllJobKey(version)).toBe("reindex-all:2026-07-24T12:34:56.000Z");
+  expect([1, 2, 7, 8, 9].map(phase7JobBackoffSeconds)).toEqual([30, 60, 1920, 3600, 3600]);
+
+  expect(validateChannelPostMutationInput({
+    postId: "post-1",
+    position: -2_147_483_648,
+    pinned: true
+  })).toEqual({ postId: "post-1", position: -2_147_483_648, pinned: true });
+  expect(validateChannelPostPatchInput({ position: 2_147_483_647, status: "active" }))
+    .toEqual({ position: 2_147_483_647, status: "active" });
+  expect(validateChannelRuleMutationInput({ kind: "tag", value: " featured " }))
+    .toEqual({ kind: "tag", value: "featured", enabled: true });
+  expect(validateChannelExclusionMutationInput({ postId: "post-1", reason: " no match " }))
+    .toEqual({ postId: "post-1", reason: "no match" });
+
+  for (const invalid of [
+    () => validateChannelPostMutationInput({ postId: "post-1", position: 2_147_483_648 }),
+    () => validateChannelPostPatchInput({ status: "pending" }),
+    () => validateChannelRuleMutationInput({ kind: "and", value: "x" }),
+    () => validateChannelExclusionMutationInput({ postId: "post-1", reason: "", actorId: "fan-demo" })
+  ]) {
+    expect(invalid).toThrow();
+  }
+});
+
+test("phase 7 curation resolves manual, member, rule, exclusion, and worker precedence", async ({}, testInfo) => {
+  test.setTimeout(120_000);
+  const probe = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  try {
+    await requirePhase7(probe, testInfo);
+  } finally {
+    await probe.dispose();
+  }
+
+  const ownerRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const editorRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const memberRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const workerRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const nonce = `${Date.now().toString(36)}${Math.floor(Math.random() * 1_000_000).toString(36)}`;
+  const channelId = `phase7-curation-${nonce}`;
+  const slug = `phase7-curation-${nonce}`;
+  const auditTargetIds: string[] = [channelId];
+  try {
+    await signInCreator(ownerRequest, "chenmo");
+    await signInCreator(editorRequest);
+    await signInFan(memberRequest);
+    await prisma.channel.create({
+      data: {
+        id: channelId,
+        slug,
+        name: "Phase Seven Curation",
+        description: "Temporary mixed curation acceptance channel.",
+        kind: "creator",
+        visibility: "private",
+        discoverability: "hidden",
+        status: "active",
+        ownerUserId: "c2",
+        createdByUserId: "c2",
+        memberPostPolicy: "direct",
+        reviewedByAdminId: "admin-demo",
+        reviewedAt: new Date(),
+        memberships: {
+          create: [
+            { userId: "c2", role: "owner", status: "active", reviewedByUserId: "admin-demo", reviewedAt: new Date() },
+            { userId: "c1", role: "editor", status: "active", invitedByUserId: "c2", reviewedByUserId: "c2", reviewedAt: new Date() },
+            { userId: "fan-demo", role: "member", status: "active", invitedByUserId: "c2", reviewedByUserId: "c2", reviewedAt: new Date() }
+          ]
+        }
+      }
+    });
+
+    const manual = await ownerRequest.post(`/api/dashboard/channels/${channelId}/posts`, {
+      data: { postId: "post-1", position: 2, pinned: true }
+    });
+    expect(manual.status(), await manual.text()).toBe(201);
+    const manualPost = (await manual.json()).channelPost;
+    auditTargetIds.push(manualPost.id);
+    expect(manualPost).toMatchObject({ postId: "post-1", source: "manual", status: "active", position: 2 });
+    expect(manualPost.pinnedAt).toEqual(expect.any(String));
+
+    const direct = await memberRequest.post(`/api/dashboard/channels/${channelId}/posts`, {
+      data: { postId: "post-2", position: 1 }
+    });
+    expect(direct.status(), await direct.text()).toBe(201);
+    const directPost = (await direct.json()).channelPost;
+    auditTargetIds.push(directPost.id);
+    expect(directPost).toMatchObject({ postId: "post-2", source: "manual", status: "active" });
+
+    const policy = await ownerRequest.patch(`/api/dashboard/channels/${channelId}`, {
+      data: { memberPostPolicy: "approval_required" }
+    });
+    expect(policy.ok(), await policy.text()).toBeTruthy();
+    const pending = await memberRequest.post(`/api/dashboard/channels/${channelId}/posts`, {
+      data: { postId: "post-3" }
+    });
+    expect(pending.status(), await pending.text()).toBe(201);
+    const pendingPost = (await pending.json()).channelPost;
+    auditTargetIds.push(pendingPost.id);
+    expect(pendingPost).toMatchObject({ postId: "post-3", source: "manual", status: "pending" });
+
+    const approved = await editorRequest.patch(
+      `/api/dashboard/channels/${channelId}/posts/${pendingPost.id}`,
+      { data: { status: "active", position: 3 } }
+    );
+    expect(approved.ok(), await approved.text()).toBeTruthy();
+    expect((await approved.json()).channelPost).toMatchObject({ status: "active", position: 3 });
+
+    const postOne = await prisma.post.findUniqueOrThrow({
+      where: { id: "post-1" },
+      select: { category: true, tags: true, creatorId: true }
+    });
+    const firstTag = Array.isArray(postOne.tags)
+      ? postOne.tags.find((tag): tag is string => typeof tag === "string")
+      : null;
+    expect(firstTag).toEqual(expect.any(String));
+    for (const rule of [
+      { kind: "category", value: postOne.category },
+      { kind: "creator", value: postOne.creatorId },
+      { kind: "tag", value: firstTag }
+    ]) {
+      const created = await editorRequest.post(`/api/dashboard/channels/${channelId}/rules`, { data: rule });
+      expect(created.status(), await created.text()).toBe(201);
+      auditTargetIds.push((await created.json()).rule.id);
+    }
+
+    const workerToken = process.env.WORKER_ACCESS_TOKEN;
+    expect(workerToken, "WORKER_ACCESS_TOKEN is required for Phase 7 worker acceptance.").toBeTruthy();
+    const runWorker = async () => {
+      const response = await workerRequest.post("/api/internal/phase7/run", {
+        headers: { "x-worker-token": workerToken! }
+      });
+      expect(response.ok(), await response.text()).toBeTruthy();
+      return response.json();
+    };
+    expect(await runWorker()).toMatchObject({ claimed: expect.any(Number), completed: expect.any(Number), failed: 0 });
+    expect(await runWorker()).toMatchObject({ failed: 0 });
+    expect(await prisma.channelPost.count({ where: { channelId, postId: "post-1" } })).toBe(1);
+    expect(await prisma.channelPost.findUniqueOrThrow({
+      where: { channelId_postId: { channelId, postId: "post-1" } },
+      select: { source: true, status: true }
+    })).toEqual({ source: "manual", status: "active" });
+
+    const exclusion = await editorRequest.post(`/api/dashboard/channels/${channelId}/exclusions`, {
+      data: { postId: "post-1", reason: "Task 6 exclusion precedence." }
+    });
+    expect(exclusion.status(), await exclusion.text()).toBe(201);
+    const exclusionId = (await exclusion.json()).exclusion.id;
+    auditTargetIds.push(exclusionId);
+    expect(await prisma.channelPost.findUniqueOrThrow({
+      where: { channelId_postId: { channelId, postId: "post-1" } },
+      select: { status: true }
+    })).toEqual({ status: "removed" });
+
+    await runWorker();
+    const removeExclusion = await editorRequest.delete(
+      `/api/dashboard/channels/${channelId}/exclusions/${exclusionId}`
+    );
+    expect(removeExclusion.ok(), await removeExclusion.text()).toBeTruthy();
+    await runWorker();
+    expect(await prisma.channelPost.findUniqueOrThrow({
+      where: { channelId_postId: { channelId, postId: "post-1" } },
+      select: { source: true, status: true }
+    })).toEqual({ source: "manual", status: "active" });
+
+    const feed = await ownerRequest.get(`/api/dashboard/channels/${channelId}/posts?limit=2`);
+    expect(feed.ok(), await feed.text()).toBeTruthy();
+    const feedBody = await feed.json();
+    expect(feedBody.channelPosts[0]).toMatchObject({ postId: "post-1", position: 2 });
+    expect(feedBody.nextCursor).toEqual(expect.any(String));
+    const secondFeed = await ownerRequest.get(
+      `/api/dashboard/channels/${channelId}/posts?limit=2&cursor=${encodeURIComponent(feedBody.nextCursor)}`
+    );
+    expect(secondFeed.ok(), await secondFeed.text()).toBeTruthy();
+    const secondFeedBody = await secondFeed.json();
+    expect(secondFeedBody.channelPosts.map(({ id }: { id: string }) => id))
+      .not.toEqual(expect.arrayContaining(feedBody.channelPosts.map(({ id }: { id: string }) => id)));
+
+    await prisma.channel.update({ where: { id: channelId }, data: { status: "suspended", suspendedAt: new Date() } });
+    const blocked = await ownerRequest.post(`/api/dashboard/channels/${channelId}/posts`, {
+      data: { postId: "post-4" }
+    });
+    expect(blocked.status(), await blocked.text()).toBe(409);
+  } finally {
+    const curationRows = await prisma.channelPost.findMany({ where: { channelId }, select: { id: true } });
+    const ruleRows = await prisma.channelRule.findMany({ where: { channelId }, select: { id: true } });
+    const exclusionRows = await prisma.channelPostExclusion.findMany({ where: { channelId }, select: { id: true } });
+    const targets = [
+      ...auditTargetIds,
+      ...curationRows.map(({ id }) => id),
+      ...ruleRows.map(({ id }) => id),
+      ...exclusionRows.map(({ id }) => id)
+    ];
+    await prisma.auditLog.deleteMany({ where: { targetId: { in: targets } } });
+    await prisma.channel.deleteMany({ where: { id: channelId } });
+    await ownerRequest.dispose();
+    await editorRequest.dispose();
+    await memberRequest.dispose();
+    await workerRequest.dispose();
+  }
+});
+
+test("phase 7 worker retains an eight-attempt terminal failure without leaking its source error", async ({}, testInfo) => {
+  const probe = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  try {
+    await requirePhase7(probe, testInfo);
+  } finally {
+    await probe.dispose();
+  }
+  const workerRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const idempotencyKey = `phase7-terminal-${Date.now().toString(36)}`;
+  try {
+    const job = await prisma.channelJob.create({
+      data: {
+        idempotencyKey,
+        kind: "unsupported_test_kind",
+        status: "failed",
+        attempts: 7,
+        availableAt: new Date(0),
+        lastError: "source secret must be replaced"
+      }
+    });
+    const workerToken = process.env.WORKER_ACCESS_TOKEN;
+    expect(workerToken, "WORKER_ACCESS_TOKEN is required for Phase 7 worker acceptance.").toBeTruthy();
+    const run = await workerRequest.post("/api/internal/phase7/run", {
+      headers: { "x-worker-token": workerToken! }
+    });
+    expect(run.ok(), await run.text()).toBeTruthy();
+    const terminal = await prisma.channelJob.findUniqueOrThrow({ where: { id: job.id } });
+    expect(terminal).toMatchObject({ status: "failed", attempts: 8 });
+    expect(terminal.lastError).toBe("Phase 7 job failed after the maximum retry attempts.");
+    expect(terminal.lastError).not.toContain("source secret");
+
+    const repeated = await workerRequest.post("/api/internal/phase7/run", {
+      headers: { "x-worker-token": workerToken! }
+    });
+    expect(repeated.ok(), await repeated.text()).toBeTruthy();
+    expect(await prisma.channelJob.findUniqueOrThrow({
+      where: { id: job.id },
+      select: { attempts: true }
+    })).toEqual({ attempts: 8 });
+  } finally {
+    await prisma.channelJob.deleteMany({ where: { idempotencyKey } });
+    await workerRequest.dispose();
   }
 });
