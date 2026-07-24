@@ -57,6 +57,11 @@ import {
 } from "../lib/channels/jobs";
 import { prisma } from "../lib/prisma";
 import {
+  encodeSearchCursor,
+  normalizeSearchInput,
+  parseSearchCursor
+} from "../lib/search/repository";
+import {
   authHeaders,
   hasDatabase,
   registerFan,
@@ -2237,7 +2242,10 @@ test("phase 7 worker retains an eight-attempt terminal failure without leaking i
     expect(await prisma.channelJob.findUniqueOrThrow({
       where: { idempotencyKey: placeholderKey },
       select: { status: true, attempts: true }
-    })).toEqual({ status: "pending", attempts: 0 });
+    })).toEqual({ status: "completed", attempts: 1 });
+    expect(await prisma.searchDocument.count({
+      where: { entityType: "post", entityId: `phase7-placeholder-${nonce}` }
+    })).toBe(0);
 
     const repeated = await workerRequest.post("/api/internal/phase7/run", {
       headers: { "x-worker-token": workerToken! }
@@ -2250,5 +2258,351 @@ test("phase 7 worker retains an eight-attempt terminal failure without leaking i
   } finally {
     await prisma.channelJob.deleteMany({ where: { idempotencyKey: { in: [idempotencyKey, placeholderKey] } } });
     await workerRequest.dispose();
+  }
+});
+
+test("phase 7 search validation binds stable cursors to normalized query and type", () => {
+  const input = normalizeSearchInput({
+    query: "  YUKI   Studio ",
+    type: "channel",
+    limit: 50
+  });
+  expect(input).toEqual({
+    query: "yuki studio",
+    type: "channel",
+    limit: 50,
+    cursor: null
+  });
+
+  const cursor = encodeSearchCursor({
+    query: input.query,
+    type: input.type ?? null,
+    rank: 1.25,
+    publishedAt: "2026-07-24T00:00:00.000Z",
+    entityType: "channel",
+    entityId: "channel-yuki-studio"
+  });
+  expect(parseSearchCursor(cursor, input.query, input.type)).toMatchObject({
+    rank: 1.25,
+    publishedAt: "2026-07-24T00:00:00.000Z",
+    entityType: "channel",
+    entityId: "channel-yuki-studio"
+  });
+
+  for (const invalid of [
+    () => normalizeSearchInput({ query: "x" }),
+    () => normalizeSearchInput({ query: "x".repeat(101) }),
+    () => normalizeSearchInput({ query: "yuki", type: "member" as never }),
+    () => normalizeSearchInput({ query: "yuki", limit: 51 }),
+    () => parseSearchCursor("not-base64-json", "yuki studio", "channel"),
+    () => parseSearchCursor(cursor, "another query", "channel"),
+    () => parseSearchCursor(cursor, "yuki studio", "creator")
+  ]) {
+    expect(invalid).toThrow(TypeError);
+  }
+});
+
+test("phase 7 search API rejects malformed input and forged identity without database access", async ({ request }) => {
+  for (const path of [
+    "/api/search?q=x",
+    `/api/search?q=${"x".repeat(101)}`,
+    "/api/search?q=yuki&type=member",
+    "/api/search?q=yuki&cursor=not-base64-json",
+    "/api/search?q=yuki&userId=c1"
+  ]) {
+    const response = await request.get(path);
+    expect(response.status(), `${path}: ${await response.text()}`).toBe(400);
+  }
+});
+
+test("phase 7 PostgreSQL search ranks safe entities, paginates, reindexes, and executes jobs", async ({}, testInfo) => {
+  test.setTimeout(120_000);
+  const anonymous = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const admin = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const support = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const worker = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const nonce = `${Date.now().toString(36)}${Math.floor(Math.random() * 1_000_000).toString(36)}`;
+  const hiddenId = `phase7-search-hidden-${nonce}`;
+  const suspendedId = `phase7-search-suspended-${nonce}`;
+  const jobChannelId = `phase7-search-job-${nonce}`;
+  const privateLeakId = "post-3";
+  const reindexJobs: string[] = [];
+  const auditIds: string[] = [];
+  let databaseReady = false;
+  try {
+    await requirePhase7(anonymous, testInfo);
+    databaseReady = true;
+    await signInAdmin(admin);
+    await signInSupport(support);
+
+    const unauthenticated = await anonymous.post("/api/admin/search/reindex", {
+      headers: { origin: testInfo.project.use.baseURL! },
+      data: {}
+    });
+    expect(unauthenticated.status(), await unauthenticated.text()).toBe(401);
+    const forged = await anonymous.post("/api/admin/search/reindex", {
+      headers: {
+        origin: testInfo.project.use.baseURL!,
+        "x-admin-role": "super_admin"
+      },
+      data: {}
+    });
+    expect(forged.status(), await forged.text()).toBe(401);
+    const forbidden = await support.post("/api/admin/search/reindex", {
+      headers: { origin: testInfo.project.use.baseURL! },
+      data: {}
+    });
+    expect(forbidden.status(), await forbidden.text()).toBe(403);
+
+    const firstReindex = await admin.post("/api/admin/search/reindex", {
+      headers: { origin: testInfo.project.use.baseURL! },
+      data: {}
+    });
+    expect(firstReindex.status(), await firstReindex.text()).toBe(202);
+    const firstReindexBody = await firstReindex.json();
+    reindexJobs.push(firstReindexBody.job.id);
+    const secondReindex = await admin.post("/api/admin/search/reindex", {
+      headers: { origin: testInfo.project.use.baseURL! },
+      data: {}
+    });
+    expect(secondReindex.status(), await secondReindex.text()).toBe(200);
+    const secondReindexBody = await secondReindex.json();
+    expect(secondReindexBody.job.id).toBe(firstReindexBody.job.id);
+    expect(secondReindexBody.enqueued).toBeFalsy();
+
+    const reindexAudit = await prisma.auditLog.findFirst({
+      where: {
+        action: "search.reindex",
+        targetType: "channel_job",
+        targetId: firstReindexBody.job.id
+      },
+      select: { id: true, metadata: true }
+    });
+    expect(reindexAudit).not.toBeNull();
+    auditIds.push(reindexAudit!.id);
+    expect(JSON.stringify(reindexAudit!.metadata)).not.toContain("token");
+
+    const workerToken = process.env.WORKER_ACCESS_TOKEN;
+    expect(workerToken, "WORKER_ACCESS_TOKEN is required for Phase 7 search acceptance.").toBeTruthy();
+    const runWorker = async () => {
+      const response = await worker.post("/api/internal/phase7/run", {
+        headers: { "x-worker-token": workerToken! }
+      });
+      expect(response.ok(), await response.text()).toBeTruthy();
+      return response.json();
+    };
+    expect(await runWorker()).toMatchObject({ failed: 0 });
+    expect(await prisma.channelJob.findUniqueOrThrow({
+      where: { id: firstReindexBody.job.id },
+      select: { status: true, attempts: true }
+    })).toEqual({ status: "completed", attempts: 1 });
+
+    for (const [query, type, expectedEntityId] of [
+      ["Cosplay", "post", "post-1"],
+      ["yuki", "creator", "c1"],
+      ["Yuki Studio", "channel", "channel-yuki-studio"]
+    ] as const) {
+      const response = await anonymous.get(
+        `/api/search?q=${encodeURIComponent(query)}&type=${type}`
+      );
+      expect(response.ok(), await response.text()).toBeTruthy();
+      const body = await response.json();
+      expect(body.results).toEqual(expect.arrayContaining([
+        expect.objectContaining({ entityType: type, entityId: expectedEntityId })
+      ]));
+      expect(body.results.every((result: { entityType: string }) => result.entityType === type)).toBeTruthy();
+    }
+
+    const typo = await anonymous.get("/api/search?q=Yki&type=creator");
+    expect(typo.ok(), await typo.text()).toBeTruthy();
+    expect((await typo.json()).results).toEqual(expect.arrayContaining([
+      expect.objectContaining({ entityType: "creator", entityId: "c1" })
+    ]));
+
+    const firstPage = await anonymous.get("/api/search?q=Cosplay&limit=1");
+    expect(firstPage.ok(), await firstPage.text()).toBeTruthy();
+    const firstPageBody = await firstPage.json();
+    expect(firstPageBody.results).toHaveLength(1);
+    expect(firstPageBody.nextCursor).toEqual(expect.any(String));
+    const secondPage = await anonymous.get(
+      `/api/search?q=Cosplay&limit=1&cursor=${encodeURIComponent(firstPageBody.nextCursor)}`
+    );
+    expect(secondPage.ok(), await secondPage.text()).toBeTruthy();
+    const secondPageBody = await secondPage.json();
+    expect(secondPageBody.results.map(({ entityId }: { entityId: string }) => entityId))
+      .not.toContain(firstPageBody.results[0].entityId);
+    for (const path of [
+      `/api/search?q=another&limit=1&cursor=${encodeURIComponent(firstPageBody.nextCursor)}`,
+      `/api/search?q=Cosplay&type=post&limit=1&cursor=${encodeURIComponent(firstPageBody.nextCursor)}`
+    ]) {
+      const response = await anonymous.get(path);
+      expect(response.status(), await response.text()).toBe(400);
+    }
+
+    await prisma.$transaction([
+      prisma.channel.create({
+        data: {
+          id: hiddenId,
+          slug: hiddenId,
+          name: `PHASE7HIDDEN ${nonce}`,
+          description: "Hidden private data must not be globally searchable.",
+          kind: "creator",
+          visibility: "private",
+          discoverability: "hidden",
+          status: "active",
+          ownerUserId: "c1",
+          createdByUserId: "c1"
+        }
+      }),
+      prisma.channel.create({
+        data: {
+          id: suspendedId,
+          slug: suspendedId,
+          name: `PHASE7SUSPENDED ${nonce}`,
+          description: "Suspended data must not be globally searchable.",
+          kind: "creator",
+          visibility: "public",
+          discoverability: "discoverable",
+          status: "suspended",
+          ownerUserId: "c1",
+          createdByUserId: "c1",
+          suspendedAt: new Date()
+        }
+      }),
+      prisma.searchDocument.create({
+        data: {
+          entityType: "post",
+          entityId: privateLeakId,
+          title: `PHASE7PRIVATELEAK ${nonce}`,
+          body: "PRIVATE POST TEXT MUST NEVER APPEAR",
+          keywords: "member private",
+          publishedAt: new Date()
+        }
+      })
+    ]);
+    await prisma.searchDocument.createMany({
+      data: [
+        {
+          entityType: "channel",
+          entityId: hiddenId,
+          title: `PHASE7HIDDEN ${nonce}`,
+          body: "hidden",
+          keywords: "hidden private",
+          publishedAt: new Date()
+        },
+        {
+          entityType: "channel",
+          entityId: suspendedId,
+          title: `PHASE7SUSPENDED ${nonce}`,
+          body: "suspended",
+          keywords: "suspended public",
+          publishedAt: new Date()
+        }
+      ]
+    });
+    for (const term of ["PHASE7HIDDEN", "PHASE7SUSPENDED", "PHASE7PRIVATELEAK"]) {
+      const response = await anonymous.get(`/api/search?q=${term}`);
+      expect(response.ok(), await response.text()).toBeTruthy();
+      expect((await response.json()).results).toEqual([]);
+    }
+
+    const discoverable = await anonymous.get("/api/search?q=Private%20Curators&type=channel");
+    expect(discoverable.ok(), await discoverable.text()).toBeTruthy();
+    const discoverableResult = (await discoverable.json()).results.find(
+      ({ entityId }: { entityId: string }) => entityId === "channel-private-curators"
+    );
+    expect(discoverableResult).toMatchObject({
+      entityType: "channel",
+      entityId: "channel-private-curators",
+      title: "Private Curators",
+      href: "/channels/private-curators"
+    });
+    expect(JSON.stringify(discoverableResult)).not.toMatch(
+      /email|member|kyc|finance|storage|token|private post/i
+    );
+
+    await prisma.channel.create({
+      data: {
+        id: jobChannelId,
+        slug: jobChannelId,
+        name: `PHASE7JOB ${nonce}`,
+        description: "Safe discoverable search job projection.",
+        kind: "creator",
+        visibility: "private",
+        discoverability: "discoverable",
+        status: "active",
+        ownerUserId: "c1",
+        createdByUserId: "c1"
+      }
+    });
+    const indexKey = `index:channel:${jobChannelId}:2026-07-24T00:00:00.000Z`;
+    await prisma.channelJob.create({
+      data: {
+        idempotencyKey: indexKey,
+        kind: "index_entity",
+        entityType: "channel",
+        entityId: jobChannelId
+      }
+    });
+    expect(await runWorker()).toMatchObject({ failed: 0 });
+    expect(await prisma.searchDocument.findUnique({
+      where: { entityType_entityId: { entityType: "channel", entityId: jobChannelId } },
+      select: { title: true, body: true, keywords: true }
+    })).toMatchObject({
+      title: `PHASE7JOB ${nonce}`,
+      body: "Safe discoverable search job projection."
+    });
+
+    await prisma.channel.update({
+      where: { id: jobChannelId },
+      data: { discoverability: "hidden" }
+    });
+    const deleteKey = `delete-index:channel:${jobChannelId}:2026-07-24T00:00:01.000Z`;
+    await prisma.channelJob.create({
+      data: {
+        idempotencyKey: deleteKey,
+        kind: "delete_index",
+        entityType: "channel",
+        entityId: jobChannelId
+      }
+    });
+    expect(await runWorker()).toMatchObject({ failed: 0 });
+    expect(await prisma.searchDocument.count({
+      where: { entityType: "channel", entityId: jobChannelId }
+    })).toBe(0);
+  } finally {
+    const channels = [hiddenId, suspendedId, jobChannelId];
+    if (databaseReady) {
+      await prisma.auditLog.deleteMany({
+        where: {
+          OR: [
+            { id: { in: auditIds } },
+            { targetId: { in: channels } },
+            { targetId: { in: reindexJobs } }
+          ]
+        }
+      });
+      await prisma.searchDocument.deleteMany({
+        where: {
+          OR: [
+            { entityType: "post", entityId: privateLeakId },
+            { entityType: "channel", entityId: { in: channels } }
+          ]
+        }
+      });
+      await prisma.channelJob.deleteMany({
+        where: {
+          OR: [
+            { id: { in: reindexJobs } },
+            { entityId: { in: channels } }
+          ]
+        }
+      });
+      await prisma.channel.deleteMany({ where: { id: { in: channels } } });
+    }
+    await anonymous.dispose();
+    await admin.dispose();
+    await support.dispose();
+    await worker.dispose();
   }
 });

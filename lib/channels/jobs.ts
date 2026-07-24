@@ -1,5 +1,9 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import {
+  reindexAllSearchDocuments,
+  synchronizeSearchEntity
+} from "@/lib/search/repository";
 
 const MAX_JOB_ATTEMPTS = 8;
 const MAX_JOB_BATCH = 100;
@@ -166,7 +170,6 @@ async function claimPhase7Jobs(limit: number) {
         const candidates = await tx.channelJob.findMany({
           where: {
             status: { in: ["pending", "failed"] },
-            kind: "materialize_channel",
             attempts: { lt: MAX_JOB_ATTEMPTS },
             availableAt: { lte: now }
           },
@@ -210,16 +213,31 @@ async function claimPhase7Jobs(limit: number) {
 async function executePhase7Job(job: {
   kind: string;
   channelId: string | null;
+  entityType: string | null;
+  entityId: string | null;
 }) {
   if (job.kind === "materialize_channel") {
     if (!job.channelId) throw new Error("Materialization job is missing its channel.");
     await materializeChannel(job.channelId);
     return;
   }
-  // Task 7 adds search executors. Retain these jobs as retryable failures until
-  // then instead of acknowledging and losing unprocessed index work.
-  if (job.kind === "index_entity" || job.kind === "delete_index" || job.kind === "reindex_all") {
-    throw new Error("Search job execution is not available yet.");
+  if (job.kind === "index_entity" || job.kind === "delete_index") {
+    if (
+      !job.entityId
+      || !job.entityType
+      || !["post", "creator", "channel"].includes(job.entityType)
+    ) {
+      throw new Error("Search entity job is missing a supported entity.");
+    }
+    await synchronizeSearchEntity(
+      job.entityType as "post" | "creator" | "channel",
+      job.entityId
+    );
+    return;
+  }
+  if (job.kind === "reindex_all") {
+    await reindexAllSearchDocuments();
+    return;
   }
   throw new Error("Unsupported Phase 7 job kind.");
 }
