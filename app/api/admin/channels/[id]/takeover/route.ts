@@ -18,7 +18,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   if (!auth.ok) return auth.response;
   try {
     const input = await readChannelJson(request);
-    assertNoChannelIdentityOverrides(input, new URL(request.url).searchParams);
+    assertNoChannelIdentityOverrides(input, new URL(request.url).searchParams, {
+      allowBody: ["newOwnerUserId"]
+    });
     const { newOwnerUserId } = validateChannelTakeoverInput(input);
     const channel = await takeoverChannel(auth.admin, (await params).id, newOwnerUserId);
     return NextResponse.json({ channel });

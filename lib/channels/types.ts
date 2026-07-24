@@ -182,25 +182,6 @@ function enumValue<T extends readonly string[]>(value: unknown, values: T, field
   return value as T[number];
 }
 
-const CHANNEL_IDENTITY_FIELDS = [
-  "userId",
-  "actorId",
-  "ownerUserId",
-  "ownerId",
-  "createdByUserId",
-  "createdById",
-  "actorUserId",
-  "adminId",
-  "adminUserId",
-  "createdByAdminId",
-  "reviewedByAdminId",
-  "reviewedByUserId",
-  "addedByUserId",
-  "excludedByUserId",
-  "invitedByUserId",
-  "acceptedByUserId"
-] as const;
-
 export type ChannelPatchInput = {
   slug?: string;
   name?: string;
@@ -218,17 +199,36 @@ export type ChannelLifecycleAction = "suspend" | "restore" | "archive";
 export function assertNoChannelIdentityOverrides(
   input: unknown,
   searchParams?: URLSearchParams,
-  additionalFields: readonly string[] = []
+  options: { allowBody?: readonly string[] } = {}
 ): void {
-  const forbidden = [...CHANNEL_IDENTITY_FIELDS, ...additionalFields];
   if (isRecord(input)) {
-    const field = forbidden.find((candidate) => Object.hasOwn(input, candidate));
+    const allowed = new Set(options.allowBody ?? []);
+    const field = Object.keys(input).find((candidate) =>
+      !allowed.has(candidate) && isChannelIdentityKey(candidate)
+    );
     if (field) throw new TypeError(`${field} is derived from authenticated context and must not be supplied.`);
   }
   if (searchParams) {
-    const field = forbidden.find((candidate) => searchParams.has(candidate));
+    const field = Array.from(searchParams.keys()).find(isChannelIdentityKey);
     if (field) throw new TypeError(`${field} is derived from authenticated context and must not be supplied.`);
   }
+}
+
+function isChannelIdentityKey(value: string): boolean {
+  const normalized = value.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  if (!normalized.endsWith("id")) return false;
+  return [
+    "user",
+    "actor",
+    "owner",
+    "creator",
+    "admin",
+    "reviewer",
+    "reviewedby",
+    "createdby",
+    "invitedby",
+    "acceptedby"
+  ].some((marker) => normalized.includes(marker));
 }
 
 export function resolveChannelLifecycleTransition(
@@ -250,6 +250,26 @@ export function resolveChannelLifecycleTransition(
     return { status: "archived", changed: true, jobKind: "delete_index" };
   }
   throw new TypeError("Channel lifecycle action is invalid.");
+}
+
+export function resolveChannelIndexJob(
+  channelId: string,
+  status: ChannelStatus,
+  version: string
+): ChannelJobInput {
+  if (typeof channelId !== "string" || !channelId) throw new TypeError("Channel ID is required for an index job.");
+  if (!CHANNEL_STATUSES.some((candidate) => candidate === status)) {
+    throw new TypeError("Channel status is invalid for an index job.");
+  }
+  if (!isIsoDate(version)) throw new TypeError("Channel job version must be an ISO timestamp.");
+  const active = status === "active";
+  return {
+    idempotencyKey: `${active ? "index" : "delete-index"}:channel:${channelId}:${version}`,
+    kind: active ? "index_entity" : "delete_index",
+    channelId,
+    entityType: "channel",
+    entityId: channelId
+  };
 }
 
 export function validateChannelPatchInput(input: unknown, allowArchive = false): ChannelPatchInput {
@@ -305,7 +325,7 @@ export function validateChannelPatchInput(input: unknown, allowArchive = false):
 
 export function validateChannelTakeoverInput(input: unknown): { newOwnerUserId: string } {
   if (!isRecord(input)) throw new TypeError("Channel takeover input must be an object.");
-  assertNoChannelIdentityOverrides(input, undefined, ["userId"]);
+  assertNoChannelIdentityOverrides(input, undefined, { allowBody: ["newOwnerUserId"] });
   if (Object.keys(input).some((field) => field !== "newOwnerUserId")) {
     throw new TypeError("Channel takeover accepts only newOwnerUserId.");
   }
@@ -318,7 +338,7 @@ export function validateChannelTakeoverInput(input: unknown): { newOwnerUserId: 
 
 export function validateQuotaOverrideInput(input: unknown): { maxChannels: number; reason: string } {
   if (!isRecord(input)) throw new TypeError("Quota override input must be an object.");
-  assertNoChannelIdentityOverrides(input, undefined, ["userId"]);
+  assertNoChannelIdentityOverrides(input);
   if (Object.keys(input).some((field) => field !== "maxChannels" && field !== "reason")) {
     throw new TypeError("Quota override accepts only maxChannels and reason.");
   }

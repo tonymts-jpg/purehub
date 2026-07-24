@@ -1,6 +1,7 @@
 import { expect, request as playwrightRequest, test, type APIRequestContext, type TestInfo } from "@playwright/test";
 import { ADMIN_SECTIONS, isChannelAdminRole } from "../lib/admin-auth";
 import { resolveChannelAccess } from "../lib/channels/auth";
+import { readChannelJson } from "../lib/channels/http";
 import {
   CHANNEL_QUOTAS,
   assertNoChannelIdentityOverrides,
@@ -8,6 +9,7 @@ import {
   encodeChannelCursor,
   parseChannelCursor,
   projectChannelSafeSummary,
+  resolveChannelIndexJob,
   resolveChannelLifecycleTransition,
   validateChannelPatchInput,
   validateChannelTakeoverInput,
@@ -230,12 +232,74 @@ test("phase 7 lifecycle transition rules are strict and idempotent", () => {
   expect(() => resolveChannelLifecycleTransition("restore", "rejected")).toThrow("Only suspended channels");
 });
 
-test("phase 7 lifecycle input helpers reject forged identities and invalid targets", () => {
-  expect(() => assertNoChannelIdentityOverrides({ ownerUserId: "c2" })).toThrow("ownerUserId");
-  expect(() => assertNoChannelIdentityOverrides({ createdByUserId: "c2" })).toThrow("createdByUserId");
-  expect(() => assertNoChannelIdentityOverrides({ userId: "c2" })).toThrow("userId");
-  expect(() => assertNoChannelIdentityOverrides({ actorId: "c2" })).toThrow("actorId");
-  expect(() => assertNoChannelIdentityOverrides({}, new URLSearchParams("actorUserId=c2"))).toThrow("actorUserId");
+test("phase 7 lifecycle job resolver selects deterministic creation jobs", () => {
+  const version = "2026-07-24T00:00:00.000Z";
+  expect(resolveChannelIndexJob("channel-draft", "draft", version)).toEqual({
+    idempotencyKey: "delete-index:channel:channel-draft:2026-07-24T00:00:00.000Z",
+    kind: "delete_index",
+    channelId: "channel-draft",
+    entityType: "channel",
+    entityId: "channel-draft"
+  });
+  expect(resolveChannelIndexJob("channel-official", "active", version)).toEqual({
+    idempotencyKey: "index:channel:channel-official:2026-07-24T00:00:00.000Z",
+    kind: "index_entity",
+    channelId: "channel-official",
+    entityType: "channel",
+    entityId: "channel-official"
+  });
+});
+
+test("phase 7 optional JSON body accepts empty but rejects malformed JSON", async () => {
+  await expect(readChannelJson(new Request("http://localhost/api/test", {
+    method: "POST"
+  }), true)).resolves.toEqual({});
+  await expect(readChannelJson(new Request("http://localhost/api/test", {
+    method: "POST",
+    body: ""
+  }), true)).resolves.toEqual({});
+  await expect(readChannelJson(new Request("http://localhost/api/test", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{\"valid\":true}"
+  }), true)).resolves.toEqual({ valid: true });
+  await expect(readChannelJson(new Request("http://localhost/api/test", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{"
+  }), true)).rejects.toThrow("valid JSON");
+  await expect(readChannelJson(new Request("http://localhost/api/test", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: " "
+  }), true)).rejects.toThrow("valid JSON");
+});
+
+test("phase 7 identity input helpers reject normalized variants and preserve explicit targets", () => {
+  for (const field of [
+    "userId",
+    "actorId",
+    "ownerUserId",
+    "owner_id",
+    "creatorId",
+    "creator-user-id",
+    "createdByUserId",
+    "newOwnerUserId",
+    "newOwnerId",
+    "reviewedByUserId",
+    "invitedByUserId",
+    "acceptedByUserId",
+    "targetUserId"
+  ]) {
+    expect(() => assertNoChannelIdentityOverrides({ [field]: "c2" })).toThrow(field);
+    expect(() => assertNoChannelIdentityOverrides({}, new URLSearchParams([[field, "c2"]]))).toThrow(field);
+  }
+  expect(() => assertNoChannelIdentityOverrides(
+    { newOwnerUserId: "c2" },
+    undefined,
+    { allowBody: ["newOwnerUserId"] }
+  )).not.toThrow();
+  expect(() => assertNoChannelIdentityOverrides({ avatarAssetId: "asset-1" })).not.toThrow();
 
   expect(validateChannelPatchInput({
     name: "Updated Channel",
@@ -263,6 +327,7 @@ test("phase 7 lifecycle input helpers reject forged identities and invalid targe
 test("phase 7 lifecycle routes create, review, transfer, suspend, restore, and archive atomically", async ({}, testInfo) => {
   const creatorRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
   const adminRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const createdChannelIds: string[] = [];
   try {
     await requirePhase7(creatorRequest, testInfo);
     await signInCreator(creatorRequest);
@@ -271,15 +336,40 @@ test("phase 7 lifecycle routes create, review, transfer, suspend, restore, and a
     const nonce = Date.now().toString(36);
     const creatorCreate = await creatorRequest.post("/api/dashboard/channels", {
       headers: authHeaders,
-      data: { ...validCreatorChannel, slug: `lifecycle-creator-${nonce}` }
+      data: {
+        ...validCreatorChannel,
+        slug: `lifecycle-creator-${nonce}`,
+        visibility: "public",
+        discoverability: "discoverable"
+      }
     });
     expect(creatorCreate.status(), await creatorCreate.text()).toBe(201);
     const creatorChannel = (await creatorCreate.json()).channel;
+    createdChannelIds.push(creatorChannel.id);
     expect(creatorChannel).toMatchObject({ kind: "creator", status: "draft", ownerUserId: "c1" });
 
     const dashboard = await creatorRequest.get("/api/dashboard/channels");
     expect(dashboard.ok(), await dashboard.text()).toBeTruthy();
     expect((await dashboard.json()).channels.map((channel: { id: string }) => channel.id)).toContain(creatorChannel.id);
+
+    const creatorCreateDetail = await adminRequest.get(`/api/admin/channels/${creatorChannel.id}`);
+    expect(creatorCreateDetail.ok(), await creatorCreateDetail.text()).toBeTruthy();
+    const creatorCreateDetailBody = await creatorCreateDetail.json();
+    expect(creatorCreateDetailBody.jobs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: "delete_index",
+        idempotencyKey: expect.stringMatching(`^delete-index:channel:${creatorChannel.id}:`)
+      })
+    ]));
+
+    const malformedSubmit = await creatorRequest.post(`/api/dashboard/channels/${creatorChannel.id}/submit`, {
+      headers: { ...authHeaders, "content-type": "application/json" },
+      data: "{"
+    });
+    expect(malformedSubmit.status(), await malformedSubmit.text()).toBe(400);
+    const stillDraft = await creatorRequest.get(`/api/dashboard/channels/${creatorChannel.id}`);
+    expect(stillDraft.ok(), await stillDraft.text()).toBeTruthy();
+    expect((await stillDraft.json()).channel.status).toBe("draft");
 
     const submitted = await creatorRequest.post(`/api/dashboard/channels/${creatorChannel.id}/submit`, {
       headers: authHeaders
@@ -287,15 +377,44 @@ test("phase 7 lifecycle routes create, review, transfer, suspend, restore, and a
     expect(submitted.ok(), await submitted.text()).toBeTruthy();
     expect((await submitted.json()).channel.status).toBe("pending");
 
-    const reviewed = await adminRequest.post(`/api/admin/channels/${creatorChannel.id}/review`, {
+    const pendingPublic = await creatorRequest.get("/api/channels?limit=50");
+    expect(pendingPublic.ok(), await pendingPublic.text()).toBeTruthy();
+    expect((await pendingPublic.json()).channels.map((channel: { id?: string }) => channel.id))
+      .not.toContain(creatorChannel.id);
+
+    const rejected = await adminRequest.post(`/api/admin/channels/${creatorChannel.id}/review`, {
+      headers: authHeaders,
+      data: { decision: "rejected", note: "Lifecycle acceptance rejection." }
+    });
+    expect(rejected.ok(), await rejected.text()).toBeTruthy();
+    expect((await rejected.json()).channel).toMatchObject({
+      status: "rejected",
+      reviewNote: "Lifecycle acceptance rejection."
+    });
+    const rejectedPublic = await creatorRequest.get("/api/channels?limit=50");
+    expect(rejectedPublic.ok(), await rejectedPublic.text()).toBeTruthy();
+    expect((await rejectedPublic.json()).channels.map((channel: { id?: string }) => channel.id))
+      .not.toContain(creatorChannel.id);
+
+    const resubmitted = await creatorRequest.post(`/api/dashboard/channels/${creatorChannel.id}/submit`, {
+      headers: authHeaders
+    });
+    expect(resubmitted.ok(), await resubmitted.text()).toBeTruthy();
+    expect((await resubmitted.json()).channel.status).toBe("pending");
+
+    const approved = await adminRequest.post(`/api/admin/channels/${creatorChannel.id}/review`, {
       headers: authHeaders,
       data: { decision: "approved", note: "Lifecycle acceptance approved." }
     });
-    expect(reviewed.ok(), await reviewed.text()).toBeTruthy();
-    expect((await reviewed.json()).channel).toMatchObject({
+    expect(approved.ok(), await approved.text()).toBeTruthy();
+    expect((await approved.json()).channel).toMatchObject({
       status: "active",
       reviewNote: "Lifecycle acceptance approved."
     });
+    const activePublic = await creatorRequest.get("/api/channels?limit=50");
+    expect(activePublic.ok(), await activePublic.text()).toBeTruthy();
+    expect((await activePublic.json()).channels.map((channel: { id?: string }) => channel.id))
+      .toContain(creatorChannel.id);
 
     const officialCreate = await adminRequest.post("/api/admin/channels", {
       headers: authHeaders,
@@ -308,45 +427,154 @@ test("phase 7 lifecycle routes create, review, transfer, suspend, restore, and a
     });
     expect(officialCreate.status(), await officialCreate.text()).toBe(201);
     const official = (await officialCreate.json()).channel;
+    createdChannelIds.push(official.id);
     expect(official).toMatchObject({ kind: "official", status: "active", ownerUserId: "admin-demo" });
 
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const takeover = await adminRequest.post(`/api/admin/channels/${official.id}/takeover`, {
-        headers: authHeaders,
-        data: { newOwnerUserId: "c1" }
-      });
-      expect(takeover.ok(), await takeover.text()).toBeTruthy();
-      expect((await takeover.json()).channel.ownerUserId).toBe("c1");
-    }
+    const readAdminDetail = async () => {
+      const response = await adminRequest.get(`/api/admin/channels/${official.id}`);
+      expect(response.ok(), await response.text()).toBeTruthy();
+      return response.json();
+    };
+    const counts = (detail: {
+      auditLogs: Array<{ action: string }>;
+      jobs: Array<{ idempotencyKey: string; kind: string }>;
+    }) => ({
+      audits: detail.auditLogs.length,
+      jobs: detail.jobs.length,
+      takeoverAudits: detail.auditLogs.filter((audit) => audit.action === "channel.takeover").length,
+      suspendAudits: detail.auditLogs.filter((audit) => audit.action === "channel.suspend").length,
+      restoreAudits: detail.auditLogs.filter((audit) => audit.action === "channel.restore").length,
+      archiveAudits: detail.auditLogs.filter((audit) => audit.action === "channel.archive").length
+    });
 
-    for (const action of ["suspend", "restore"] as const) {
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        const response = await adminRequest.post(`/api/admin/channels/${official.id}/${action}`, {
-          headers: authHeaders
-        });
-        expect(response.ok(), await response.text()).toBeTruthy();
-      }
-    }
+    const officialCreateDetail = await readAdminDetail();
+    expect(officialCreateDetail.jobs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: "index_entity",
+        idempotencyKey: expect.stringMatching(`^index:channel:${official.id}:`)
+      })
+    ]));
+    const officialCreateJobKeys = officialCreateDetail.jobs
+      .map((job: { idempotencyKey: string }) => job.idempotencyKey);
+    expect(new Set(officialCreateJobKeys).size).toBe(officialCreateJobKeys.length);
 
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const archived = await adminRequest.patch(`/api/admin/channels/${official.id}`, {
-        headers: authHeaders,
-        data: { status: "archived" }
-      });
-      expect(archived.ok(), await archived.text()).toBeTruthy();
-      expect((await archived.json()).channel.status).toBe("archived");
-    }
+    const malformedSuspend = await adminRequest.post(`/api/admin/channels/${official.id}/suspend`, {
+      headers: { ...authHeaders, "content-type": "application/json" },
+      data: "{"
+    });
+    expect(malformedSuspend.status(), await malformedSuspend.text()).toBe(400);
+    expect((await readAdminDetail()).channel.status).toBe("active");
 
-    const detail = await adminRequest.get(`/api/admin/channels/${official.id}`);
-    expect(detail.ok(), await detail.text()).toBeTruthy();
-    const detailBody = await detail.json();
+    const beforeTakeover = counts(await readAdminDetail());
+    const takeover = await adminRequest.post(`/api/admin/channels/${official.id}/takeover`, {
+      headers: authHeaders,
+      data: { newOwnerUserId: "c1" }
+    });
+    expect(takeover.ok(), await takeover.text()).toBeTruthy();
+    expect((await takeover.json()).channel.ownerUserId).toBe("c1");
+    const afterTakeover = counts(await readAdminDetail());
+    expect(afterTakeover.takeoverAudits).toBe(beforeTakeover.takeoverAudits + 1);
+
+    const takeoverNoOp = await adminRequest.post(`/api/admin/channels/${official.id}/takeover`, {
+      headers: authHeaders,
+      data: { newOwnerUserId: "c1" }
+    });
+    expect(takeoverNoOp.ok(), await takeoverNoOp.text()).toBeTruthy();
+    expect(counts(await readAdminDetail())).toEqual(afterTakeover);
+
+    const beforeSuspend = counts(await readAdminDetail());
+    const suspended = await adminRequest.post(`/api/admin/channels/${official.id}/suspend`, {
+      headers: authHeaders
+    });
+    expect(suspended.ok(), await suspended.text()).toBeTruthy();
+    expect((await suspended.json()).channel.status).toBe("suspended");
+    const afterSuspend = counts(await readAdminDetail());
+    expect(afterSuspend.suspendAudits).toBe(beforeSuspend.suspendAudits + 1);
+
+    const suspendNoOp = await adminRequest.post(`/api/admin/channels/${official.id}/suspend`, {
+      headers: authHeaders
+    });
+    expect(suspendNoOp.ok(), await suspendNoOp.text()).toBeTruthy();
+    expect(counts(await readAdminDetail())).toEqual(afterSuspend);
+    const suspendedPublic = await creatorRequest.get("/api/channels?limit=50");
+    expect(suspendedPublic.ok(), await suspendedPublic.text()).toBeTruthy();
+    expect((await suspendedPublic.json()).channels.map((channel: { id?: string }) => channel.id))
+      .not.toContain(official.id);
+
+    const malformedRestore = await adminRequest.post(`/api/admin/channels/${official.id}/restore`, {
+      headers: { ...authHeaders, "content-type": "application/json" },
+      data: "{"
+    });
+    expect(malformedRestore.status(), await malformedRestore.text()).toBe(400);
+    expect((await readAdminDetail()).channel.status).toBe("suspended");
+
+    const beforeRestore = counts(await readAdminDetail());
+    const restored = await adminRequest.post(`/api/admin/channels/${official.id}/restore`, {
+      headers: authHeaders
+    });
+    expect(restored.ok(), await restored.text()).toBeTruthy();
+    expect((await restored.json()).channel.status).toBe("active");
+    const afterRestore = counts(await readAdminDetail());
+    expect(afterRestore.restoreAudits).toBe(beforeRestore.restoreAudits + 1);
+
+    const restoreNoOp = await adminRequest.post(`/api/admin/channels/${official.id}/restore`, {
+      headers: authHeaders
+    });
+    expect(restoreNoOp.ok(), await restoreNoOp.text()).toBeTruthy();
+    expect(counts(await readAdminDetail())).toEqual(afterRestore);
+
+    const restoredPublic = await creatorRequest.get("/api/channels?limit=50");
+    expect(restoredPublic.ok(), await restoredPublic.text()).toBeTruthy();
+    expect((await restoredPublic.json()).channels.map((channel: { id?: string }) => channel.id))
+      .toContain(official.id);
+
+    const beforeArchive = counts(await readAdminDetail());
+    const archived = await adminRequest.patch(`/api/admin/channels/${official.id}`, {
+      headers: authHeaders,
+      data: { status: "archived" }
+    });
+    expect(archived.ok(), await archived.text()).toBeTruthy();
+    expect((await archived.json()).channel.status).toBe("archived");
+    const afterArchive = counts(await readAdminDetail());
+    expect(afterArchive.archiveAudits).toBe(beforeArchive.archiveAudits + 1);
+
+    const archiveNoOp = await adminRequest.patch(`/api/admin/channels/${official.id}`, {
+      headers: authHeaders,
+      data: { status: "archived" }
+    });
+    expect(archiveNoOp.ok(), await archiveNoOp.text()).toBeTruthy();
+    expect(counts(await readAdminDetail())).toEqual(afterArchive);
+    const archivedPublic = await creatorRequest.get("/api/channels?limit=50");
+    expect(archivedPublic.ok(), await archivedPublic.text()).toBeTruthy();
+    expect((await archivedPublic.json()).channels.map((channel: { id?: string }) => channel.id))
+      .not.toContain(official.id);
+
+    const archiveCreator = await adminRequest.patch(`/api/admin/channels/${creatorChannel.id}`, {
+      headers: authHeaders,
+      data: { status: "archived" }
+    });
+    expect(archiveCreator.ok(), await archiveCreator.text()).toBeTruthy();
+
+    const detailBody = await readAdminDetail();
     expect(detailBody.memberships.filter((membership: { role: string; status: string }) =>
       membership.role === "owner" && membership.status === "active"
     )).toHaveLength(1);
     expect(detailBody.memberships.find((membership: { userId: string }) => membership.userId === "c1"))
       .toMatchObject({ role: "owner", status: "active" });
     expect(detailBody.auditLogs.some((audit: { action: string }) => audit.action === "channel.takeover")).toBeTruthy();
+    const finalJobKeys = detailBody.jobs.map((job: { idempotencyKey: string }) => job.idempotencyKey);
+    expect(new Set(finalJobKeys).size).toBe(finalJobKeys.length);
   } finally {
+    for (const id of createdChannelIds) {
+      try {
+        await adminRequest.patch(`/api/admin/channels/${id}`, {
+          headers: authHeaders,
+          data: { status: "archived" }
+        });
+      } catch {
+        // Cleanup is best-effort after assertion failures.
+      }
+    }
     await creatorRequest.dispose();
     await adminRequest.dispose();
   }
@@ -355,17 +583,40 @@ test("phase 7 lifecycle routes create, review, transfer, suspend, restore, and a
 test("phase 7 lifecycle rejects self-review, self-restore, and forged mutation identities", async ({}, testInfo) => {
   const creatorRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
   const adminRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const createdChannelIds: string[] = [];
   try {
     await requirePhase7(creatorRequest, testInfo);
     await signInCreator(creatorRequest);
     await signInAdmin(adminRequest);
     const nonce = Date.now().toString(36);
 
-    const forged = await creatorRequest.post("/api/dashboard/channels", {
-      headers: authHeaders,
-      data: { ...validCreatorChannel, slug: `lifecycle-forged-${nonce}`, ownerUserId: "admin-demo" }
-    });
-    expect(forged.status(), await forged.text()).toBe(400);
+    for (const [index, field] of [
+      "ownerUserId",
+      "creatorId",
+      "newOwnerUserId",
+      "newOwnerId",
+      "reviewedByUserId",
+      "invitedByUserId",
+      "acceptedByUserId"
+    ].entries()) {
+      const forged = await creatorRequest.post("/api/dashboard/channels", {
+        headers: authHeaders,
+        data: {
+          ...validCreatorChannel,
+          slug: `lifecycle-forged-${index}-${nonce}`,
+          [field]: "admin-demo"
+        }
+      });
+      expect(forged.status(), `${field}: ${await forged.text()}`).toBe(400);
+    }
+    const forgedQuery = await creatorRequest.post(
+      `/api/dashboard/channels?creator_id=admin-demo`,
+      {
+        headers: authHeaders,
+        data: { ...validCreatorChannel, slug: `lifecycle-forged-query-${nonce}` }
+      }
+    );
+    expect(forgedQuery.status(), await forgedQuery.text()).toBe(400);
 
     const created = await creatorRequest.post("/api/dashboard/channels", {
       headers: authHeaders,
@@ -373,6 +624,17 @@ test("phase 7 lifecycle rejects self-review, self-restore, and forged mutation i
     });
     expect(created.status(), await created.text()).toBe(201);
     const channel = (await created.json()).channel;
+    createdChannelIds.push(channel.id);
+
+    const forgedPatch = await creatorRequest.patch(`/api/dashboard/channels/${channel.id}`, {
+      headers: authHeaders,
+      data: { name: "Forged Identity Update", creatorId: "admin-demo" }
+    });
+    expect(forgedPatch.status(), await forgedPatch.text()).toBe(400);
+    const unchanged = await creatorRequest.get(`/api/dashboard/channels/${channel.id}`);
+    expect(unchanged.ok(), await unchanged.text()).toBeTruthy();
+    expect((await unchanged.json()).channel.name).toBe(validCreatorChannel.name);
+
     const submitted = await creatorRequest.post(`/api/dashboard/channels/${channel.id}/submit`, {
       headers: authHeaders
     });
@@ -401,6 +663,7 @@ test("phase 7 lifecycle rejects self-review, self-restore, and forged mutation i
     });
     expect(officialCreate.status(), await officialCreate.text()).toBe(201);
     const official = (await officialCreate.json()).channel;
+    createdChannelIds.push(official.id);
     const suspended = await adminRequest.post(`/api/admin/channels/${official.id}/suspend`, {
       headers: authHeaders
     });
@@ -430,6 +693,16 @@ test("phase 7 lifecycle rejects self-review, self-restore, and forged mutation i
     });
     expect(archiveOfficial.ok(), await archiveOfficial.text()).toBeTruthy();
   } finally {
+    for (const id of createdChannelIds) {
+      try {
+        await adminRequest.patch(`/api/admin/channels/${id}`, {
+          headers: authHeaders,
+          data: { status: "archived" }
+        });
+      } catch {
+        // Cleanup is best-effort after assertion failures.
+      }
+    }
     await creatorRequest.dispose();
     await adminRequest.dispose();
   }

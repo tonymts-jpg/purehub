@@ -26,6 +26,7 @@ import {
   encodeChannelCursor,
   parseChannelCursor,
   projectChannelSafeSummary,
+  resolveChannelIndexJob,
   resolveChannelLifecycleTransition,
   validateChannelPatchInput,
   validateQuotaOverrideInput,
@@ -336,15 +337,9 @@ export async function createChannel(
         }
       });
 
+      const version = channel.updatedAt.toISOString();
+      await enqueueChannelJob(tx, resolveChannelIndexJob(channel.id, status, version));
       if (status === "active") {
-        const version = channel.updatedAt.toISOString();
-        await enqueueChannelJob(tx, {
-          idempotencyKey: `index:channel:${channel.id}:${version}`,
-          kind: "index_entity",
-          channelId: channel.id,
-          entityType: "channel",
-          entityId: channel.id
-        });
         await enqueueChannelJob(tx, {
           idempotencyKey: `materialize:${channel.id}:${version}`,
           kind: "materialize_channel",
@@ -524,13 +519,8 @@ async function enqueueLifecycleJob(
   kind: "index_entity" | "delete_index"
 ) {
   const version = channel.updatedAt.toISOString();
-  await enqueueChannelJob(tx, {
-    idempotencyKey: `${kind === "index_entity" ? "index" : "delete-index"}:channel:${channel.id}:${version}`,
-    kind,
-    channelId: channel.id,
-    entityType: "channel",
-    entityId: channel.id
-  });
+  const status = kind === "index_entity" ? "active" : "suspended";
+  await enqueueChannelJob(tx, resolveChannelIndexJob(channel.id, status, version));
   if (kind === "index_entity") {
     await enqueueChannelJob(tx, {
       idempotencyKey: `materialize:${channel.id}:${version}`,
@@ -706,7 +696,7 @@ export async function getAdminChannelById(admin: AdminContext, channelId: string
     include: channelOwnerInclude
   });
   if (!channel) notFound();
-  const [memberships, auditLogs] = await Promise.all([
+  const [memberships, auditLogs, jobs] = await Promise.all([
     prisma.channelMembership.findMany({
       where: { channelId },
       orderBy: [{ role: "asc" }, { createdAt: "asc" }],
@@ -724,9 +714,27 @@ export async function getAdminChannelById(admin: AdminContext, channelId: string
       where: { targetType: "channel", targetId: channelId },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       take: 100
+    }),
+    prisma.channelJob.findMany({
+      where: { channelId },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: 100,
+      select: {
+        id: true,
+        idempotencyKey: true,
+        kind: true,
+        status: true,
+        attempts: true,
+        availableAt: true,
+        lockedAt: true,
+        lastError: true,
+        createdAt: true,
+        updatedAt: true,
+        completedAt: true
+      }
     })
   ]);
-  return { channel: mapChannel(channel, adminChannelAccess), memberships, auditLogs };
+  return { channel: mapChannel(channel, adminChannelAccess), memberships, auditLogs, jobs };
 }
 
 export async function updateAdminChannel(

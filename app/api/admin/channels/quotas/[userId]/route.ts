@@ -34,7 +34,7 @@ export async function PUT(request: Request, { params }: Context) {
   if (!auth.ok) return auth.response;
   try {
     const input = await readChannelJson(request);
-    assertNoChannelIdentityOverrides(input, new URL(request.url).searchParams, ["userId"]);
+    assertNoChannelIdentityOverrides(input, new URL(request.url).searchParams);
     const result = await setChannelQuotaOverride(
       auth.admin,
       (await params).userId,

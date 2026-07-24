@@ -3,11 +3,18 @@ import { ChannelRepositoryError } from "./repository";
 import type { ListChannelsInput } from "./types";
 
 export async function readChannelJson(request: Request, optional = false): Promise<unknown> {
-  if (optional && request.body === null) return {};
-  try {
-    return await request.json();
-  } catch {
+  if (request.body === null) {
     if (optional) return {};
+    throw new TypeError("Request body must be valid JSON.");
+  }
+  const body = await request.text();
+  if (body.length === 0) {
+    if (optional) return {};
+    throw new TypeError("Request body must be valid JSON.");
+  }
+  try {
+    return JSON.parse(body) as unknown;
+  } catch {
     throw new TypeError("Request body must be valid JSON.");
   }
 }
