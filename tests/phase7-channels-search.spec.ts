@@ -3440,6 +3440,198 @@ test("phase 7 dashboard channel UI redirects fans and separates owner from edito
   await expect(page.getByTestId("channel-policy-control")).toHaveCount(0);
 });
 
+test("phase 7 disposable owner operations cover membership invitation policy and curation", async ({ request }, testInfo) => {
+  await requirePhase7(request, testInfo);
+  const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3001";
+  const owner = await playwrightRequest.newContext({ baseURL });
+  const admin = await playwrightRequest.newContext({ baseURL });
+  const invitee = await playwrightRequest.newContext({ baseURL });
+  const applicant = await playwrightRequest.newContext({ baseURL });
+  const cleanupEmails: string[] = [];
+  let channelId: string | null = null;
+  try {
+    await signInCreator(owner);
+    await signInAdmin(admin);
+    const inviteIdentity = await registerFan(invitee, "phase7-owner-invite");
+    const applicantIdentity = await registerFan(applicant, "phase7-owner-join");
+    cleanupEmails.push(inviteIdentity.email, applicantIdentity.email);
+    const suffix = Date.now().toString(36);
+    const created = await owner.post("/api/dashboard/channels", {
+      headers: authHeaders,
+      data: {
+        slug: `owner-ops-${suffix}`,
+        name: `Owner Ops ${suffix}`,
+        description: "Disposable Task 9 owner operations fixture.",
+        visibility: "private",
+        discoverability: "discoverable",
+        memberPostPolicy: "approval_required"
+      }
+    });
+    expect(created.ok(), await created.text()).toBeTruthy();
+    channelId = (await created.json()).channel.id;
+    expect((await owner.post(`/api/dashboard/channels/${channelId}/submit`, {
+      headers: authHeaders,
+      data: {}
+    })).ok()).toBeTruthy();
+    expect((await admin.post(`/api/admin/channels/${channelId}/review`, {
+      headers: authHeaders,
+      data: { decision: "approved", note: "Disposable owner operations acceptance." }
+    })).ok()).toBeTruthy();
+
+    const policy = await owner.patch(`/api/dashboard/channels/${channelId}`, {
+      headers: authHeaders,
+      data: { memberPostPolicy: "direct" }
+    });
+    expect(policy.ok(), await policy.text()).toBeTruthy();
+
+    const invitation = await owner.post(`/api/dashboard/channels/${channelId}/invitations`, {
+      headers: authHeaders,
+      data: { email: inviteIdentity.email }
+    });
+    expect(invitation.status(), await invitation.text()).toBe(201);
+    expect((await invitation.json()).token).toEqual(expect.any(String));
+
+    const join = await applicant.post(`/api/channels/owner-ops-${suffix}/join-requests`, {
+      headers: authHeaders,
+      data: {}
+    });
+    expect(join.ok(), await join.text()).toBeTruthy();
+    const pendingMembershipId = (await join.json()).membership.id;
+    const approved = await owner.post(`/api/dashboard/channels/${channelId}/members`, {
+      headers: authHeaders,
+      data: { membershipId: pendingMembershipId, decision: "approved" }
+    });
+    expect(approved.ok(), await approved.text()).toBeTruthy();
+
+    const posts = await prisma.post.findMany({
+      orderBy: { id: "asc" },
+      take: 2,
+      select: { id: true }
+    });
+    expect(posts.length).toBeGreaterThanOrEqual(2);
+    const added = await owner.post(`/api/dashboard/channels/${channelId}/posts`, {
+      headers: authHeaders,
+      data: { postId: posts[0].id, position: 0 }
+    });
+    expect(added.ok(), await added.text()).toBeTruthy();
+    expect((await added.json()).channelPost.position).toBe(0);
+    const rule = await owner.post(`/api/dashboard/channels/${channelId}/rules`, {
+      headers: authHeaders,
+      data: { kind: "tag", value: `owner-ops-${suffix}`, enabled: true }
+    });
+    expect(rule.ok(), await rule.text()).toBeTruthy();
+    const exclusion = await owner.post(`/api/dashboard/channels/${channelId}/exclusions`, {
+      headers: authHeaders,
+      data: { postId: posts[1].id, reason: "Disposable owner operations test." }
+    });
+    expect(exclusion.ok(), await exclusion.text()).toBeTruthy();
+  } finally {
+    await cleanupPhase7MembershipArtifacts(cleanupEmails, [], channelId ? [channelId] : []);
+    const cleanupUsers = await prisma.user.findMany({
+      where: { email: { in: cleanupEmails } },
+      select: { id: true }
+    });
+    const cleanupUserIds = cleanupUsers.map(({ id }) => id);
+    if (cleanupUserIds.length) {
+      await prisma.$transaction([
+        prisma.session.deleteMany({ where: { userId: { in: cleanupUserIds } } }),
+        prisma.account.deleteMany({ where: { userId: { in: cleanupUserIds } } }),
+        prisma.user.deleteMany({ where: { id: { in: cleanupUserIds } } })
+      ]);
+    }
+    await Promise.all([owner.dispose(), admin.dispose(), invitee.dispose(), applicant.dispose()]);
+  }
+});
+
+test("phase 7 eligible admin manages official memberships without fabricated ownership", async ({ request }, testInfo) => {
+  await requirePhase7(request, testInfo);
+  const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3001";
+  const superAdmin = await playwrightRequest.newContext({ baseURL });
+  const contentAdmin = await playwrightRequest.newContext({ baseURL });
+  const support = await playwrightRequest.newContext({ baseURL });
+  const memberRequest = await playwrightRequest.newContext({ baseURL });
+  let channelId: string | null = null;
+  let contentAdminUserId: string | null = null;
+  const cleanupEmails: string[] = [];
+  try {
+    await signInAdmin(superAdmin);
+    await signInSupport(support);
+    const contentIdentity = await registerFan(contentAdmin, "phase7-content-channel");
+    const memberIdentity = await registerFan(memberRequest, "phase7-official-member");
+    cleanupEmails.push(contentIdentity.email, memberIdentity.email);
+    const contentUser = await prisma.user.findUniqueOrThrow({
+      where: { email: contentIdentity.email },
+      select: { id: true }
+    });
+    contentAdminUserId = contentUser.id;
+    await prisma.$transaction([
+      prisma.user.update({ where: { id: contentUser.id }, data: { role: "admin" } }),
+      prisma.adminAccount.create({
+        data: { userId: contentUser.id, role: "content_admin", status: "active" }
+      })
+    ]);
+    const suffix = Date.now().toString(36);
+    const created = await superAdmin.post("/api/admin/channels", {
+      headers: authHeaders,
+      data: {
+        kind: "official",
+        slug: `official-members-${suffix}`,
+        name: `Official Members ${suffix}`,
+        description: "Official membership admin ACL fixture.",
+        visibility: "public",
+        discoverability: "discoverable",
+        memberPostPolicy: "approval_required"
+      }
+    });
+    expect(created.status(), await created.text()).toBe(201);
+    channelId = (await created.json()).channel.id;
+    const officialChannelId = channelId!;
+    const memberUser = await prisma.user.findUniqueOrThrow({
+      where: { email: memberIdentity.email },
+      select: { id: true }
+    });
+    const pending = await prisma.channelMembership.create({
+      data: { channelId: officialChannelId, userId: memberUser.id, role: "member", status: "pending" }
+    });
+
+    const list = await contentAdmin.get(`/api/dashboard/channels/${officialChannelId}/members`, {
+      headers: authHeaders
+    });
+    expect(list.ok(), await list.text()).toBeTruthy();
+    expect((await list.json()).memberships.map(({ id }: { id: string }) => id)).toContain(pending.id);
+    const review = await contentAdmin.post(`/api/dashboard/channels/${officialChannelId}/members`, {
+      headers: authHeaders,
+      data: { membershipId: pending.id, decision: "approved" }
+    });
+    expect(review.ok(), await review.text()).toBeTruthy();
+    const roleUpdate = await contentAdmin.patch(`/api/dashboard/channels/${officialChannelId}/members/${pending.id}`, {
+      headers: authHeaders,
+      data: { role: "editor" }
+    });
+    expect(roleUpdate.ok(), await roleUpdate.text()).toBeTruthy();
+    const deniedList = await support.get(`/api/dashboard/channels/${officialChannelId}/members`, {
+      headers: authHeaders
+    });
+    expect(deniedList.status()).toBe(403);
+  } finally {
+    await cleanupPhase7MembershipArtifacts(cleanupEmails, [], channelId ? [channelId] : []);
+    const cleanupUsers = await prisma.user.findMany({
+      where: { email: { in: cleanupEmails } },
+      select: { id: true }
+    });
+    const cleanupUserIds = cleanupUsers.map(({ id }) => id);
+    if (contentAdminUserId || cleanupUserIds.length) {
+      await prisma.$transaction([
+        prisma.adminAccount.deleteMany({ where: { userId: { in: cleanupUserIds } } }),
+        prisma.session.deleteMany({ where: { userId: { in: cleanupUserIds } } }),
+        prisma.account.deleteMany({ where: { userId: { in: cleanupUserIds } } }),
+        prisma.user.deleteMany({ where: { id: { in: cleanupUserIds } } })
+      ]);
+    }
+    await Promise.all([superAdmin.dispose(), contentAdmin.dispose(), support.dispose(), memberRequest.dispose()]);
+  }
+});
+
 test("phase 7 dashboard channel UI renders the protected operations contract", async ({ page }) => {
   const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3001";
   await page.context().addCookies([{
@@ -3624,6 +3816,7 @@ test("phase 7 dashboard channel operations use exact membership, invitation, pos
             channelPosts: [
               { id: "pending-post", channelId: ownerChannel.id, postId: "post-pending", source: "manual", status: "pending", position: null, pinnedAt: null },
               { id: "active-1", channelId: ownerChannel.id, postId: "post-active-1", source: "manual", status: "active", position: 0, pinnedAt: null },
+              { id: "active-null", channelId: ownerChannel.id, postId: "post-active-null", source: "manual", status: "active", position: null, pinnedAt: null },
               { id: "removed-post", channelId: ownerChannel.id, postId: "post-removed", source: "manual", status: "removed", position: null, pinnedAt: null }
             ],
             nextCursor: "posts-page-2"
@@ -3639,7 +3832,12 @@ test("phase 7 dashboard channel operations use exact membership, invitation, pos
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ [key]: [], nextCursor: next ? null : cursor })
+        body: JSON.stringify({
+          [key]: resource === "rules" && !next
+            ? [{ id: "rule-toggle", kind: "tag", value: "featured", enabled: true }]
+            : [],
+          nextCursor: next ? null : cursor
+        })
       });
     });
   }
@@ -3678,6 +3876,7 @@ test("phase 7 dashboard channel operations use exact membership, invitation, pos
   await page.getByRole("button", { name: "发送频道邀请" }).click();
   const receipt = page.getByTestId("invitation-receipt");
   await expect(receipt).toContainText("one-time-raw-token");
+  await expect(receipt).toContainText("/channels/invitations/one-time-raw-token");
   await expect(receipt).toContainText("只显示一次");
   await expect(receipt.getByRole("button", { name: "复制一次性邀请链接" })).toBeVisible();
   failInvite = true;
@@ -3714,6 +3913,52 @@ test("phase 7 dashboard channel operations use exact membership, invitation, pos
     method: "PATCH",
     body: { position: 1 }
   });
+  await page.getByRole("button", { name: "加入排序 post-active-null" }).click();
+  expect(mutations.at(-1)).toMatchObject({
+    url: "/api/dashboard/channels/owner-private/posts/active-null",
+    method: "PATCH",
+    body: { position: 2 }
+  });
+  await page.getByLabel("作品 ID", { exact: true }).fill("post-new-manual");
+  await page.getByRole("button", { name: "加入作品" }).click();
+  expect(mutations.at(-1)).toMatchObject({
+    url: "/api/dashboard/channels/owner-private/posts",
+    method: "POST",
+    body: { postId: "post-new-manual", position: 2 }
+  });
+  await page.getByRole("button", { name: "停用规则 featured" }).click();
+  expect(mutations.at(-1)).toMatchObject({
+    url: "/api/dashboard/channels/owner-private/rules/rule-toggle",
+    method: "PATCH",
+    body: { enabled: false }
+  });
+});
+
+test("phase 7 invitation recipient page authenticates and sends explicit accept or reject", async ({ page }) => {
+  const calls: Array<{ method: string; body: unknown }> = [];
+  await page.route("**/api/auth/get-session", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      session: { id: "invite-session", userId: "invite-user", expiresAt: "2027-07-25T00:00:00.000Z" },
+      user: { id: "invite-user", name: "Invite User", email: "invitee@example.com" }
+    })
+  }));
+  await page.route("**/api/channels/invitations/recipient-token", async (route) => {
+    const request = route.request();
+    calls.push({ method: request.method(), body: request.postData() ? request.postDataJSON() : null });
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ changed: true }) });
+  });
+
+  await page.goto("/channels/invitations/recipient-token");
+  await page.getByRole("button", { name: "接受邀请" }).click();
+  await expect(page.getByText("邀请已接受")).toBeVisible();
+  expect(calls.at(-1)).toEqual({ method: "POST", body: {} });
+
+  await page.reload();
+  await page.getByRole("button", { name: "拒绝邀请" }).click();
+  await expect(page.getByText("邀请已拒绝")).toBeVisible();
+  expect(calls.at(-1)).toEqual({ method: "DELETE", body: {} });
 });
 
 test("phase 7 admin channel operation builders use exact success and failure contracts", async () => {
@@ -3779,6 +4024,13 @@ test("phase 7 admin channel UI exposes operations only to channel admins", async
   const suffix = Date.now().toString(36);
   let channelId: string | null = null;
   let financeUserId: string | null = null;
+  const reindexRequestedAfter = new Date();
+  const preexistingReindexIds = new Set((await prisma.channelJob.findMany({
+    where: { kind: "reindex_all" },
+    select: { id: true }
+  })).map(({ id }) => id));
+  const createdReindexJobIds: string[] = [];
+  const createdReindexAuditIds: string[] = [];
   const originalQuota = await prisma.channelQuotaOverride.findUnique({ where: { userId: "c1" } });
 
   try {
@@ -3823,6 +4075,25 @@ test("phase 7 admin channel UI exposes operations only to channel admins", async
     await activeRow.getByLabel(`选择频道 UI Review ${suffix}`).check();
     await activeRow.getByRole("button", { name: "重新物化频道" }).click();
     await operations.getByRole("button", { name: "重新索引搜索" }).click();
+    await expect(operations.getByRole("status")).toContainText("重新索引作业已排程");
+    const newReindexJobs = await prisma.channelJob.findMany({
+      where: { kind: "reindex_all", createdAt: { gte: reindexRequestedAfter } },
+      select: { id: true }
+    });
+    createdReindexJobIds.push(...newReindexJobs
+      .map(({ id }) => id)
+      .filter((id) => !preexistingReindexIds.has(id)));
+    if (createdReindexJobIds.length) {
+      const newAudits = await prisma.auditLog.findMany({
+        where: {
+          action: "search.reindex",
+          targetType: "channel_job",
+          targetId: { in: createdReindexJobIds }
+        },
+        select: { id: true }
+      });
+      createdReindexAuditIds.push(...newAudits.map(({ id }) => id));
+    }
     await operations.getByLabel("频道配额").fill("9");
     await operations.getByLabel("配额原因").fill("Task 9 live UI quota");
     await operations.getByRole("button", { name: "保存频道配额" }).click();
@@ -3875,6 +4146,12 @@ test("phase 7 admin channel UI exposes operations only to channel admins", async
     expect(ADMIN_SECTIONS.content_admin).toContain("channels");
     expect(ADMIN_SECTIONS.super_admin).toContain("channels");
   } finally {
+    if (createdReindexAuditIds.length) {
+      await prisma.auditLog.deleteMany({ where: { id: { in: createdReindexAuditIds } } });
+    }
+    if (createdReindexJobIds.length) {
+      await prisma.channelJob.deleteMany({ where: { id: { in: createdReindexJobIds } } });
+    }
     if (channelId) await cleanupPhase7MembershipArtifacts([], [], [channelId]);
     if (originalQuota) {
       await prisma.channelQuotaOverride.upsert({

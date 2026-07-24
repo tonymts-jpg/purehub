@@ -105,6 +105,7 @@ export function ChannelManager() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const requestVersion = useRef(0);
+  const loadController = useRef<AbortController | null>(null);
 
   const selected = useMemo(
     () => channels.find((channel) => channel.id === selectedId) ?? channels[0] ?? null,
@@ -113,14 +114,17 @@ export function ChannelManager() {
   const isOwner = selected?.access.role === "owner";
   const canCurate = Boolean(selected?.access.canCurate);
 
-  const loadChannels = useCallback(async (signal?: AbortSignal) => {
+  const loadChannels = useCallback(async () => {
     const version = ++requestVersion.current;
+    loadController.current?.abort();
+    const controller = new AbortController();
+    loadController.current = controller;
     setLoading(true);
     setError("");
     try {
       const [dashboard, visible] = await Promise.all([
-        loadEveryChannelPage<Channel>("/api/dashboard/channels", "channels", signal ?? new AbortController().signal),
-        loadEveryChannelPage<Channel>("/api/channels", "channels", signal ?? new AbortController().signal)
+        loadEveryChannelPage<Channel>("/api/dashboard/channels", "channels", controller.signal),
+        loadEveryChannelPage<Channel>("/api/channels", "channels", controller.signal)
       ]);
       if (version !== requestVersion.current) return;
       const byId = new Map(dashboard.items.map((channel) => [channel.id, channel]));
@@ -145,9 +149,8 @@ export function ChannelManager() {
   }, [router]);
 
   useEffect(() => {
-    const controller = new AbortController();
-    void loadChannels(controller.signal);
-    return () => controller.abort();
+    void loadChannels();
+    return () => loadController.current?.abort();
   }, [loadChannels]);
 
   const mutate: MutationRunner = async (operation, success, options) => {
@@ -233,6 +236,7 @@ export function ChannelManager() {
 
           {selected.access.canManageMembers && (
             <ChannelMembershipManager
+              key={selected.id}
               channel={selected as ManagedChannel}
               canManage={selected.access.role === "owner"}
               runMutation={mutate}
@@ -241,6 +245,7 @@ export function ChannelManager() {
 
           {canCurate && (
             <ChannelCurationManager
+              key={selected.id}
               channel={selected as ManagedChannel}
               runMutation={mutate}
             />
@@ -429,14 +434,18 @@ export function AdminChannelOperations({ admin }: { admin: AdminContext }) {
   const [officialName, setOfficialName] = useState("");
   const [officialDescription, setOfficialDescription] = useState("");
   const requestVersion = useRef(0);
+  const loadController = useRef<AbortController | null>(null);
   const selected = channels.find((channel) => channel.id === selectedId) ?? null;
 
-  const load = useCallback(async (signal?: AbortSignal) => {
+  const load = useCallback(async () => {
     if (!allowed) {
       setChannels([]);
       return;
     }
     const version = ++requestVersion.current;
+    loadController.current?.abort();
+    const controller = new AbortController();
+    loadController.current = controller;
     setLoading(true);
     setError("");
     try {
@@ -445,7 +454,7 @@ export function AdminChannelOperations({ admin }: { admin: AdminContext }) {
       const result = await loadEveryChannelPage<Channel>(
         `/api/admin/channels${params.size ? `?${params}` : ""}`,
         "channels",
-        signal ?? new AbortController().signal
+        controller.signal
       );
       if (version === requestVersion.current) {
         setChannels(result.items);
@@ -460,9 +469,8 @@ export function AdminChannelOperations({ admin }: { admin: AdminContext }) {
   }, [allowed, filter]);
 
   useEffect(() => {
-    const controller = new AbortController();
-    void load(controller.signal);
-    return () => controller.abort();
+    void load();
+    return () => loadController.current?.abort();
   }, [load]);
 
   const mutate: MutationRunner = async (operation, success, options) => {
@@ -648,30 +656,14 @@ export function AdminChannelOperations({ admin }: { admin: AdminContext }) {
             <div className="mt-6 space-y-6 border-t border-[var(--line)] pt-5">
               <h3 className="font-black">已选择官方频道的成员与策展</h3>
               <ChannelMembershipManager
-                channel={{
-                  ...(selected as ManagedChannel),
-                  access: {
-                    canRead: true,
-                    canManage: true,
-                    canCurate: true,
-                    canManageMembers: true,
-                    role: "owner"
-                  }
-                }}
-                canManage
+                key={`admin-members-${selected.id}`}
+                channel={selected as ManagedChannel}
+                canManage={allowed}
                 runMutation={mutate}
               />
               <ChannelCurationManager
-                channel={{
-                  ...(selected as ManagedChannel),
-                  access: {
-                    canRead: true,
-                    canManage: true,
-                    canCurate: true,
-                    canManageMembers: true,
-                    role: "owner"
-                  }
-                }}
+                key={`admin-curation-${selected.id}`}
+                channel={selected as ManagedChannel}
                 runMutation={mutate}
               />
             </div>

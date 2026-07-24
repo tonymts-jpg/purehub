@@ -45,10 +45,20 @@ export function ChannelMembershipManager({
   }, [channel.id]);
 
   useEffect(() => {
+    setReceipt(null);
+    setCopied(false);
+  }, [channel.id]);
+
+  useEffect(() => {
+    setMemberships([]);
     const controller = new AbortController();
     void load(controller.signal);
     return () => controller.abort();
   }, [load, reloadVersion]);
+
+  const invitationLink = receipt
+    ? `${window.location.origin}/channels/invitations/${encodeURIComponent(receipt.token)}`
+    : "";
 
   async function mutate(operation: () => Promise<unknown>, success: string) {
     const ok = await runMutation(operation, success, { refresh: false });
@@ -90,9 +100,9 @@ export function ChannelMembershipManager({
             <div data-testid="invitation-receipt" className="mt-3 rounded-md border border-amber-500/50 bg-amber-500/10 p-3">
               <p className="text-sm font-black">一次性邀请链接</p>
               <p className="mt-1 text-xs text-amber-800 dark:text-amber-200">此 token 只显示一次；请勿记录到日志、截图或长期储存。</p>
-              <code className="mt-2 block break-all rounded bg-black/5 p-2 text-xs dark:bg-white/10">{`${window.location.origin}/api/channels/invitations/${receipt.token}`}</code>
+              <code className="mt-2 block break-all rounded bg-black/5 p-2 text-xs dark:bg-white/10">{invitationLink}</code>
               <ChannelIconButton label="复制一次性邀请链接" className="mt-2" onClick={async () => {
-                await navigator.clipboard.writeText(`${window.location.origin}/api/channels/invitations/${receipt.token}`);
+                await navigator.clipboard.writeText(invitationLink);
                 setCopied(true);
               }}><Clipboard size={14}/>{copied ? "已复制" : "复制"}</ChannelIconButton>
             </div>

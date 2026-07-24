@@ -54,6 +54,9 @@ export function ChannelCurationManager({
   }, [prefix]);
 
   useEffect(() => {
+    setPosts([]);
+    setRules([]);
+    setExclusions([]);
     const controller = new AbortController();
     void load(controller.signal);
     return () => controller.abort();
@@ -84,7 +87,10 @@ export function ChannelCurationManager({
           <form className="mt-2 flex gap-2" onSubmit={(event) => {
             event.preventDefault();
             void mutate(
-              () => channelApi(`${prefix}/posts`, { method: "POST", body: JSON.stringify({ postId }) }),
+              () => channelApi(`${prefix}/posts`, {
+                method: "POST",
+                body: JSON.stringify({ postId, position: positioned.length })
+              }),
               "作品已加入频道。"
             ).then((ok) => {
               if (ok) setPostId("");
@@ -131,6 +137,15 @@ export function ChannelCurationManager({
                       )}
                     ><ChevronDown size={14}/></ChannelIconButton>
                   )}
+                  {post.status === "active" && post.position === null && (
+                    <ChannelIconButton label={`加入排序 ${post.postId}`} onClick={() => void mutate(
+                      () => channelApi(`${prefix}/posts/${post.id}`, {
+                        method: "PATCH",
+                        body: JSON.stringify({ position: positioned.length })
+                      }),
+                      "作品已加入排序。"
+                    )}><Plus size={14}/></ChannelIconButton>
+                  )}
                   {post.status === "active" && (
                     <ChannelIconButton label={`移除作品 ${post.postId}`} onClick={() => {
                       if (window.confirm("确认从频道移除这个作品？")) {
@@ -173,6 +188,13 @@ export function ChannelCurationManager({
               <li key={rule.id} className="flex items-center gap-2 border-b border-[var(--line)] py-2 text-sm">
                 <span className="flex-1"><b>{rule.kind}</b> · {rule.value}</span>
                 <ChannelStatus value={rule.enabled ? "enabled" : "disabled"}/>
+                <ChannelIconButton label={`${rule.enabled ? "停用" : "启用"}规则 ${rule.value}`} onClick={() => void mutate(
+                  () => channelApi(`${prefix}/rules/${rule.id}`, {
+                    method: "PATCH",
+                    body: JSON.stringify({ enabled: !rule.enabled })
+                  }),
+                  rule.enabled ? "规则已停用。" : "规则已启用。"
+                )}>{rule.enabled ? "停用" : "启用"}</ChannelIconButton>
                 <ChannelIconButton label={`删除规则 ${rule.value}`} onClick={() => {
                   if (window.confirm("确认删除这项自动规则？")) {
                     void mutate(() => channelApi(`${prefix}/rules/${rule.id}`, { method: "DELETE" }), "规则已删除。");

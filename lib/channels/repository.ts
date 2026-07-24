@@ -1365,6 +1365,7 @@ async function requireMembershipManager(
     where: { id: channelId },
     select: {
       id: true,
+      kind: true,
       status: true,
       visibility: true,
       ownerUserId: true,
@@ -1384,13 +1385,27 @@ async function requireMembershipManager(
   if (channel.status !== "active") {
     conflict("Membership management requires an active channel.");
   }
+  const admin = channel.kind === "official"
+    ? await tx.adminAccount.findFirst({
+        where: {
+          userId: actorUserId,
+          status: "active",
+          role: { in: ["super_admin", "ops_admin", "content_admin"] },
+          user: { status: "active" }
+        },
+        select: { role: true }
+      })
+    : null;
+  if (admin) {
+    return { ...channel, actorRole: admin.role, admin: true as const };
+  }
   const role = channel.memberships[0]?.role;
   if (!role || (!allowEditor && (role !== "owner" || channel.ownerUserId !== actorUserId))) {
     denied(allowEditor
       ? "Only an active channel owner or editor may view members."
       : "Only the active channel owner may manage members.");
   }
-  return { ...channel, actorRole: role as "owner" | "editor" };
+  return { ...channel, actorRole: role as "owner" | "editor", admin: false as const };
 }
 
 export async function requestChannelMembership(
@@ -1510,7 +1525,7 @@ export async function reviewChannelMembership(
   decision: MembershipReviewDecision
 ): Promise<ChannelMembershipDto> {
   return retryMembershipSerializableOperation(() => prisma.$transaction(async (tx) => {
-    await requireMembershipManager(tx, actorUserId, channelId, false);
+    const channel = await requireMembershipManager(tx, actorUserId, channelId, false);
     const membership = await tx.channelMembership.findFirst({
       where: { id: membershipId, channelId },
       select: channelMembershipSelect
@@ -1535,7 +1550,7 @@ export async function reviewChannelMembership(
     await tx.auditLog.create({
       data: {
         actorUserId,
-        actorRole: "owner",
+        actorRole: channel.actorRole,
         action: "channel.membership_review",
         targetType: "channel_membership",
         targetId: membership.id,
@@ -1586,7 +1601,7 @@ export async function updateChannelMembership(
     await tx.auditLog.create({
       data: {
         actorUserId,
-        actorRole: "owner",
+        actorRole: channel.actorRole,
         action: "channel.membership_update",
         targetType: "channel_membership",
         targetId: membership.id,
