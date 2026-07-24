@@ -358,9 +358,16 @@ test("phase 7 lifecycle routes create, review, transfer, suspend, restore, and a
     expect(creatorCreateDetailBody.jobs).toEqual(expect.arrayContaining([
       expect.objectContaining({
         kind: "delete_index",
-        idempotencyKey: expect.stringMatching(`^delete-index:channel:${creatorChannel.id}:`)
+        idempotencyKey: expect.stringMatching(`^delete-index:channel:${creatorChannel.id}:`),
+        status: expect.any(String),
+        attempts: expect.any(Number),
+        createdAt: expect.any(String),
+        updatedAt: expect.any(String)
       })
     ]));
+    for (const job of creatorCreateDetailBody.jobs) {
+      expect(job).not.toHaveProperty("lastError");
+    }
 
     const malformedSubmit = await creatorRequest.post(`/api/dashboard/channels/${creatorChannel.id}/submit`, {
       headers: { ...authHeaders, "content-type": "application/json" },
@@ -451,9 +458,16 @@ test("phase 7 lifecycle routes create, review, transfer, suspend, restore, and a
     expect(officialCreateDetail.jobs).toEqual(expect.arrayContaining([
       expect.objectContaining({
         kind: "index_entity",
-        idempotencyKey: expect.stringMatching(`^index:channel:${official.id}:`)
+        idempotencyKey: expect.stringMatching(`^index:channel:${official.id}:`),
+        status: expect.any(String),
+        attempts: expect.any(Number),
+        createdAt: expect.any(String),
+        updatedAt: expect.any(String)
       })
     ]));
+    for (const job of officialCreateDetail.jobs) {
+      expect(job).not.toHaveProperty("lastError");
+    }
     const officialCreateJobKeys = officialCreateDetail.jobs
       .map((job: { idempotencyKey: string }) => job.idempotencyKey);
     expect(new Set(officialCreateJobKeys).size).toBe(officialCreateJobKeys.length);

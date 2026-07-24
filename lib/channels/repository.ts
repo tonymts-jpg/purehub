@@ -727,7 +727,6 @@ export async function getAdminChannelById(admin: AdminContext, channelId: string
         attempts: true,
         availableAt: true,
         lockedAt: true,
-        lastError: true,
         createdAt: true,
         updatedAt: true,
         completedAt: true
