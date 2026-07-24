@@ -272,7 +272,7 @@ async function main() {
             members: creator.members,
             cover: creator.cover,
             verified: creator.verified,
-            levelId: levelForFollowers(creator.followers),
+            levelId: creator.id === "c1" ? "level-2" : levelForFollowers(creator.followers),
             plans: {
               create: creator.plans.map((plan) => ({
                 id: plan.id,
