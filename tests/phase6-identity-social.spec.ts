@@ -1,5 +1,5 @@
 import { expect, test, type APIRequestContext, type TestInfo } from "@playwright/test";
-import { authHeaders, hasDatabase, postSignIn, signInCreator, signInFan, signInSupport } from "./auth-helpers";
+import { authHeaders, hasDatabase, postSignIn, postSignUp, registerFan, signIn, signInCreator, signInSupport } from "./auth-helpers";
 
 const password = process.env.DEMO_ACCOUNT_PASSWORD ?? "PureHubDemo!2026";
 
@@ -25,10 +25,7 @@ test("phase 6 credential auth creates secure database sessions", async ({ reques
   const suffix = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
   const email = `phase6-${suffix}@purehub.local`;
   const handle = `phase6-${suffix}`.slice(0, 30);
-  const registered = await request.post("/api/auth/sign-up/email", {
-    headers: authHeaders,
-    data: { name: "Phase Six Fan", email, password, handle }
-  });
+  const registered = await postSignUp(request, { name: "Phase Six Fan", email, password, handle });
   expect(registered.ok(), await registered.text()).toBeTruthy();
   const cookie = registered.headers()["set-cookie"] ?? "";
   expect(cookie.toLowerCase()).toContain("httponly");
@@ -41,10 +38,7 @@ test("phase 6 credential auth creates secure database sessions", async ({ reques
   expect(meBody.user.handle).toBe(handle);
   expect(meBody.user.role).toBe("fan");
 
-  const duplicate = await request.post("/api/auth/sign-up/email", {
-    headers: authHeaders,
-    data: { name: "Duplicate", email, password, handle: `${handle}-x`.slice(0, 30) }
-  });
+  const duplicate = await postSignUp(request, { name: "Duplicate", email, password, handle: `${handle}-x`.slice(0, 30) });
   expect(duplicate.ok()).toBeFalsy();
 
   const signOut = await request.post("/api/auth/sign-out", { headers: authHeaders, data: {} });
@@ -63,7 +57,7 @@ test("phase 6 server authorization rejects spoofed identities and role headers",
   expect((await request.post("/api/posts", { data: {} })).status()).toBe(401);
   expect((await request.post("/api/payout-requests", { data: { userId: "c1", amount: 100, channel: "alipay" } })).status()).toBe(401);
 
-  await signInFan(request);
+  await registerFan(request, "phase6-authorization");
   expect((await request.post("/api/posts", { data: { creatorId: "c1" } })).status()).toBe(403);
   expect((await request.get("/api/dashboard/summary?creatorId=c1")).status()).toBe(403);
 
@@ -92,6 +86,7 @@ test("phase 6 server authorization rejects spoofed identities and role headers",
 
 test("phase 6 social interactions are idempotent and notifications are owned", async ({ request }, testInfo) => {
   await requirePhase6(request, testInfo);
+  const fan = await registerFan(request, "phase6-social");
   await signInCreator(request);
   const created = await request.post("/api/posts", {
     data: {
@@ -108,7 +103,7 @@ test("phase 6 social interactions are idempotent and notifications are owned", a
   expect(created.ok(), await created.text()).toBeTruthy();
   const postId = (await created.json()).post.id as string;
 
-  await signInFan(request);
+  await signIn(request, fan.email);
   for (let index = 0; index < 2; index += 1) {
     expect((await request.post("/api/creators/yuki/follow")).ok()).toBeTruthy();
     expect((await request.post(`/api/posts/${postId}/like`)).ok()).toBeTruthy();
@@ -131,7 +126,7 @@ test("phase 6 social interactions are idempotent and notifications are owned", a
   expect((await request.patch(`/api/notifications/${related[0].id}`)).ok()).toBeTruthy();
   expect((await request.post("/api/notifications/read-all")).ok()).toBeTruthy();
 
-  await signInFan(request);
+  await signIn(request, fan.email);
   expect((await request.delete(`/api/comments/${comment.id}`)).ok()).toBeTruthy();
   expect((await request.delete(`/api/posts/${postId}/like`)).ok()).toBeTruthy();
   expect((await request.delete(`/api/posts/${postId}/bookmark`)).ok()).toBeTruthy();

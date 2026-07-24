@@ -5,6 +5,7 @@ const baseURL = deployedBaseURL ?? "http://localhost:3001";
 
 export default defineConfig({
   testDir:"./tests",
+  timeout: deployedBaseURL ? 120_000 : 30_000,
   workers: deployedBaseURL ? 1 : 2,
   use:{baseURL,trace:"on-first-retry"},
   webServer:deployedBaseURL ? undefined : {

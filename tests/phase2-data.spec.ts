@@ -1,6 +1,6 @@
 ﻿import { expect, test } from "@playwright/test";
 
-import { hasDatabase, signInCreator, signInFan } from "./auth-helpers";
+import { hasDatabase, registerFan, signInCreator } from "./auth-helpers";
 
 test("phase 2 feed, detail, creator, and pricing APIs are available", async ({ request }) => {
   const feed = await request.get("/api/feed");
@@ -28,7 +28,7 @@ test("phase 2 feed, detail, creator, and pricing APIs are available", async ({ r
 
 test("phase 2 creator application and post APIs accept writable data", async ({ request }) => {
   test.skip(!(await hasDatabase(request)), "Phase 2 writable APIs require the seeded database.");
-  await signInFan(request);
+  await registerFan(request, "phase2-applicant");
   const application = await request.post("/api/creator/applications", {
     data: {
       displayName: "Phase 2 Creator",

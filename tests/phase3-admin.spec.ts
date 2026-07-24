@@ -1,5 +1,5 @@
 import { expect, test, type APIRequestContext } from "@playwright/test";
-import { signInAdmin, signInFan, signInSupport } from "./auth-helpers";
+import { registerFan, signInAdmin, signInSupport } from "./auth-helpers";
 
 const adminHeaders = {
   "x-admin-token": process.env.ADMIN_ACCESS_TOKEN ?? "purehub-admin-demo-token",
@@ -41,7 +41,7 @@ test("phase 3 admin UI is reachable with an admin session", async ({ page }) => 
 test("phase 3 admin can review creator applications and write audit logs", async ({ request }) => {
   test.skip(!(await hasDatabase(request)), "Phase 3 admin APIs require the seeded database.");
 
-  await signInFan(request);
+  await registerFan(request, "phase3-applicant");
   const application = await request.post("/api/creator/applications", {
     data: {
       displayName: "Phase 3 Creator",
