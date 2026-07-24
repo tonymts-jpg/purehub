@@ -48,6 +48,14 @@ export const SETTLEMENT_RULES = {
   maxHoldDays: 90
 } as const;
 
+export const CHANNEL_RULES = {
+  kinds: ["official", "creator"],
+  visibilities: ["public", "private"],
+  discoverability: ["discoverable", "hidden"],
+  roles: ["owner", "editor", "member"],
+  creatorLevelQuotas: { "level-1": 1, "level-2": 3, "level-3": 5 }
+} as const;
+
 export const ADMIN_ROLE_LABELS: Record<AdminRole, string> = {
   super_admin: "Super Admin",
   ops_admin: "Operations Admin",

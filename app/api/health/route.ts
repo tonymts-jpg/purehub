@@ -45,7 +45,15 @@ export async function GET() {
       version: process.env.NEXT_PUBLIC_APP_VERSION ?? "0.1.0",
       locales: SUPPORTED_LOCALES,
       paymentProviders: Object.keys(PAYMENT_PROVIDERS),
-      capabilities: { databaseSessions: true, credentialAuth: true, socialInteractions: true, notifications: true },
+      capabilities: {
+        databaseSessions: true,
+        credentialAuth: true,
+        socialInteractions: true,
+        notifications: true,
+        channels: true,
+        channelAcl: true,
+        postgresSearch: true
+      },
       dependencies,
       timestamp: new Date().toISOString()
     },

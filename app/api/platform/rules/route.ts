@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   ADMIN_ROLE_LABELS,
+  CHANNEL_RULES,
   CONTENT_RULES,
   DEFAULT_USDT_CONFIG,
   PAYMENT_PROVIDERS,
@@ -18,6 +19,7 @@ export function GET() {
     paymentProviders: PAYMENT_PROVIDERS,
     usdtDefaults: DEFAULT_USDT_CONFIG,
     adminRoles: ADMIN_ROLE_LABELS,
+    channels: CHANNEL_RULES,
     identity: { provider: "better-auth", sessionStore: "database", credentials: true },
     social: { follows: true, likes: true, bookmarks: true, comments: true, notifications: true }
   });
