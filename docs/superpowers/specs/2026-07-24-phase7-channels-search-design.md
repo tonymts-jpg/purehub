@@ -134,6 +134,36 @@ If no override exists, the active creator level determines the quota. All
 non-archived channels count, including suspended channels. Archiving releases
 the quota only after the archival mutation is authorized and audited.
 
+### ChannelInvitation
+
+Required fields:
+
+- `id`, `channelId`, `email`, optional `invitedUserId`
+- unique `tokenHash`, `expiresAt`
+- `status`: `pending | accepted | rejected | expired | revoked`
+- `invitedByUserId`, `acceptedByUserId`, `createdAt`, `updatedAt`
+
+Only a random raw token is returned once to the inviter or delivery adapter.
+The database stores its SHA-256 hash. Acceptance requires an authenticated user
+whose normalized email matches the invitation, and atomically activates that
+user's unique `ChannelMembership`.
+
+### ChannelJob
+
+Required fields:
+
+- `id`, unique `idempotencyKey`
+- `kind`: `materialize_channel | index_entity | delete_index | reindex_all`
+- optional `channelId`, `entityType`, `entityId`
+- `status`: `pending | processing | completed | failed`
+- `attempts`, `availableAt`, `lockedAt`, `lastError`
+- `createdAt`, `updatedAt`, `completedAt`
+
+Source mutations enqueue jobs in the same Prisma transaction. The worker claims
+jobs with bounded batches, retries failed jobs with backoff, and may safely
+replay completed idempotency keys without duplicating channel posts or search
+documents.
+
 ### SearchDocument
 
 Search indexing uses a dedicated relational projection:
