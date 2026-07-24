@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Activity, BadgeDollarSign, ClipboardList, CreditCard, Layers3, ShieldCheck, Users } from "lucide-react";
 import { PageHeader } from "@/components/app-shell";
+import { AdminChannelOperations } from "@/components/channels/channel-manager";
 import type { AdminRole } from "@/lib/platform-config";
 
 type Overview = {
@@ -178,6 +179,8 @@ export default function AdminPage() {
       <button onClick={loadAdmin} className="self-end rounded-md bg-[var(--text)] px-4 py-2 text-sm font-black text-[var(--bg)]">同步</button>
       <p role="status" className="text-sm muted">{message}</p>
     </section>
+
+    <AdminChannelOperations admin={overview?.admin ?? null}/>
 
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
       <Metric icon={Users} label="用户" value={overview?.metrics.users ?? 0}/>

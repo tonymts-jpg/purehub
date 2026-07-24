@@ -3410,3 +3410,213 @@ test("phase 7 channel UI and search UI preserve complete ordered cursor pages", 
     await prisma.channel.deleteMany({ where: { id: { in: fixtureChannels.map(({ id }) => id) } } });
   }
 });
+
+test("phase 7 dashboard channel UI redirects fans and separates owner from editor controls", async ({ page, request }, testInfo) => {
+  await requirePhase7(request, testInfo);
+
+  await signInFan(page.request);
+  await page.goto("/dashboard/channels");
+  await expect(page).toHaveURL("/");
+
+  await signInCreator(page.request);
+  await page.goto("/dashboard/channels");
+  await expect(page.getByRole("heading", { name: "频道管理" })).toBeVisible();
+  await expect(page.getByTestId("channel-quota")).toContainText("1 / 3");
+  await expect(page.getByTestId("channel-review-status")).toContainText("active");
+  await expect(page.getByTestId("channel-owner-controls")).toBeVisible();
+  await expect(page.getByTestId("channel-membership-manager")).toBeVisible();
+  await expect(page.getByTestId("channel-curation-manager")).toBeVisible();
+  await expect(page.getByTestId("channel-policy-control")).toBeVisible();
+
+  await page.getByRole("button", { name: "Private Curators" }).click();
+  await expect(page.getByTestId("channel-current-role")).toContainText("editor");
+  await expect(page.getByTestId("channel-curation-manager")).toBeVisible();
+  await expect(page.getByTestId("channel-owner-controls")).toHaveCount(0);
+  await expect(page.getByTestId("channel-membership-manager")).toHaveCount(0);
+  await expect(page.getByTestId("channel-policy-control")).toHaveCount(0);
+});
+
+test("phase 7 dashboard channel UI renders the protected operations contract", async ({ page }) => {
+  const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3001";
+  await page.context().addCookies([{
+    name: "purehub.session_token",
+    value: "phase7-ui-contract",
+    url: baseURL
+  }]);
+  await page.route("**/api/auth/get-session", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      session: { id: "phase7-ui-session", userId: "c1", expiresAt: "2026-07-25T23:59:59.000Z" },
+      user: { id: "c1", name: "UI Fixture", email: "fixture@purehub.local" }
+    })
+  }));
+
+  const channel = (input: {
+    id: string;
+    name: string;
+    slug: string;
+    role: "owner" | "editor" | null;
+    status?: string;
+    ownerUserId?: string;
+  }) => ({
+    id: input.id,
+    slug: input.slug,
+    name: input.name,
+    description: `${input.name} operations fixture.`,
+    avatarAssetId: null,
+    coverAssetId: null,
+    kind: "creator",
+    visibility: "public",
+    discoverability: "discoverable",
+    status: input.status ?? "active",
+    ownerUserId: input.ownerUserId ?? "c1",
+    createdByUserId: input.ownerUserId ?? "c1",
+    memberPostPolicy: "approval_required",
+    reviewNote: null,
+    reviewedAt: "2026-07-24T00:00:00.000Z",
+    suspendedAt: null,
+    createdAt: "2026-07-24T00:00:00.000Z",
+    updatedAt: "2026-07-24T00:00:00.000Z",
+    owner: { id: input.ownerUserId ?? "c1", name: "Fixture Owner", handle: "fixture-owner", avatar: "" },
+    access: {
+      canRead: true,
+      canManage: input.role === "owner",
+      canCurate: input.role === "owner" || input.role === "editor",
+      canManageMembers: input.role === "owner",
+      role: input.role
+    }
+  });
+  const ownerChannel = channel({ id: "owner-channel", slug: "owner-channel", name: "Owner Channel", role: "owner" });
+  const editorChannel = channel({ id: "editor-channel", slug: "editor-channel", name: "Editor Channel", role: "editor", ownerUserId: "c2" });
+
+  await page.route("**/api/dashboard/channels?*", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ channels: [ownerChannel], nextCursor: null, quota: { used: 1, limit: 3, levelId: "level-2", overridden: false } })
+  }));
+  await page.route("**/api/channels?*", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ channels: [ownerChannel, editorChannel], nextCursor: null })
+  }));
+  await page.route("**/api/dashboard/channels/*/members*", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ memberships: [], nextCursor: null })
+  }));
+  await page.route("**/api/dashboard/channels/*/posts*", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ posts: [], nextCursor: null })
+  }));
+  await page.route("**/api/dashboard/channels/*/rules*", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ rules: [], nextCursor: null })
+  }));
+  await page.route("**/api/dashboard/channels/*/exclusions*", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ exclusions: [], nextCursor: null })
+  }));
+
+  await page.goto("/dashboard/channels");
+  await expect(page.getByRole("heading", { name: "频道管理" })).toBeVisible();
+  await expect(page.getByTestId("channel-create-form")).toBeVisible();
+  await expect(page.getByTestId("channel-owner-controls")).toBeVisible();
+  await expect(page.getByTestId("channel-settings-form")).toBeVisible();
+  await page.getByRole("button", { name: "Editor Channel" }).click();
+  await expect(page.getByTestId("channel-current-role")).toContainText("editor");
+  await expect(page.getByTestId("channel-owner-controls")).toHaveCount(0);
+  await expect(page.getByTestId("channel-curation-manager")).toBeVisible();
+});
+
+test("phase 7 admin channel UI exposes operations only to channel admins", async ({ page, request }, testInfo) => {
+  await requirePhase7(request, testInfo);
+  const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3001";
+  const creatorRequest = await playwrightRequest.newContext({ baseURL });
+  const suffix = Date.now().toString(36);
+  let channelId: string | null = null;
+  let financeUserId: string | null = null;
+
+  try {
+    await signInCreator(creatorRequest);
+    const created = await creatorRequest.post("/api/dashboard/channels", {
+      headers: authHeaders,
+      data: {
+        slug: `ui-review-${suffix}`,
+        name: `UI Review ${suffix}`,
+        description: "Task 9 protected admin review queue fixture.",
+        visibility: "public",
+        discoverability: "discoverable",
+        memberPostPolicy: "approval_required"
+      }
+    });
+    expect(created.ok(), await created.text()).toBeTruthy();
+    channelId = (await created.json()).channel.id;
+    const submitted = await creatorRequest.post(`/api/dashboard/channels/${channelId}/submit`, {
+      headers: authHeaders,
+      data: {}
+    });
+    expect(submitted.ok(), await submitted.text()).toBeTruthy();
+
+    await signInAdmin(page.request);
+    await page.goto("/admin");
+    const operations = page.getByTestId("admin-channel-operations");
+    await expect(operations).toBeVisible();
+    await operations.getByLabel("频道状态筛选").selectOption("pending");
+    const reviewRow = operations.getByRole("row").filter({ hasText: `UI Review ${suffix}` });
+    await expect(reviewRow).toBeVisible();
+    await reviewRow.getByRole("button", { name: "审核频道" }).click();
+    await expect(page.getByRole("dialog", { name: "审核频道" })).toBeVisible();
+    await page.getByRole("button", { name: "取消审核" }).click();
+    await expect(operations.getByRole("button", { name: "重新索引搜索" })).toBeVisible();
+    await expect(operations.getByRole("button", { name: "重新物化频道" }).first()).toBeVisible();
+    await expect(operations.getByLabel("频道配额")).toBeVisible();
+    await expect(operations.getByLabel("接管新所有者 ID")).toBeVisible();
+
+    await signInSupport(page.request);
+    await page.goto("/admin");
+    const readOnlyOperations = page.getByTestId("admin-channel-operations");
+    await expect(readOnlyOperations).toBeVisible();
+    await expect(readOnlyOperations).toContainText("当前管理员角色无频道变更权限");
+    await expect(readOnlyOperations.getByRole("button", { name: "审核频道" })).toHaveCount(0);
+    await expect(readOnlyOperations.getByRole("button", { name: "重新索引搜索" })).toHaveCount(0);
+
+    const financeIdentity = await registerFan(page.request, "phase7-finance-admin");
+    const financeUser = await prisma.user.findUniqueOrThrow({
+      where: { email: financeIdentity.email },
+      select: { id: true }
+    });
+    financeUserId = financeUser.id;
+    await prisma.$transaction([
+      prisma.user.update({ where: { id: financeUser.id }, data: { role: "admin" } }),
+      prisma.adminAccount.create({
+        data: { userId: financeUser.id, role: "finance_admin", status: "active" }
+      })
+    ]);
+    await page.goto("/admin");
+    const financeOperations = page.getByTestId("admin-channel-operations");
+    await expect(financeOperations).toBeVisible();
+    await expect(financeOperations).toContainText("当前管理员角色无频道变更权限");
+    await expect(financeOperations.getByRole("button", { name: "审核频道" })).toHaveCount(0);
+    await expect(financeOperations.getByRole("button", { name: "重新索引搜索" })).toHaveCount(0);
+
+    expect(ADMIN_SECTIONS.finance_admin).not.toContain("channels");
+    expect(ADMIN_SECTIONS.support_admin).not.toContain("channels");
+    expect(ADMIN_SECTIONS.content_admin).toContain("channels");
+    expect(ADMIN_SECTIONS.super_admin).toContain("channels");
+  } finally {
+    if (channelId) await cleanupPhase7MembershipArtifacts([], [], [channelId]);
+    if (financeUserId) {
+      await prisma.$transaction([
+        prisma.adminAccount.deleteMany({ where: { userId: financeUserId } }),
+        prisma.session.deleteMany({ where: { userId: financeUserId } }),
+        prisma.account.deleteMany({ where: { userId: financeUserId } }),
+        prisma.user.deleteMany({ where: { id: financeUserId } })
+      ]);
+    }
+    await creatorRequest.dispose();
+  }
+});
