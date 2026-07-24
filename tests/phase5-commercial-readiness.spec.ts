@@ -1,5 +1,5 @@
 import { expect, test, type APIRequestContext, type TestInfo } from "@playwright/test";
-import { signInCreator, signInFan, signInSupport } from "./auth-helpers";
+import { registerFan, signInCreator, signInFan, signInSupport } from "./auth-helpers";
 
 const adminHeaders = {
   "x-admin-token": process.env.ADMIN_ACCESS_TOKEN ?? "purehub-admin-demo-token",
@@ -150,7 +150,7 @@ test("phase 5 KYC, private media access, and reconciliation enforce finance boun
   const upload = await prepared.json();
   expect((await request.post("/api/uploads/complete", { data: { assetId: upload.assetId, simulate: true, width: 100, height: 100 } })).ok()).toBeTruthy();
   const post = await createPost(request, [upload.assetId]);
-  await signInFan(request);
+  await registerFan(request, "phase5-media");
   expect((await request.get(`/api/media/${upload.assetId}/access`)).status()).toBe(403);
   await activateSettlement(request, 7);
   await pay(request, post.id);
