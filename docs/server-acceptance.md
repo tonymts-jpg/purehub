@@ -69,7 +69,7 @@ docker pull redis:7-alpine
 
 ## Deploy
 
-Phase 5 requires these additional staging secrets before deployment:
+Phase 5 and later require these additional staging secrets before deployment:
 
 ```bash
 WORKER_ACCESS_TOKEN=replace-with-a-long-random-token
@@ -77,7 +77,7 @@ MINIO_ROOT_USER=purehub-minio
 MINIO_ROOT_PASSWORD=replace-with-a-long-random-password
 OBJECT_STORAGE_BUCKET=purehub-media
 OBJECT_STORAGE_REGION=us-east-1
-PUREHUB_PHASE=phase-5
+PUREHUB_PHASE=phase-7
 ```
 
 ```bash
@@ -137,12 +137,58 @@ Rollback recreates services from the last available local image and reruns healt
 - `npm run test:e2e` passes before the build is promoted.
 - Logs for the last 10 minutes contain no startup-level `uncaught`, `unhandled`, `fatal`, or `panic` errors.
 
-On the Ubuntu server, install test dependencies before running Playwright directly on the deployed staging site:
+## Phase 7 Staging Acceptance
+
+Before deployment, confirm that `.env.staging` contains exactly one
+`PUREHUB_PHASE=phase-7` entry and real server-only values for
+`BETTER_AUTH_SECRET`, `DEMO_ACCOUNT_PASSWORD`, `ADMIN_ACCESS_TOKEN`,
+`WORKER_ACCESS_TOKEN`, `POSTGRES_PASSWORD`, and `MINIO_ROOT_PASSWORD`. Never
+commit or print those values.
+
+Deploy from the intended commit, run migrations, and opt in to the repeatable
+staging seed:
 
 ```bash
-npm ci
+cd /var/www/purehub
+git config core.fileMode false
+git pull --ff-only
+chmod +x scripts/*.sh
+DEPLOY_SEED=true ./scripts/deploy.sh staging
+docker compose --env-file .env.staging ps
+docker compose --env-file .env.staging exec web npm run db:migrate
+docker compose --env-file .env.staging exec web npm run db:seed
+curl -fsS http://127.0.0.1/api/health
+curl -fsS http://127.0.0.1/worker-health
+SMOKE_BASE_URL=http://127.0.0.1 ./scripts/smoke-test.sh
+SMOKE_BASE_URL=http://127.0.0.1 npm run smoke
+```
+
+The web health response must report `phase-7` with `channels`, `channelAcl`,
+and `postgresSearch` enabled. Worker health must include
+`channelMaterialization` and `searchIndexing` queue/task state. Both smoke
+runners verify the seeded public channel directory, typed creator search, and
+the unauthenticated dashboard mutation boundary.
+
+On the Ubuntu server, install test dependencies before running Playwright
+directly on the deployed staging site:
+
+```bash
+npm ci --registry=https://registry.npmmirror.com/
 npx playwright install --with-deps chromium
-PLAYWRIGHT_BASE_URL=http://127.0.0.1 npm run test:e2e:deployed
+export PLAYWRIGHT_BASE_URL=http://127.0.0.1
+export ADMIN_ACCESS_TOKEN="$(grep '^ADMIN_ACCESS_TOKEN=' .env.staging | tail -1 | cut -d= -f2-)"
+export DEMO_ACCOUNT_PASSWORD="$(grep '^DEMO_ACCOUNT_PASSWORD=' .env.staging | tail -1 | cut -d= -f2-)"
+npm run test:e2e:deployed
 ```
 
 `PLAYWRIGHT_BASE_URL` tells Playwright to use the already deployed Docker service instead of starting a local Next.js dev server.
+The deployed Playwright configuration uses one worker. Every Phase 7
+database-gated lifecycle, ACL, membership, curation/concurrency,
+search/reindex, UI, cleanup, and entitlement-isolation test must execute with
+zero unexpected skips or failures.
+
+Record `git rev-parse HEAD`, `git ls-remote origin refs/heads/main`, the staging
+checkout SHA, `/api/health` phase/version, Docker service state, migration and
+seed results, both smoke results, and exact Playwright passed/skipped/failed
+totals. Local, GitHub, staging checkout, and runtime commit SHAs must match
+before Phase 7 is accepted.

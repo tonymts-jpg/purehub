@@ -12,6 +12,26 @@ const taskState = {
   phase7: { lastRunAt: null, lastError: null }
 };
 
+function subsystemHealth(state) {
+  return {
+    lastRunAt: state.lastRunAt,
+    status: state.lastError ? "error" : state.lastRunAt ? "ok" : "pending"
+  };
+}
+
+function workerTaskHealth() {
+  const phase7 = subsystemHealth(taskState.phase7);
+  return {
+    lastRunAt: taskState.lastRunAt,
+    lastReconciliationAt: taskState.lastReconciliationAt,
+    status: taskState.lastError ? "error" : taskState.lastRunAt ? "ok" : "pending",
+    phase5: subsystemHealth(taskState.phase5),
+    phase7,
+    channelMaterialization: { ...phase7 },
+    searchIndexing: { ...phase7 }
+  };
+}
+
 async function runPhase5(action = "all") {
   if (!workerToken) throw new Error("WORKER_ACCESS_TOKEN is required.");
   const response = await fetch(`${webBaseUrl}/api/internal/phase5/run?action=${action}`, { method: "POST", headers: { "x-worker-token": workerToken } });
@@ -65,8 +85,17 @@ const server = http.createServer((request, response) => {
       status: "ok",
       service: "purehub-worker",
       environment: appEnv,
-      queues: ["media", "payments", "settlement", "reconciliation", "analytics", "moderation"],
-      tasks: taskState,
+      queues: [
+        "media",
+        "payments",
+        "settlement",
+        "reconciliation",
+        "analytics",
+        "moderation",
+        "channelMaterialization",
+        "searchIndexing"
+      ],
+      tasks: workerTaskHealth(),
       timestamp: new Date().toISOString()
     }));
     return;
