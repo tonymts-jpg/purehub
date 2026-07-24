@@ -4,14 +4,27 @@ import type {
   SearchResult
 } from "@/lib/channels/types";
 import type { AdminContext } from "@/lib/admin-auth";
+import { retrySerializableOperation } from "@/lib/channels/repository";
 import { prisma } from "@/lib/prisma";
+import {
+  SEARCH_ENTITY_TYPES,
+  type SearchEntityType
+} from "@/lib/search/jobs";
 
-const SEARCH_ENTITY_TYPES = ["post", "creator", "channel"] as const;
 const DEFAULT_SEARCH_LIMIT = 20;
 const MAX_SEARCH_LIMIT = 50;
 const SEARCH_CURSOR_VERSION = 1;
-
-type SearchEntityType = (typeof SEARCH_ENTITY_TYPES)[number];
+export const SEARCH_REINDEX_BATCH_SIZE = 25;
+export const SEARCH_REINDEX_STAGES = [
+  "post-source",
+  "creator-source",
+  "channel-source",
+  "post-document",
+  "creator-document",
+  "channel-document",
+  "done"
+] as const;
+export type SearchReindexStage = (typeof SEARCH_REINDEX_STAGES)[number];
 
 type SearchCursorPayload = {
   version: typeof SEARCH_CURSOR_VERSION;
@@ -304,79 +317,114 @@ export async function synchronizeSearchEntity(
   return "upserted";
 }
 
-async function synchronizeSearchType(
-  entityType: SearchEntityType,
-  entityIds: string[]
-): Promise<void> {
-  const eligible = new Set(entityIds);
-  const stale = await prisma.searchDocument.findMany({
-    where: { entityType },
-    select: { entityId: true }
-  });
-  const staleIds = stale
-    .map(({ entityId }) => entityId)
-    .filter((entityId) => !eligible.has(entityId));
-  if (staleIds.length) {
-    await prisma.searchDocument.deleteMany({
-      where: { entityType, entityId: { in: staleIds } }
-    });
-  }
-  for (const entityId of entityIds) {
-    await synchronizeSearchEntity(entityType, entityId);
-  }
+function isSearchReindexStage(value: unknown): value is SearchReindexStage {
+  return typeof value === "string"
+    && SEARCH_REINDEX_STAGES.some((stage) => stage === value);
 }
 
-export async function reindexAllSearchDocuments(): Promise<{
-  posts: number;
-  creators: number;
-  channels: number;
+export function advanceSearchReindexStage(stage: string): SearchReindexStage {
+  if (!isSearchReindexStage(stage) || stage === "done") {
+    throw new TypeError("Search reindex stage is invalid.");
+  }
+  return SEARCH_REINDEX_STAGES[SEARCH_REINDEX_STAGES.indexOf(stage) + 1];
+}
+
+async function reindexStageEntityIds(
+  stage: Exclude<SearchReindexStage, "done">,
+  cursor: string | null,
+  limit: number
+): Promise<Array<{ entityId: string; entityType: SearchEntityType }>> {
+  const after = cursor ? { gt: cursor } : undefined;
+  if (stage === "post-source") {
+    const rows = await prisma.post.findMany({
+      where: { id: after },
+      orderBy: { id: "asc" },
+      take: limit,
+      select: { id: true }
+    });
+    return rows.map(({ id }) => ({ entityType: "post", entityId: id }));
+  }
+  if (stage === "creator-source") {
+    const rows = await prisma.creatorProfile.findMany({
+      where: { userId: after },
+      orderBy: { userId: "asc" },
+      take: limit,
+      select: { userId: true }
+    });
+    return rows.map(({ userId }) => ({ entityType: "creator", entityId: userId }));
+  }
+  if (stage === "channel-source") {
+    const rows = await prisma.channel.findMany({
+      where: { id: after },
+      orderBy: { id: "asc" },
+      take: limit,
+      select: { id: true }
+    });
+    return rows.map(({ id }) => ({ entityType: "channel", entityId: id }));
+  }
+  const entityType = stage.replace("-document", "") as SearchEntityType;
+  const rows = await prisma.searchDocument.findMany({
+    where: { entityType, entityId: after },
+    orderBy: { entityId: "asc" },
+    take: limit,
+    select: { entityId: true }
+  });
+  return rows.map(({ entityId }) => ({ entityType, entityId }));
+}
+
+export async function runSearchReindexBatch(input: {
+  stage: string | null;
+  cursor: string | null;
+  limit?: number;
+}): Promise<{
+  completed: boolean;
+  stage: SearchReindexStage;
+  cursor: string | null;
+  processed: number;
 }> {
-  const [posts, creators, channels] = await Promise.all([
-    prisma.post.findMany({
-      where: {
-        visibility: "free",
-        creator: {
-          status: "active",
-          role: "creator",
-          creatorStatus: "approved"
-        }
-      },
-      select: { id: true },
-      orderBy: { id: "asc" }
-    }),
-    prisma.user.findMany({
-      where: {
-        status: "active",
-        role: "creator",
-        creatorStatus: "approved",
-        creatorProfile: { isNot: null }
-      },
-      select: { id: true },
-      orderBy: { id: "asc" }
-    }),
-    prisma.channel.findMany({
-      where: {
-        status: "active",
-        OR: [
-          { visibility: "public" },
-          { visibility: "private", discoverability: "discoverable" }
-        ]
-      },
-      select: { id: true },
-      orderBy: { id: "asc" }
-    })
-  ]);
-  await synchronizeSearchType("post", posts.map(({ id }) => id));
-  await synchronizeSearchType("creator", creators.map(({ id }) => id));
-  await synchronizeSearchType("channel", channels.map(({ id }) => id));
-  return { posts: posts.length, creators: creators.length, channels: channels.length };
+  const stage = input.stage ?? "post-source";
+  const limit = input.limit ?? SEARCH_REINDEX_BATCH_SIZE;
+  if (!isSearchReindexStage(stage)) throw new TypeError("Search reindex stage is invalid.");
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new TypeError("Search reindex batch limit must be an integer between 1 and 100.");
+  }
+  if (stage === "done") {
+    return { completed: true, stage, cursor: null, processed: 0 };
+  }
+  const rows = await reindexStageEntityIds(stage, input.cursor, limit);
+  for (const row of rows) {
+    await synchronizeSearchEntity(row.entityType, row.entityId);
+  }
+  if (rows.length === limit) {
+    return {
+      completed: false,
+      stage,
+      cursor: rows.at(-1)!.entityId,
+      processed: rows.length
+    };
+  }
+  const nextStage = advanceSearchReindexStage(stage);
+  return {
+    completed: nextStage === "done",
+    stage: nextStage,
+    cursor: null,
+    processed: rows.length
+  };
 }
 
 export async function requestSearchReindex(admin: AdminContext): Promise<{
-  job: { id: string; status: string; idempotencyKey: string };
+  job: {
+    id: string;
+    status: string;
+    idempotencyKey: string;
+    entityType: string | null;
+    entityId: string | null;
+    attempts: number;
+  };
+  progress: { stage: string; cursor: string | null };
   enqueued: boolean;
 }> {
-  return prisma.$transaction(async (tx) => {
+  return retrySerializableOperation(() => prisma.$transaction(async (tx) => {
     await tx.$queryRaw`
       SELECT 1 AS "locked"
       FROM pg_advisory_xact_lock(hashtext('purehub:phase7:search-reindex'))
@@ -384,21 +432,42 @@ export async function requestSearchReindex(admin: AdminContext): Promise<{
     const existing = await tx.channelJob.findFirst({
       where: {
         kind: "reindex_all",
-        status: { in: ["pending", "processing"] },
+        status: { in: ["pending", "processing", "failed"] },
         attempts: { lt: 8 }
       },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-      select: { id: true, status: true, idempotencyKey: true }
+      select: {
+        id: true,
+        status: true,
+        idempotencyKey: true,
+        entityType: true,
+        entityId: true,
+        attempts: true
+      }
     });
-    if (existing) return { job: existing, enqueued: false };
+    if (existing) {
+      return {
+        job: existing,
+        progress: { stage: existing.entityType ?? "post-source", cursor: existing.entityId },
+        enqueued: false
+      };
+    }
 
     const requestedAt = new Date();
     const job = await tx.channelJob.create({
       data: {
         idempotencyKey: `reindex-all:${requestedAt.toISOString()}`,
-        kind: "reindex_all"
+        kind: "reindex_all",
+        entityType: "post-source"
       },
-      select: { id: true, status: true, idempotencyKey: true }
+      select: {
+        id: true,
+        status: true,
+        idempotencyKey: true,
+        entityType: true,
+        entityId: true,
+        attempts: true
+      }
     });
     await tx.auditLog.create({
       data: {
@@ -410,8 +479,12 @@ export async function requestSearchReindex(admin: AdminContext): Promise<{
         metadata: { idempotencyKey: job.idempotencyKey }
       }
     });
-    return { job, enqueued: true };
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    return {
+      job,
+      progress: { stage: job.entityType ?? "post-source", cursor: job.entityId },
+      enqueued: true
+    };
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
 }
 
 export async function searchEntities(

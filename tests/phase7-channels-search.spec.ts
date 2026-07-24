@@ -56,10 +56,20 @@ import {
   reindexAllJobKey
 } from "../lib/channels/jobs";
 import { prisma } from "../lib/prisma";
+import { reviewApplicationFromAdmin } from "../lib/admin-repository";
+import { createPost } from "../lib/db-repository";
+import { setFollow, setLike } from "../lib/social-repository";
 import {
+  enqueueSearchEntitySync,
+  indexSearchEntityJobKey,
+  searchEntityEligibilityJobKind
+} from "../lib/search/jobs";
+import {
+  advanceSearchReindexStage,
   encodeSearchCursor,
   normalizeSearchInput,
-  parseSearchCursor
+  parseSearchCursor,
+  synchronizeSearchEntity
 } from "../lib/search/repository";
 import {
   authHeaders,
@@ -2302,12 +2312,38 @@ test("phase 7 search validation binds stable cursors to normalized query and typ
   }
 });
 
+test("phase 7 search producer keys and bounded reindex stages are deterministic", () => {
+  const version = new Date("2026-07-24T12:34:56.000Z");
+  expect(indexSearchEntityJobKey("post", "post-1", version, "index_entity"))
+    .toBe("index:post:post-1:2026-07-24T12:34:56.000Z");
+  expect(indexSearchEntityJobKey("creator", "c1", version, "delete_index"))
+    .toBe("delete-index:creator:c1:2026-07-24T12:34:56.000Z");
+  expect(searchEntityEligibilityJobKind(true)).toBe("index_entity");
+  expect(searchEntityEligibilityJobKind(false)).toBe("delete_index");
+
+  expect(advanceSearchReindexStage("post-source")).toBe("creator-source");
+  expect(advanceSearchReindexStage("creator-source")).toBe("channel-source");
+  expect(advanceSearchReindexStage("channel-source")).toBe("post-document");
+  expect(advanceSearchReindexStage("post-document")).toBe("creator-document");
+  expect(advanceSearchReindexStage("creator-document")).toBe("channel-document");
+  expect(advanceSearchReindexStage("channel-document")).toBe("done");
+  expect(() => advanceSearchReindexStage("all-at-once")).toThrow(TypeError);
+});
+
 test("phase 7 search API rejects malformed input and forged identity without database access", async ({ request }) => {
   for (const path of [
+    "/api/search?q=",
+    "/api/search?q=yuki&q=studio",
     "/api/search?q=x",
     `/api/search?q=${"x".repeat(101)}`,
+    "/api/search?q=yuki&type=",
+    "/api/search?q=yuki&type=creator&type=channel",
     "/api/search?q=yuki&type=member",
+    "/api/search?q=yuki&cursor=",
+    "/api/search?q=yuki&cursor=a&cursor=b",
     "/api/search?q=yuki&cursor=not-base64-json",
+    "/api/search?q=yuki&limit=",
+    "/api/search?q=yuki&limit=1&limit=2",
     "/api/search?q=yuki&userId=c1"
   ]) {
     const response = await request.get(path);
@@ -2319,6 +2355,7 @@ test("phase 7 PostgreSQL search ranks safe entities, paginates, reindexes, and e
   test.setTimeout(120_000);
   const anonymous = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
   const admin = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const concurrentAdmin = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
   const support = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
   const worker = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
   const nonce = `${Date.now().toString(36)}${Math.floor(Math.random() * 1_000_000).toString(36)}`;
@@ -2333,6 +2370,7 @@ test("phase 7 PostgreSQL search ranks safe entities, paginates, reindexes, and e
     await requirePhase7(anonymous, testInfo);
     databaseReady = true;
     await signInAdmin(admin);
+    await signInAdmin(concurrentAdmin);
     await signInSupport(support);
 
     const unauthenticated = await anonymous.post("/api/admin/search/reindex", {
@@ -2353,22 +2391,33 @@ test("phase 7 PostgreSQL search ranks safe entities, paginates, reindexes, and e
       data: {}
     });
     expect(forbidden.status(), await forbidden.text()).toBe(403);
+    const foreignOrigin = await admin.post("/api/admin/search/reindex", {
+      headers: { origin: "https://attacker.invalid" },
+      data: {}
+    });
+    expect(foreignOrigin.status(), await foreignOrigin.text()).toBe(403);
 
-    const firstReindex = await admin.post("/api/admin/search/reindex", {
-      headers: { origin: testInfo.project.use.baseURL! },
-      data: {}
-    });
-    expect(firstReindex.status(), await firstReindex.text()).toBe(202);
-    const firstReindexBody = await firstReindex.json();
+    const [firstReindex, secondReindex] = await Promise.all([
+      admin.post("/api/admin/search/reindex", {
+        headers: { origin: testInfo.project.use.baseURL! },
+        data: {}
+      }),
+      concurrentAdmin.post("/api/admin/search/reindex", {
+        headers: { origin: testInfo.project.use.baseURL! },
+        data: {}
+      })
+    ]);
+    expect([firstReindex.status(), secondReindex.status()].sort()).toEqual([200, 202]);
+    const [firstCandidate, secondCandidate] = await Promise.all([
+      firstReindex.json(),
+      secondReindex.json()
+    ]);
+    const firstReindexBody = firstCandidate.enqueued ? firstCandidate : secondCandidate;
+    const secondReindexBody = firstCandidate.enqueued ? secondCandidate : firstCandidate;
     reindexJobs.push(firstReindexBody.job.id);
-    const secondReindex = await admin.post("/api/admin/search/reindex", {
-      headers: { origin: testInfo.project.use.baseURL! },
-      data: {}
-    });
-    expect(secondReindex.status(), await secondReindex.text()).toBe(200);
-    const secondReindexBody = await secondReindex.json();
     expect(secondReindexBody.job.id).toBe(firstReindexBody.job.id);
     expect(secondReindexBody.enqueued).toBeFalsy();
+    expect(firstReindexBody.progress).toEqual({ stage: "post-source", cursor: null });
 
     const reindexAudit = await prisma.auditLog.findFirst({
       where: {
@@ -2391,7 +2440,21 @@ test("phase 7 PostgreSQL search ranks safe entities, paginates, reindexes, and e
       expect(response.ok(), await response.text()).toBeTruthy();
       return response.json();
     };
-    expect(await runWorker()).toMatchObject({ failed: 0 });
+    let reindexState = await prisma.channelJob.findUniqueOrThrow({
+      where: { id: firstReindexBody.job.id },
+      select: { status: true, attempts: true, entityType: true, entityId: true }
+    });
+    const progressStates = new Set<string>();
+    for (let run = 0; run < 30 && reindexState.status !== "completed"; run += 1) {
+      expect(await runWorker()).toMatchObject({ failed: 0 });
+      reindexState = await prisma.channelJob.findUniqueOrThrow({
+        where: { id: firstReindexBody.job.id },
+        select: { status: true, attempts: true, entityType: true, entityId: true }
+      });
+      progressStates.add(`${reindexState.entityType}:${reindexState.entityId ?? ""}`);
+      if (reindexState.status === "pending") expect(reindexState.attempts).toBe(0);
+    }
+    expect(progressStates.size).toBeGreaterThan(2);
     expect(await prisma.channelJob.findUniqueOrThrow({
       where: { id: firstReindexBody.job.id },
       select: { status: true, attempts: true }
@@ -2602,7 +2665,304 @@ test("phase 7 PostgreSQL search ranks safe entities, paginates, reindexes, and e
     }
     await anonymous.dispose();
     await admin.dispose();
+    await concurrentAdmin.dispose();
     await support.dispose();
+    await worker.dispose();
+  }
+});
+
+test("phase 7 search producers, leases, retries, and interleavings converge durably", async ({}, testInfo) => {
+  test.setTimeout(120_000);
+  const probe = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const worker = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const nonce = `${Date.now().toString(36)}${Math.floor(Math.random() * 1_000_000).toString(36)}`;
+  const fanId = `phase7-search-fan-${nonce}`;
+  const creatorId = `phase7-search-creator-${nonce}`;
+  const applicationId = `phase7-search-application-${nonce}`;
+  const channelId = `phase7-search-interleave-${nonce}`;
+  const recentLeaseKey = `index:channel:${channelId}:recent-${nonce}`;
+  const retryKey = `index:post:missing-${nonce}:2026-07-24T00:00:00.000Z`;
+  const reindexKey = `reindex-all:interleave-${nonce}`;
+  const createdPostIds: string[] = [];
+  const testStartedAt = new Date();
+  let databaseReady = false;
+  try {
+    await requirePhase7(probe, testInfo);
+    databaseReady = true;
+    await prisma.user.create({
+      data: {
+        id: fanId,
+        name: "Phase 7 Search Fan",
+        handle: fanId,
+        email: `${fanId}@purehub.local`,
+        avatar: "S",
+        role: "fan",
+        creatorStatus: "none"
+      }
+    });
+    const freePost = await createPost({
+      creatorId: "c1",
+      title: `PHASE7 SEARCH PUBLIC ${nonce}`,
+      excerpt: "A public search producer acceptance excerpt.",
+      content: "A sufficiently long public search producer acceptance body.",
+      category: "Cosplay",
+      visibility: "free",
+      contentType: "photo_short",
+      saleMode: "subscription_only"
+    });
+    createdPostIds.push(freePost.id);
+    const memberPost = await createPost({
+      creatorId: "c1",
+      title: `PHASE7 SEARCH PRIVATE ${nonce}`,
+      excerpt: "A private search producer acceptance excerpt.",
+      content: "A sufficiently long private search producer acceptance body.",
+      category: "Cosplay",
+      visibility: "members",
+      contentType: "photo_short",
+      saleMode: "subscription_only"
+    });
+    createdPostIds.push(memberPost.id);
+    expect(await prisma.channelJob.count({
+      where: { entityType: "post", entityId: freePost.id, kind: "index_entity" }
+    })).toBe(1);
+    expect(await prisma.channelJob.count({
+      where: { entityType: "post", entityId: memberPost.id, kind: "delete_index" }
+    })).toBe(1);
+
+    const workerToken = process.env.WORKER_ACCESS_TOKEN;
+    expect(workerToken, "WORKER_ACCESS_TOKEN is required for producer acceptance.").toBeTruthy();
+    const runWorker = async (limit = 25) => {
+      const response = await worker.post(`/api/internal/phase7/run?limit=${limit}`, {
+        headers: { "x-worker-token": workerToken! }
+      });
+      expect(response.ok(), await response.text()).toBeTruthy();
+      return response.json();
+    };
+    expect(await runWorker()).toMatchObject({ failed: 0 });
+    expect(await prisma.searchDocument.count({
+      where: { entityType: "post", entityId: freePost.id }
+    })).toBe(1);
+    expect(await prisma.searchDocument.count({
+      where: { entityType: "post", entityId: memberPost.id }
+    })).toBe(0);
+
+    await setLike(fanId, freePost.id, true);
+    expect(await prisma.channelJob.count({
+      where: { entityType: "post", entityId: freePost.id, status: "pending" }
+    })).toBeGreaterThan(0);
+    await runWorker();
+    const [postState, postDocument] = await Promise.all([
+      prisma.post.findUniqueOrThrow({ where: { id: freePost.id }, select: { likes: true } }),
+      prisma.searchDocument.findUniqueOrThrow({
+        where: { entityType_entityId: { entityType: "post", entityId: freePost.id } },
+        select: { popularityScore: true }
+      })
+    ]);
+    expect(postDocument.popularityScore).toBe(postState.likes);
+
+    await setFollow(fanId, "yuki", true);
+    expect(await prisma.channelJob.count({
+      where: { entityType: "creator", entityId: "c1", status: "pending" }
+    })).toBeGreaterThan(0);
+    await runWorker();
+    const [profileState, creatorDocument] = await Promise.all([
+      prisma.creatorProfile.findUniqueOrThrow({ where: { userId: "c1" }, select: { followers: true } }),
+      prisma.searchDocument.findUniqueOrThrow({
+        where: { entityType_entityId: { entityType: "creator", entityId: "c1" } },
+        select: { popularityScore: true }
+      })
+    ]);
+    expect(creatorDocument.popularityScore).toBe(profileState.followers);
+
+    await prisma.user.create({
+      data: {
+        id: creatorId,
+        name: `PHASE7 CREATOR ${nonce}`,
+        handle: creatorId,
+        email: `${creatorId}@purehub.local`,
+        avatar: "C",
+        role: "fan",
+        creatorStatus: "pending"
+      }
+    });
+    await prisma.creatorApplication.create({
+      data: {
+        id: applicationId,
+        userId: creatorId,
+        status: "pending",
+        displayName: `PHASE7 CREATOR ${nonce}`,
+        category: "Cosplay",
+        portfolio: "https://example.invalid/phase7-search",
+        contact: "phase7-search",
+        note: "Safe searchable creator biography."
+      }
+    });
+    const adminContext = { actorUserId: "admin-demo", role: "super_admin" as const };
+    await reviewApplicationFromAdmin(adminContext, applicationId, "approved");
+    expect(await prisma.channelJob.count({
+      where: { entityType: "creator", entityId: creatorId, kind: "index_entity" }
+    })).toBe(1);
+    await runWorker();
+    expect(await prisma.searchDocument.findUniqueOrThrow({
+      where: { entityType_entityId: { entityType: "creator", entityId: creatorId } },
+      select: { title: true, body: true }
+    })).toEqual({
+      title: `PHASE7 CREATOR ${nonce}`,
+      body: "Safe searchable creator biography."
+    });
+    await reviewApplicationFromAdmin(adminContext, applicationId, "rejected");
+    expect(await prisma.channelJob.count({
+      where: { entityType: "creator", entityId: creatorId, kind: "delete_index" }
+    })).toBe(1);
+    await runWorker();
+    expect(await prisma.searchDocument.count({
+      where: { entityType: "creator", entityId: creatorId }
+    })).toBe(0);
+
+    await prisma.channel.create({
+      data: {
+        id: channelId,
+        slug: channelId,
+        name: `PHASE7 INTERLEAVE ${nonce}`,
+        description: "Reindex document convergence acceptance.",
+        kind: "creator",
+        visibility: "private",
+        discoverability: "hidden",
+        status: "active",
+        ownerUserId: "c1",
+        createdByUserId: "c1"
+      }
+    });
+    await prisma.searchDocument.create({
+      data: {
+        entityType: "channel",
+        entityId: channelId,
+        title: `STALE PHASE7 INTERLEAVE ${nonce}`,
+        body: "Stale document content.",
+        keywords: "stale hidden",
+        publishedAt: new Date()
+      }
+    });
+    await prisma.channelJob.create({
+      data: {
+        idempotencyKey: reindexKey,
+        kind: "reindex_all",
+        entityType: "channel-document"
+      }
+    });
+    await prisma.$transaction(async (tx) => {
+      const updated = await tx.channel.update({
+        where: { id: channelId },
+        data: { visibility: "public", discoverability: "discoverable" }
+      });
+      await enqueueSearchEntitySync(tx, {
+        entityType: "channel",
+        entityId: channelId,
+        sourceUpdatedAt: updated.updatedAt,
+        eligible: true
+      });
+    });
+    expect(await runWorker(1)).toMatchObject({ failed: 0 });
+    expect(await prisma.searchDocument.findUniqueOrThrow({
+      where: { entityType_entityId: { entityType: "channel", entityId: channelId } },
+      select: { title: true, body: true }
+    })).toEqual({
+      title: `PHASE7 INTERLEAVE ${nonce}`,
+      body: "Reindex document convergence acceptance."
+    });
+
+    const expiredLease = await prisma.channelJob.create({
+      data: {
+        idempotencyKey: `index:channel:${channelId}:expired-${nonce}`,
+        kind: "index_entity",
+        entityType: "channel",
+        entityId: channelId,
+        status: "processing",
+        attempts: 1,
+        lockedAt: new Date(0)
+      }
+    });
+    const recentLease = await prisma.channelJob.create({
+      data: {
+        idempotencyKey: recentLeaseKey,
+        kind: "index_entity",
+        entityType: "channel",
+        entityId: channelId,
+        status: "processing",
+        attempts: 1,
+        lockedAt: new Date()
+      }
+    });
+    await runWorker();
+    expect(await prisma.channelJob.findUniqueOrThrow({
+      where: { id: expiredLease.id },
+      select: { status: true, attempts: true, lockedAt: true }
+    })).toMatchObject({ status: "completed", attempts: 2, lockedAt: null });
+    expect(await prisma.channelJob.findUniqueOrThrow({
+      where: { id: recentLease.id },
+      select: { status: true, attempts: true }
+    })).toEqual({ status: "processing", attempts: 1 });
+
+    const retry = await prisma.channelJob.create({
+      data: {
+        idempotencyKey: retryKey,
+        kind: "index_entity",
+        entityType: "post"
+      }
+    });
+    await runWorker();
+    expect(await prisma.channelJob.findUniqueOrThrow({
+      where: { id: retry.id },
+      select: { status: true, attempts: true, lastError: true }
+    })).toMatchObject({
+      status: "failed",
+      attempts: 1,
+      lastError: "Phase 7 job execution failed and is scheduled for retry."
+    });
+  } finally {
+    if (databaseReady) {
+      await setFollow(fanId, "yuki", false).catch(() => undefined);
+      await setLike(fanId, createdPostIds[0] ?? "missing", false).catch(() => undefined);
+      await synchronizeSearchEntity("creator", "c1").catch(() => undefined);
+      await prisma.auditLog.deleteMany({
+        where: {
+          OR: [
+            { targetId: applicationId },
+            { targetId: creatorId },
+            { targetId: channelId }
+          ]
+        }
+      });
+      await prisma.channelJob.deleteMany({
+        where: {
+          OR: [
+            { entityId: { in: [fanId, creatorId, channelId, ...createdPostIds] } },
+            { idempotencyKey: { in: [recentLeaseKey, retryKey, reindexKey] } },
+            { entityType: "creator", entityId: "c1", createdAt: { gte: testStartedAt } }
+          ]
+        }
+      });
+      await prisma.searchDocument.deleteMany({
+        where: {
+          OR: [
+            { entityType: "creator", entityId: creatorId },
+            { entityType: "channel", entityId: channelId },
+            { entityType: "post", entityId: { in: createdPostIds } }
+          ]
+        }
+      });
+      await prisma.notification.deleteMany({
+        where: { actorUserId: fanId }
+      });
+      await prisma.postLike.deleteMany({ where: { userId: fanId } });
+      await prisma.follow.deleteMany({ where: { userId: fanId } });
+      await prisma.post.deleteMany({ where: { id: { in: createdPostIds } } });
+      await prisma.creatorApplication.deleteMany({ where: { id: applicationId } });
+      await prisma.creatorProfile.deleteMany({ where: { userId: creatorId } });
+      await prisma.channel.deleteMany({ where: { id: channelId } });
+      await prisma.user.deleteMany({ where: { id: { in: [fanId, creatorId] } } });
+    }
+    await probe.dispose();
     await worker.dispose();
   }
 });

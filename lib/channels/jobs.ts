@@ -1,12 +1,14 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import {
-  reindexAllSearchDocuments,
+  runSearchReindexBatch,
   synchronizeSearchEntity
 } from "@/lib/search/repository";
+import { indexSearchEntityJobKey } from "@/lib/search/jobs";
 
 const MAX_JOB_ATTEMPTS = 8;
 const MAX_JOB_BATCH = 100;
+export const PHASE7_JOB_LEASE_MS = 5 * 60 * 1000;
 
 export function materializeChannelJobKey(channelId: string, channelUpdatedAt: Date): string {
   if (!channelId) throw new TypeError("Channel ID is required.");
@@ -17,19 +19,21 @@ export function materializeChannelJobKey(channelId: string, channelUpdatedAt: Da
 }
 
 export function indexEntityJobKey(entityType: string, entityId: string, sourceUpdatedAt: Date): string {
-  if (!entityType || !entityId) throw new TypeError("Search entity type and ID are required.");
-  if (!(sourceUpdatedAt instanceof Date) || !Number.isFinite(sourceUpdatedAt.getTime())) {
-    throw new TypeError("Search source updatedAt must be a valid date.");
-  }
-  return `index:${entityType}:${entityId}:${sourceUpdatedAt.toISOString()}`;
+  return indexSearchEntityJobKey(
+    entityType as "post" | "creator" | "channel",
+    entityId,
+    sourceUpdatedAt,
+    "index_entity"
+  );
 }
 
 export function deleteIndexJobKey(entityType: string, entityId: string, sourceUpdatedAt: Date): string {
-  if (!entityType || !entityId) throw new TypeError("Search entity type and ID are required.");
-  if (!(sourceUpdatedAt instanceof Date) || !Number.isFinite(sourceUpdatedAt.getTime())) {
-    throw new TypeError("Search source updatedAt must be a valid date.");
-  }
-  return `delete-index:${entityType}:${entityId}:${sourceUpdatedAt.toISOString()}`;
+  return indexSearchEntityJobKey(
+    entityType as "post" | "creator" | "channel",
+    entityId,
+    sourceUpdatedAt,
+    "delete_index"
+  );
 }
 
 export function reindexAllJobKey(requestedAt: Date): string {
@@ -167,12 +171,25 @@ async function claimPhase7Jobs(limit: number) {
     try {
       return await prisma.$transaction(async (tx) => {
         const now = new Date();
+        const leaseExpiredAt = new Date(now.getTime() - PHASE7_JOB_LEASE_MS);
+        const claimable = {
+          OR: [
+            {
+              status: { in: ["pending", "failed"] },
+              availableAt: { lte: now }
+            },
+            {
+              status: "processing",
+              OR: [
+                { lockedAt: null },
+                { lockedAt: { lte: leaseExpiredAt } }
+              ]
+            }
+          ],
+          attempts: { lt: MAX_JOB_ATTEMPTS }
+        } satisfies Prisma.ChannelJobWhereInput;
         const candidates = await tx.channelJob.findMany({
-          where: {
-            status: { in: ["pending", "failed"] },
-            attempts: { lt: MAX_JOB_ATTEMPTS },
-            availableAt: { lte: now }
-          },
+          where: claimable,
           orderBy: [{ availableAt: "asc" }, { createdAt: "asc" }, { id: "asc" }],
           take: limit,
           select: { id: true }
@@ -182,9 +199,7 @@ async function claimPhase7Jobs(limit: number) {
           const result = await tx.channelJob.updateMany({
             where: {
               id: candidate.id,
-              status: { in: ["pending", "failed"] },
-              attempts: { lt: MAX_JOB_ATTEMPTS },
-              availableAt: { lte: now }
+              ...claimable
             },
             data: {
               status: "processing",
@@ -211,15 +226,23 @@ async function claimPhase7Jobs(limit: number) {
 }
 
 async function executePhase7Job(job: {
+  id: string;
   kind: string;
   channelId: string | null;
   entityType: string | null;
   entityId: string | null;
-}) {
+}): Promise<
+  | { completed: true }
+  | {
+      completed: false;
+      stage: string;
+      cursor: string | null;
+    }
+> {
   if (job.kind === "materialize_channel") {
     if (!job.channelId) throw new Error("Materialization job is missing its channel.");
     await materializeChannel(job.channelId);
-    return;
+    return { completed: true };
   }
   if (job.kind === "index_entity" || job.kind === "delete_index") {
     if (
@@ -233,11 +256,20 @@ async function executePhase7Job(job: {
       job.entityType as "post" | "creator" | "channel",
       job.entityId
     );
-    return;
+    return { completed: true };
   }
   if (job.kind === "reindex_all") {
-    await reindexAllSearchDocuments();
-    return;
+    const batch = await runSearchReindexBatch({
+      stage: job.entityType,
+      cursor: job.entityId
+    });
+    return batch.completed
+      ? { completed: true }
+      : {
+          completed: false,
+          stage: batch.stage,
+          cursor: batch.cursor
+        };
   }
   throw new Error("Unsupported Phase 7 job kind.");
 }
@@ -255,17 +287,33 @@ export async function runPhase7Jobs(limit = 25): Promise<{
   let failed = 0;
   for (const job of jobs) {
     try {
-      await executePhase7Job(job);
-      await prisma.channelJob.update({
-        where: { id: job.id },
-        data: {
-          status: "completed",
-          completedAt: new Date(),
-          lockedAt: null,
-          lastError: null
-        }
-      });
-      completed += 1;
+      const execution = await executePhase7Job(job);
+      if (execution.completed) {
+        await prisma.channelJob.update({
+          where: { id: job.id },
+          data: {
+            status: "completed",
+            completedAt: new Date(),
+            lockedAt: null,
+            lastError: null
+          }
+        });
+        completed += 1;
+      } else {
+        await prisma.channelJob.update({
+          where: { id: job.id },
+          data: {
+            status: "pending",
+            attempts: 0,
+            availableAt: new Date(),
+            lockedAt: null,
+            completedAt: null,
+            lastError: null,
+            entityType: execution.stage,
+            entityId: execution.cursor
+          }
+        });
+      }
     } catch {
       const terminal = job.attempts >= MAX_JOB_ATTEMPTS;
       const backoffSeconds = phase7JobBackoffSeconds(job.attempts);

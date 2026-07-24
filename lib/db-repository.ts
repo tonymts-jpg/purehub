@@ -1,6 +1,7 @@
 ﻿import { Prisma } from "@prisma/client";
 import { creators, posts, transactions } from "./data";
 import { prisma } from "./prisma";
+import { enqueueSearchEntitySync } from "./search/jobs";
 import type { ContentCategory } from "./categories";
 import type { Comment, CreatorProfile, MediaAsset, Post, Transaction } from "./types";
 import type { ContentType, SaleMode } from "./platform-config";
@@ -289,7 +290,7 @@ export async function createPost(input: {
       const assets = await tx.mediaAsset.findMany({ where: { id: { in: input.mediaAssetIds }, uploaderUserId: input.creatorId ?? "c1", status: "ready", postId: null } });
       if (assets.length !== input.mediaAssetIds.length) throw new Error("All media assets must be ready and owned by the creator.");
     }
-    await tx.post.create({
+    const created = await tx.post.create({
       data: {
       id: postId,
       creatorId: input.creatorId ?? "c1",
@@ -307,6 +308,12 @@ export async function createPost(input: {
       comments: [],
       createdLabel: "刚刚"
       }
+    });
+    await enqueueSearchEntitySync(tx, {
+      entityType: "post",
+      entityId: created.id,
+      sourceUpdatedAt: created.updatedAt,
+      eligible: created.visibility === "free"
     });
     if (input.mediaAssetIds?.length) {
       await Promise.all(input.mediaAssetIds.map((id, order) => tx.mediaAsset.update({ where: { id }, data: { postId, order, visibility: input.visibility } })));
@@ -330,50 +337,62 @@ export async function createCreatorApplication(input: {
 
   const userId = input.userId ?? "fan-demo";
   const fanHandle = userId === "fan-demo" ? "pure-fan" : `fan-${userId.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 40)}`;
-  await prisma.user.upsert({
-    where: { id: userId },
-    update: { creatorStatus: "pending" },
-    create: {
-      id: userId,
-      name: "Pure 粉丝",
-      handle: fanHandle,
-      email: `${fanHandle}@staging.purehub.local`,
-      avatar: "P",
-      role: "fan",
-      creatorStatus: "pending"
-    }
-  });
-
-  return prisma.creatorApplication.create({
-    data: {
-      id: `application-${Date.now()}`,
-      userId,
-      displayName: input.displayName,
-      category: input.category,
-      portfolio: input.portfolio,
-      contact: input.contact,
-      note: input.note,
-      status: "pending"
-    }
+  return prisma.$transaction(async (tx) => {
+    const user = await tx.user.upsert({
+      where: { id: userId },
+      update: { creatorStatus: "pending" },
+      create: {
+        id: userId,
+        name: "Pure 粉丝",
+        handle: fanHandle,
+        email: `${fanHandle}@staging.purehub.local`,
+        avatar: "P",
+        role: "fan",
+        creatorStatus: "pending"
+      }
+    });
+    await enqueueSearchEntitySync(tx, {
+      entityType: "creator",
+      entityId: user.id,
+      sourceUpdatedAt: user.updatedAt,
+      eligible: false
+    });
+    return tx.creatorApplication.create({
+      data: {
+        id: `application-${Date.now()}`,
+        userId,
+        displayName: input.displayName,
+        category: input.category,
+        portfolio: input.portfolio,
+        contact: input.contact,
+        note: input.note,
+        status: "pending"
+      }
+    });
   });
 }
 
 export async function reviewCreatorApplication(id: string, status: "approved" | "rejected") {
   if (!canUseDatabase()) return { id, status };
 
-  const application = await prisma.creatorApplication.update({
-    where: { id },
-    data: { status, reviewedAt: new Date() }
+  return prisma.$transaction(async (tx) => {
+    const application = await tx.creatorApplication.update({
+      where: { id },
+      data: { status, reviewedAt: new Date() }
+    });
+    const user = await tx.user.update({
+      where: { id: application.userId },
+      data: {
+        role: status === "approved" ? "creator" : "fan",
+        creatorStatus: status
+      }
+    });
+    await enqueueSearchEntitySync(tx, {
+      entityType: "creator",
+      entityId: user.id,
+      sourceUpdatedAt: user.updatedAt,
+      eligible: status === "approved"
+    });
+    return application;
   });
-
-  await prisma.user.update({
-    where: { id: application.userId },
-    data: {
-      role: status === "approved" ? "creator" : "fan",
-      creatorStatus: status
-    }
-  });
-
-  return application;
 }
-

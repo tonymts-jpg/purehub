@@ -16,14 +16,19 @@ export async function GET(request: Request) {
     if (unsupported) {
       throw new TypeError(`This request does not accept the ${unsupported} query parameter.`);
     }
+    const duplicate = Array.from(SEARCH_QUERY_FIELDS)
+      .find((field) => searchParams.getAll(field).length > 1);
+    if (duplicate) {
+      throw new TypeError(`This request accepts the ${duplicate} query parameter only once.`);
+    }
     const query = searchParams.get("q");
     const type = searchParams.get("type");
     const cursor = searchParams.get("cursor");
     const limit = searchParams.get("limit");
     const input: SearchInput = {
       query: query ?? "",
-      ...(type ? { type: type as SearchInput["type"] } : {}),
-      ...(cursor ? { cursor } : {}),
+      ...(type !== null ? { type: type as SearchInput["type"] } : {}),
+      ...(cursor !== null ? { cursor } : {}),
       ...(limit !== null ? { limit: Number(limit) } : {})
     };
     const viewer = await getSessionUser(request);

@@ -1,14 +1,21 @@
 import { prisma } from "@/lib/prisma";
+import { enqueueSearchEntitySync } from "@/lib/search/jobs";
 
 export async function setFollow(userId: string, handle: string, following: boolean) {
+  const sourceUpdatedAt = new Date();
   return prisma.$transaction(async (tx) => {
-    const creator = await tx.user.findUnique({ where: { handle }, select: { id: true, role: true } });
+    const creator = await tx.user.findUnique({
+      where: { handle },
+      select: { id: true, role: true, status: true, creatorStatus: true }
+    });
     if (!creator || creator.role !== "creator") throw new Error("Creator not found.");
     if (creator.id === userId) throw new Error("You cannot follow yourself.");
     const existing = await tx.follow.findUnique({ where: { userId_creatorId: { userId, creatorId: creator.id } } });
+    let changed = false;
     if (following && !existing) {
       await tx.follow.create({ data: { userId, creatorId: creator.id } });
       await tx.creatorProfile.updateMany({ where: { userId: creator.id }, data: { followers: { increment: 1 } } });
+      changed = true;
       await tx.notification.upsert({
         where: { eventKey: `follow:${userId}:${creator.id}` },
         update: { createdAt: new Date(), readAt: null },
@@ -18,6 +25,15 @@ export async function setFollow(userId: string, handle: string, following: boole
     if (!following && existing) {
       await tx.follow.delete({ where: { id: existing.id } });
       await tx.creatorProfile.updateMany({ where: { userId: creator.id, followers: { gt: 0 } }, data: { followers: { decrement: 1 } } });
+      changed = true;
+    }
+    if (changed) {
+      await enqueueSearchEntitySync(tx, {
+        entityType: "creator",
+        entityId: creator.id,
+        sourceUpdatedAt,
+        eligible: creator.status === "active" && creator.creatorStatus === "approved"
+      });
     }
     const profile = await tx.creatorProfile.findUnique({ where: { userId: creator.id }, select: { followers: true } });
     return { following, followerCount: profile?.followers ?? 0 };
@@ -26,12 +42,20 @@ export async function setFollow(userId: string, handle: string, following: boole
 
 export async function setLike(userId: string, postId: string, liked: boolean) {
   return prisma.$transaction(async (tx) => {
-    const post = await tx.post.findUnique({ where: { id: postId }, select: { id: true, creatorId: true } });
+    const post = await tx.post.findUnique({
+      where: { id: postId },
+      select: { id: true, creatorId: true, visibility: true }
+    });
     if (!post) throw new Error("Post not found.");
     const existing = await tx.postLike.findUnique({ where: { userId_postId: { userId, postId } } });
+    let sourceUpdatedAt: Date | null = null;
     if (liked && !existing) {
       await tx.postLike.create({ data: { userId, postId } });
-      await tx.post.update({ where: { id: postId }, data: { likes: { increment: 1 } } });
+      sourceUpdatedAt = (await tx.post.update({
+        where: { id: postId },
+        data: { likes: { increment: 1 } },
+        select: { updatedAt: true }
+      })).updatedAt;
       if (post.creatorId !== userId) {
         await tx.notification.upsert({
           where: { eventKey: `like:${userId}:${postId}` },
@@ -42,7 +66,19 @@ export async function setLike(userId: string, postId: string, liked: boolean) {
     }
     if (!liked && existing) {
       await tx.postLike.delete({ where: { id: existing.id } });
-      await tx.post.update({ where: { id: postId }, data: { likes: { decrement: 1 } } });
+      sourceUpdatedAt = (await tx.post.update({
+        where: { id: postId },
+        data: { likes: { decrement: 1 } },
+        select: { updatedAt: true }
+      })).updatedAt;
+    }
+    if (sourceUpdatedAt) {
+      await enqueueSearchEntitySync(tx, {
+        entityType: "post",
+        entityId: post.id,
+        sourceUpdatedAt,
+        eligible: post.visibility === "free"
+      });
     }
     const postState = await tx.post.findUniqueOrThrow({ where: { id: postId }, select: { likes: true } });
     return { liked, likeCount: postState.likes };

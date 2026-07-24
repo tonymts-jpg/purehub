@@ -3,6 +3,7 @@ import { prisma } from "./prisma";
 import { creators, posts, transactions } from "./data";
 import type { AdminContext } from "./admin-auth";
 import type { ContentType, PaymentProvider, SaleMode } from "./platform-config";
+import { enqueueSearchEntitySync } from "./search/jobs";
 
 const json = (value: unknown) => value as Prisma.InputJsonValue;
 const canUseDatabase = () => Boolean(process.env.DATABASE_URL);
@@ -139,15 +140,34 @@ export async function updateAdminUser(admin: AdminContext, id: string, input: { 
     return { id, ...input };
   }
 
-  const user = await prisma.user.update({
-    where: { id },
-    data: {
-      role: input.role,
-      creatorStatus: input.creatorStatus
-    }
+  return prisma.$transaction(async (tx) => {
+    const user = await tx.user.update({
+      where: { id },
+      data: {
+        role: input.role,
+        creatorStatus: input.creatorStatus
+      }
+    });
+    await enqueueSearchEntitySync(tx, {
+      entityType: "creator",
+      entityId: user.id,
+      sourceUpdatedAt: user.updatedAt,
+      eligible: user.status === "active"
+        && user.role === "creator"
+        && user.creatorStatus === "approved"
+    });
+    await tx.auditLog.create({
+      data: {
+        actorUserId: admin.actorUserId,
+        actorRole: admin.role,
+        action: "admin.user.update",
+        targetType: "user",
+        targetId: id,
+        metadata: json(input)
+      }
+    });
+    return user;
   });
-  await writeAuditLog(admin, "admin.user.update", "user", id, input);
-  return user;
 }
 
 export async function listCreatorApplications() {
@@ -165,36 +185,53 @@ export async function reviewApplicationFromAdmin(admin: AdminContext, id: string
     return { id, status };
   }
 
-  const application = await prisma.creatorApplication.update({
-    where: { id },
-    data: { status, reviewedAt: new Date() }
-  });
-
-  await prisma.user.update({
-    where: { id: application.userId },
-    data: { role: status === "approved" ? "creator" : "fan", creatorStatus: status }
-  });
-
-  if (status === "approved") {
-    await prisma.creatorProfile.upsert({
-      where: { userId: application.userId },
-      update: { category: application.category },
-      create: {
-        id: `${application.userId}-profile`,
-        userId: application.userId,
-        bio: application.note ?? "Creator profile approved by admin.",
-        category: application.category,
-        followers: 0,
-        members: 0,
-        cover: "cover-1",
-        verified: false,
-        levelId: "level-1"
+  return prisma.$transaction(async (tx) => {
+    const application = await tx.creatorApplication.update({
+      where: { id },
+      data: { status, reviewedAt: new Date() }
+    });
+    const user = await tx.user.update({
+      where: { id: application.userId },
+      data: { role: status === "approved" ? "creator" : "fan", creatorStatus: status }
+    });
+    if (status === "approved") {
+      await tx.creatorProfile.upsert({
+        where: { userId: application.userId },
+        update: {
+          bio: application.note ?? "Creator profile approved by admin.",
+          category: application.category
+        },
+        create: {
+          id: `${application.userId}-profile`,
+          userId: application.userId,
+          bio: application.note ?? "Creator profile approved by admin.",
+          category: application.category,
+          followers: 0,
+          members: 0,
+          cover: "cover-1",
+          verified: false,
+          levelId: "level-1"
+        }
+      });
+    }
+    await enqueueSearchEntitySync(tx, {
+      entityType: "creator",
+      entityId: user.id,
+      sourceUpdatedAt: user.updatedAt,
+      eligible: status === "approved"
+    });
+    await tx.auditLog.create({
+      data: {
+        actorUserId: admin.actorUserId,
+        actorRole: admin.role,
+        action: `admin.creator_application.${status}`,
+        targetType: "creator_application",
+        targetId: id,
+        metadata: json({ userId: application.userId })
       }
     });
-  }
-
-  await writeAuditLog(admin, `admin.creator_application.${status}`, "creator_application", id, { userId: application.userId });
-  return application;
+    return application;
+  });
 }
 
 export async function listCreatorLevels() {
