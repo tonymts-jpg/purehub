@@ -2080,6 +2080,7 @@ test("phase 7 concurrent materializers claim once and exclusions remain authorit
   const channelId = `phase7-race-${nonce}`;
   const firstJobKey = `materialize:${channelId}:2026-07-24T00:00:00.000Z`;
   const secondJobKey = `materialize:${channelId}:2026-07-24T00:00:01.000Z`;
+  const transientExclusionIds: string[] = [];
   try {
     await signInCreator(ownerRequest, "chenmo");
     const post = await prisma.post.findUniqueOrThrow({
@@ -2137,6 +2138,8 @@ test("phase 7 concurrent materializers claim once and exclusions remain authorit
       workerA.post("/api/internal/phase7/run?limit=1", { headers })
     ]);
     expect(excluded.status(), await excluded.text()).toBe(201);
+    const exclusionId = (await excluded.json()).exclusion.id;
+    transientExclusionIds.push(exclusionId);
     expect(materialized.ok(), await materialized.text()).toBeTruthy();
     expect(await prisma.channelPostExclusion.count({ where: { channelId, postId: "post-1" } })).toBe(1);
     const resolved = await prisma.channelPost.findUnique({
@@ -2145,7 +2148,6 @@ test("phase 7 concurrent materializers claim once and exclusions remain authorit
     });
     expect(resolved === null || resolved.status === "removed").toBeTruthy();
 
-    const exclusionId = (await excluded.json()).exclusion.id;
     const removeExclusion = await ownerRequest.delete(
       `/api/dashboard/channels/${channelId}/exclusions/${exclusionId}`
     );
@@ -2159,8 +2161,9 @@ test("phase 7 concurrent materializers claim once and exclusions remain authorit
         data: { postId: "post-1", reason: "Concurrent manual exclusion must win." }
       })
     ]);
-    expect([201, 409]).toContain(manualRace.status());
     expect(exclusionRace.status(), await exclusionRace.text()).toBe(201);
+    transientExclusionIds.push((await exclusionRace.json()).exclusion.id);
+    expect([201, 409]).toContain(manualRace.status());
     expect(await prisma.channelPostExclusion.count({ where: { channelId, postId: "post-1" } })).toBe(1);
     const manualResolved = await prisma.channelPost.findUnique({
       where: { channelId_postId: { channelId, postId: "post-1" } },
@@ -2174,7 +2177,15 @@ test("phase 7 concurrent materializers claim once and exclusions remain authorit
       prisma.channelPostExclusion.findMany({ where: { channelId }, select: { id: true } })
     ]);
     await prisma.auditLog.deleteMany({
-      where: { targetId: { in: [channelId, ...posts.map(({ id }) => id), ...rules.map(({ id }) => id), ...exclusions.map(({ id }) => id)] } }
+      where: {
+        OR: [
+          { targetId: { in: [channelId, ...posts.map(({ id }) => id), ...rules.map(({ id }) => id), ...exclusions.map(({ id }) => id)] } },
+          {
+            targetId: { in: transientExclusionIds },
+            action: { in: ["channel.exclusion_create", "channel.exclusion_delete"] }
+          }
+        ]
+      }
     });
     await prisma.channel.deleteMany({ where: { id: channelId } });
     await ownerRequest.dispose();
