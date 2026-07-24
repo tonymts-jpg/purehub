@@ -3,25 +3,26 @@
 import {
   Archive,
   Check,
-  ChevronDown,
   CircleAlert,
   Clock3,
   DatabaseZap,
   FileCheck2,
-  ListFilter,
   LoaderCircle,
-  Pin,
   Plus,
   RefreshCw,
   Search,
   Shield,
   UserCog,
   UserPlus,
-  X
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AdminRole } from "@/lib/platform-config";
+import { ChannelCurationManager } from "./channel-curation-manager";
+import { channelErrorMessage, loadEveryChannelPage } from "./channel-management-api";
+import { adminChannelOperations, executeChannelOperation } from "./channel-management-operations";
+import type { ManagedChannel, MutationRunner } from "./channel-management-types";
+import { ChannelMembershipManager } from "./channel-membership-manager";
 
 type Access = {
   canRead: boolean;
@@ -48,23 +49,6 @@ type Channel = {
 };
 
 type Quota = { used: number; limit: number; levelId: string; overridden: boolean };
-type Membership = {
-  id: string;
-  role: "owner" | "editor" | "member";
-  status: string;
-  user: { name: string; handle: string };
-};
-type ChannelPost = {
-  id: string;
-  postId: string;
-  status: string;
-  source: string;
-  position: number | null;
-  pinnedAt: string | null;
-  post?: { title: string };
-};
-type Rule = { id: string; kind: "category" | "tag" | "creator"; value: string; enabled: boolean };
-type Exclusion = { id: string; postId: string; reason: string | null };
 type AdminContext = { role: AdminRole; permissions: string[] } | null;
 
 async function api<T>(url: string, init?: RequestInit, signal?: AbortSignal): Promise<T> {
@@ -83,10 +67,6 @@ async function api<T>(url: string, init?: RequestInit, signal?: AbortSignal): Pr
     throw error;
   }
   return body as T;
-}
-
-function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : "操作失败，请稍后重试。";
 }
 
 function Status({ value }: { value: string }) {
@@ -121,12 +101,7 @@ export function ChannelManager() {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [quota, setQuota] = useState<Quota | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [memberships, setMemberships] = useState<Membership[]>([]);
-  const [posts, setPosts] = useState<ChannelPost[]>([]);
-  const [rules, setRules] = useState<Rule[]>([]);
-  const [exclusions, setExclusions] = useState<Exclusion[]>([]);
   const [loading, setLoading] = useState(true);
-  const [detailLoading, setDetailLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const requestVersion = useRef(0);
@@ -138,86 +113,56 @@ export function ChannelManager() {
   const isOwner = selected?.access.role === "owner";
   const canCurate = Boolean(selected?.access.canCurate);
 
-  const loadChannels = useCallback(async () => {
+  const loadChannels = useCallback(async (signal?: AbortSignal) => {
     const version = ++requestVersion.current;
-    const controller = new AbortController();
     setLoading(true);
     setError("");
     try {
       const [dashboard, visible] = await Promise.all([
-        api<{ channels: Channel[]; quota: Quota }>("/api/dashboard/channels?limit=50", undefined, controller.signal),
-        api<{ channels: Channel[] }>("/api/channels?limit=50", undefined, controller.signal)
+        loadEveryChannelPage<Channel>("/api/dashboard/channels", "channels", signal ?? new AbortController().signal),
+        loadEveryChannelPage<Channel>("/api/channels", "channels", signal ?? new AbortController().signal)
       ]);
       if (version !== requestVersion.current) return;
-      const byId = new Map(dashboard.channels.map((channel) => [channel.id, channel]));
-      for (const channel of visible.channels) {
+      const byId = new Map(dashboard.items.map((channel) => [channel.id, channel]));
+      for (const channel of visible.items) {
         if (channel.id && channel.access?.canCurate && !byId.has(channel.id)) byId.set(channel.id, channel);
       }
       const next = [...byId.values()];
       setChannels(next);
-      setQuota(dashboard.quota);
+      setQuota((dashboard.firstBody.quota as Quota | undefined) ?? null);
       setSelectedId((current) => next.some(({ id }) => id === current) ? current : next[0]?.id ?? null);
     } catch (caught) {
+      if (caught instanceof DOMException && caught.name === "AbortError") return;
       const status = (caught as Error & { status?: number }).status;
       if (status === 401 || status === 403) {
         router.replace("/");
         return;
       }
-      if (version === requestVersion.current) setError(errorMessage(caught));
+      if (version === requestVersion.current) setError(channelErrorMessage(caught));
     } finally {
       if (version === requestVersion.current) setLoading(false);
     }
-    return () => controller.abort();
   }, [router]);
 
   useEffect(() => {
-    void loadChannels();
+    const controller = new AbortController();
+    void loadChannels(controller.signal);
+    return () => controller.abort();
   }, [loadChannels]);
 
-  useEffect(() => {
-    if (!selected) return;
-    const version = ++requestVersion.current;
-    const controller = new AbortController();
-    setDetailLoading(true);
-    setError("");
-    const prefix = `/api/dashboard/channels/${selected.id}`;
-    const resources: Array<Promise<unknown>> = [
-      api<{ channelPosts?: ChannelPost[]; posts?: ChannelPost[] }>(`${prefix}/posts?limit=50`, undefined, controller.signal),
-      api<{ rules: Rule[] }>(`${prefix}/rules?limit=50`, undefined, controller.signal),
-      api<{ exclusions: Exclusion[] }>(`${prefix}/exclusions?limit=50`, undefined, controller.signal)
-    ];
-    if (selected.access.role === "owner") {
-      resources.push(api<{ memberships: Membership[] }>(`${prefix}/members?limit=50`, undefined, controller.signal));
-    }
-    Promise.all(resources)
-      .then(([postBody, ruleBody, exclusionBody, memberBody]) => {
-        if (version !== requestVersion.current) return;
-        const postResult = postBody as { channelPosts?: ChannelPost[]; posts?: ChannelPost[] };
-        setPosts(postResult.channelPosts ?? postResult.posts ?? []);
-        setRules((ruleBody as { rules: Rule[] }).rules ?? []);
-        setExclusions((exclusionBody as { exclusions: Exclusion[] }).exclusions ?? []);
-        setMemberships((memberBody as { memberships?: Membership[] } | undefined)?.memberships ?? []);
-      })
-      .catch((caught) => {
-        if (version === requestVersion.current) setError(errorMessage(caught));
-      })
-      .finally(() => {
-        if (version === requestVersion.current) setDetailLoading(false);
-      });
-    return () => controller.abort();
-  }, [selected]);
-
-  async function mutate(operation: () => Promise<unknown>, success: string, reload = true) {
+  const mutate: MutationRunner = async (operation, success, options) => {
     setError("");
     setMessage("");
     try {
       await operation();
       setMessage(success);
-      if (reload) await loadChannels();
+      if (options?.refresh !== false) await loadChannels();
+      return true;
     } catch (caught) {
-      setError(errorMessage(caught));
+      setError(channelErrorMessage(caught));
+      return false;
     }
-  }
+  };
 
   if (loading) {
     return <p role="status" className="flex items-center gap-2 py-10 text-sm muted"><LoaderCircle className="animate-spin" size={18}/>正在加载频道管理资料…</p>;
@@ -282,19 +227,22 @@ export function ChannelManager() {
           {isOwner && (
             <OwnerControls
               channel={selected}
-              memberships={memberships}
               mutate={mutate}
             />
           )}
 
+          {selected.access.canManageMembers && (
+            <ChannelMembershipManager
+              channel={selected as ManagedChannel}
+              canManage={selected.access.role === "owner"}
+              runMutation={mutate}
+            />
+          )}
+
           {canCurate && (
-            <CurationControls
-              channel={selected}
-              posts={posts}
-              rules={rules}
-              exclusions={exclusions}
-              loading={detailLoading}
-              mutate={mutate}
+            <ChannelCurationManager
+              channel={selected as ManagedChannel}
+              runMutation={mutate}
             />
           )}
         </>
@@ -306,7 +254,7 @@ export function ChannelManager() {
 function CreateChannelForm({
   mutate
 }: {
-  mutate: (operation: () => Promise<unknown>, success: string, reload?: boolean) => Promise<void>;
+  mutate: MutationRunner;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [slug, setSlug] = useState("");
@@ -336,11 +284,13 @@ function CreateChannelForm({
               })
             }),
             "Creator 频道草稿已建立。"
-          ).then(() => {
-            setSlug("");
-            setName("");
-            setDescription("");
-            setExpanded(false);
+          ).then((ok) => {
+            if (ok) {
+              setSlug("");
+              setName("");
+              setDescription("");
+              setExpanded(false);
+            }
           });
         }}>
           <label className="text-sm font-bold">名称
@@ -371,14 +321,11 @@ function CreateChannelForm({
 
 function OwnerControls({
   channel,
-  memberships,
   mutate
 }: {
   channel: Channel;
-  memberships: Membership[];
-  mutate: (operation: () => Promise<unknown>, success: string, reload?: boolean) => Promise<void>;
+  mutate: MutationRunner;
 }) {
-  const [email, setEmail] = useState("");
   const [name, setName] = useState(channel.name);
   const [description, setDescription] = useState(channel.description);
   const [visibility, setVisibility] = useState(channel.visibility);
@@ -458,189 +405,6 @@ function OwnerControls({
         )}
       </div>
 
-      <div data-testid="channel-membership-manager" className="min-w-0">
-        <h3 className="flex items-center gap-2 font-black"><UserCog size={17}/>成员与邀请</h3>
-        <form
-          className="mt-3 flex gap-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void mutate(
-              () => api(`/api/dashboard/channels/${channel.id}/invitations`, {
-                method: "POST",
-                body: JSON.stringify({ email })
-              }),
-              "邀请已建立。",
-              false
-            ).then(() => setEmail(""));
-          }}
-        >
-          <input aria-label="邀请邮箱" required type="email" value={email} onChange={(event) => setEmail(event.target.value)} className="min-w-0 flex-1 rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-sm" placeholder="member@example.com"/>
-          <IconButton label="发送频道邀请" type="submit"><UserPlus size={15}/>邀请</IconButton>
-        </form>
-        <div className="mt-3 overflow-x-auto">
-          <table className="w-full min-w-[420px] text-left text-sm">
-            <thead><tr className="border-b border-[var(--line)]"><th className="p-2">成员</th><th className="p-2">状态</th><th className="p-2">角色</th></tr></thead>
-            <tbody>
-              {memberships.map((membership) => (
-                <tr key={membership.id} className="border-b border-[var(--line)]/60">
-                  <td className="p-2 font-bold">{membership.user.name}<span className="ml-1 text-xs muted">@{membership.user.handle}</span></td>
-                  <td className="p-2"><Status value={membership.status}/></td>
-                  <td className="p-2">
-                    <select
-                      aria-label={`变更 ${membership.user.handle} 的角色`}
-                      value={membership.role}
-                      disabled={membership.role === "owner"}
-                      onChange={(event) => void mutate(
-                        () => api(`/api/dashboard/channels/${channel.id}/members/${membership.id}`, {
-                          method: "PATCH",
-                          body: JSON.stringify({ role: event.target.value })
-                        }),
-                        "成员角色已更新。"
-                      )}
-                      className="rounded-md border border-[var(--line)] bg-[var(--card)] px-2 py-1 text-xs"
-                    >
-                      <option value="owner">owner</option><option value="editor">editor</option><option value="member">member</option>
-                    </select>
-                  </td>
-                </tr>
-              ))}
-              {!memberships.length && <tr><td colSpan={3} className="p-3 text-sm muted">暂无成员资料。</td></tr>}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function CurationControls({
-  channel,
-  posts,
-  rules,
-  exclusions,
-  loading,
-  mutate
-}: {
-  channel: Channel;
-  posts: ChannelPost[];
-  rules: Rule[];
-  exclusions: Exclusion[];
-  loading: boolean;
-  mutate: (operation: () => Promise<unknown>, success: string, reload?: boolean) => Promise<void>;
-}) {
-  const [postId, setPostId] = useState("");
-  const [ruleKind, setRuleKind] = useState<Rule["kind"]>("category");
-  const [ruleValue, setRuleValue] = useState("");
-  const [excludedPostId, setExcludedPostId] = useState("");
-  const [reason, setReason] = useState("");
-  const prefix = `/api/dashboard/channels/${channel.id}`;
-
-  return (
-    <section data-testid="channel-curation-manager" className="border-t border-[var(--line)] pt-6">
-      <div className="flex items-center justify-between gap-3">
-        <h3 className="flex items-center gap-2 text-lg font-black"><ListFilter size={18}/>策展管理</h3>
-        {loading && <LoaderCircle aria-label="正在更新策展资料" className="animate-spin muted" size={17}/>}
-      </div>
-      <div className="mt-4 grid gap-6 xl:grid-cols-3">
-        <div className="min-w-0">
-          <h4 className="font-bold">作品、顺序与置顶</h4>
-          <form className="mt-2 flex gap-2" onSubmit={(event) => {
-            event.preventDefault();
-            void mutate(
-              () => api(`${prefix}/posts`, { method: "POST", body: JSON.stringify({ postId }) }),
-              "作品已加入频道。"
-            ).then(() => setPostId(""));
-          }}>
-            <input aria-label="作品 ID" required value={postId} onChange={(event) => setPostId(event.target.value)} className="min-w-0 flex-1 rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-sm"/>
-            <IconButton label="加入作品" type="submit"><Plus size={15}/></IconButton>
-          </form>
-          <ul className="mt-3 space-y-2">
-            {posts.map((post, index) => (
-              <li key={post.id} className="flex min-w-0 items-center gap-2 border-b border-[var(--line)] py-2 text-sm">
-                <span className="min-w-0 flex-1 truncate">{post.post?.title ?? post.postId}<span className="ml-1 text-xs muted">{post.source}</span></span>
-                <IconButton label={`置顶 ${post.post?.title ?? post.postId}`} onClick={() => void mutate(
-                  () => api(`${prefix}/posts/${post.id}`, { method: "PATCH", body: JSON.stringify({ pinned: !post.pinnedAt }) }),
-                  "置顶状态已更新。"
-                )}><Pin size={14}/></IconButton>
-                <IconButton label={`下移 ${post.post?.title ?? post.postId}`} disabled={index === posts.length - 1} onClick={() => void mutate(
-                  () => api(`${prefix}/posts/${post.id}`, { method: "PATCH", body: JSON.stringify({ position: index + 1 }) }),
-                  "顺序已更新。"
-                )}><ChevronDown size={14}/></IconButton>
-                <IconButton label={`移除 ${post.post?.title ?? post.postId}`} onClick={() => {
-                  if (window.confirm("确认从频道移除这个作品？")) {
-                    void mutate(() => api(`${prefix}/posts/${post.id}`, { method: "DELETE", body: "{}" }), "作品已移除。");
-                  }
-                }}><X size={14}/></IconButton>
-              </li>
-            ))}
-            {!posts.length && <li className="text-sm muted">尚无策展作品。</li>}
-          </ul>
-        </div>
-
-        <div>
-          <h4 className="font-bold">自动规则</h4>
-          <form className="mt-2 grid grid-cols-[120px_1fr_auto] gap-2" onSubmit={(event) => {
-            event.preventDefault();
-            void mutate(
-              () => api(`${prefix}/rules`, { method: "POST", body: JSON.stringify({ kind: ruleKind, value: ruleValue, enabled: true }) }),
-              "规则已建立。"
-            ).then(() => setRuleValue(""));
-          }}>
-            <select aria-label="规则类型" value={ruleKind} onChange={(event) => setRuleKind(event.target.value as Rule["kind"])} className="rounded-md border border-[var(--line)] bg-[var(--card)] px-2 py-2 text-sm">
-              <option value="category">分类</option><option value="tag">标签</option><option value="creator">Creator</option>
-            </select>
-            <input aria-label="规则值" required value={ruleValue} onChange={(event) => setRuleValue(event.target.value)} className="min-w-0 rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-sm"/>
-            <IconButton label="新增规则" type="submit"><Plus size={15}/></IconButton>
-          </form>
-          <ul className="mt-3 space-y-2">
-            {rules.map((rule) => (
-              <li key={rule.id} className="flex items-center gap-2 border-b border-[var(--line)] py-2 text-sm">
-                <span className="flex-1"><b>{rule.kind}</b> · {rule.value}</span>
-                <Status value={rule.enabled ? "enabled" : "disabled"}/>
-                <IconButton label={`删除规则 ${rule.value}`} onClick={() => {
-                  if (window.confirm("确认删除这项自动规则？")) {
-                    void mutate(() => api(`${prefix}/rules/${rule.id}`, { method: "DELETE", body: "{}" }), "规则已删除。");
-                  }
-                }}><X size={14}/></IconButton>
-              </li>
-            ))}
-            {!rules.length && <li className="text-sm muted">尚无自动规则。</li>}
-          </ul>
-        </div>
-
-        <div>
-          <h4 className="font-bold">手动排除</h4>
-          <form className="mt-2 space-y-2" onSubmit={(event) => {
-            event.preventDefault();
-            void mutate(
-              () => api(`${prefix}/exclusions`, { method: "POST", body: JSON.stringify({ postId: excludedPostId, reason }) }),
-              "作品已排除。"
-            ).then(() => {
-              setExcludedPostId("");
-              setReason("");
-            });
-          }}>
-            <div className="flex gap-2">
-              <input aria-label="排除作品 ID" required value={excludedPostId} onChange={(event) => setExcludedPostId(event.target.value)} className="min-w-0 flex-1 rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-sm"/>
-              <IconButton label="新增排除" type="submit"><Archive size={15}/></IconButton>
-            </div>
-            <input aria-label="排除原因" required value={reason} onChange={(event) => setReason(event.target.value)} className="w-full rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-sm" placeholder="说明排除原因"/>
-          </form>
-          <ul className="mt-3 space-y-2">
-            {exclusions.map((exclusion) => (
-              <li key={exclusion.id} className="flex items-center gap-2 border-b border-[var(--line)] py-2 text-sm">
-                <span className="min-w-0 flex-1 truncate">{exclusion.postId}<span className="ml-1 text-xs muted">{exclusion.reason}</span></span>
-                <IconButton label={`取消排除 ${exclusion.postId}`} onClick={() => {
-                  if (window.confirm("确认取消这项手动排除？")) {
-                    void mutate(() => api(`${prefix}/exclusions/${exclusion.id}`, { method: "DELETE", body: "{}" }), "排除已取消。");
-                  }
-                }}><X size={14}/></IconButton>
-              </li>
-            ))}
-            {!exclusions.length && <li className="text-sm muted">尚无手动排除。</li>}
-          </ul>
-        </div>
-      </div>
     </section>
   );
 }
@@ -660,45 +424,60 @@ export function AdminChannelOperations({ admin }: { admin: AdminContext }) {
   const [quota, setQuota] = useState("3");
   const [quotaReason, setQuotaReason] = useState("Admin dashboard override");
   const [takeoverUserId, setTakeoverUserId] = useState("");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [officialSlug, setOfficialSlug] = useState("");
+  const [officialName, setOfficialName] = useState("");
+  const [officialDescription, setOfficialDescription] = useState("");
   const requestVersion = useRef(0);
+  const selected = channels.find((channel) => channel.id === selectedId) ?? null;
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal?: AbortSignal) => {
     if (!allowed) {
       setChannels([]);
       return;
     }
     const version = ++requestVersion.current;
-    const controller = new AbortController();
     setLoading(true);
     setError("");
     try {
-      const params = new URLSearchParams({ limit: "50" });
+      const params = new URLSearchParams();
       if (filter !== "all") params.set("status", filter);
-      const body = await api<{ channels: Channel[] }>(`/api/admin/channels?${params}`, undefined, controller.signal);
-      if (version === requestVersion.current) setChannels(body.channels);
+      const result = await loadEveryChannelPage<Channel>(
+        `/api/admin/channels${params.size ? `?${params}` : ""}`,
+        "channels",
+        signal ?? new AbortController().signal
+      );
+      if (version === requestVersion.current) {
+        setChannels(result.items);
+        setSelectedId((current) => result.items.some(({ id }) => id === current) ? current : null);
+      }
     } catch (caught) {
-      if (version === requestVersion.current) setError(errorMessage(caught));
+      if (caught instanceof DOMException && caught.name === "AbortError") return;
+      if (version === requestVersion.current) setError(channelErrorMessage(caught));
     } finally {
       if (version === requestVersion.current) setLoading(false);
     }
-    return () => controller.abort();
   }, [allowed, filter]);
 
   useEffect(() => {
-    void load();
+    const controller = new AbortController();
+    void load(controller.signal);
+    return () => controller.abort();
   }, [load]);
 
-  async function mutate(operation: () => Promise<unknown>, success: string) {
+  const mutate: MutationRunner = async (operation, success, options) => {
     setError("");
     setMessage("");
     try {
       await operation();
       setMessage(success);
-      await load();
+      if (options?.refresh !== false) await load();
+      return true;
     } catch (caught) {
-      setError(errorMessage(caught));
+      setError(channelErrorMessage(caught));
+      return false;
     }
-  }
+  };
 
   return (
     <section data-testid="admin-channel-operations" className="mt-8 border-y border-[var(--line)] py-6">
@@ -734,10 +513,19 @@ export function AdminChannelOperations({ admin }: { admin: AdminContext }) {
         <>
           <div className="mt-5 overflow-x-auto">
             <table className="w-full min-w-[980px] text-left text-sm">
-              <thead><tr className="border-b border-[var(--line)]"><th className="p-2">频道</th><th className="p-2">所有者</th><th className="p-2">状态</th><th className="p-2">审核</th><th className="p-2">生命周期</th><th className="p-2">作业</th></tr></thead>
+              <thead><tr className="border-b border-[var(--line)]"><th className="p-2">选择</th><th className="p-2">频道</th><th className="p-2">所有者</th><th className="p-2">状态</th><th className="p-2">审核</th><th className="p-2">生命周期</th><th className="p-2">作业</th></tr></thead>
               <tbody>
                 {channels.map((channel) => (
                   <tr key={channel.id} className="border-b border-[var(--line)]/70">
+                    <td className="p-2">
+                      <input
+                        type="radio"
+                        name="admin-channel-selection"
+                        aria-label={`选择频道 ${channel.name}`}
+                        checked={selectedId === channel.id}
+                        onChange={() => setSelectedId(channel.id)}
+                      />
+                    </td>
                     <td className="p-2 font-bold">{channel.name}<p className="text-xs font-normal muted">{channel.kind} · {channel.visibility}</p></td>
                     <td className="p-2 text-xs">{channel.ownerUserId}</td>
                     <td className="p-2"><Status value={channel.status}/></td>
@@ -755,6 +543,14 @@ export function AdminChannelOperations({ admin }: { admin: AdminContext }) {
                         <IconButton label={`恢复 ${channel.name}`} disabled={channel.status !== "suspended"} onClick={() => {
                           if (window.confirm(`确认恢复「${channel.name}」？`)) void mutate(() => api(`/api/admin/channels/${channel.id}/restore`, { method: "POST", body: "{}" }), "频道已恢复。");
                         }}><Check size={14}/></IconButton>
+                        <IconButton label={`封存 ${channel.name}`} disabled={channel.status === "archived"} onClick={() => {
+                          if (window.confirm(`确认封存「${channel.name}」？`)) {
+                            void mutate(
+                              () => executeChannelOperation(adminChannelOperations.archive(channel.id)),
+                              "频道已封存。"
+                            );
+                          }
+                        }}><Archive size={14}/></IconButton>
                       </div>
                     </td>
                     <td className="p-2">
@@ -769,20 +565,50 @@ export function AdminChannelOperations({ admin }: { admin: AdminContext }) {
                     </td>
                   </tr>
                 ))}
-                {!loading && !channels.length && <tr><td colSpan={6} className="p-6 text-center text-sm muted">这个筛选条件下没有频道。</td></tr>}
+                {!loading && !channels.length && <tr><td colSpan={7} className="p-6 text-center text-sm muted">这个筛选条件下没有频道。</td></tr>}
               </tbody>
             </table>
             {loading && <p role="status" className="flex items-center justify-center gap-2 p-6 text-sm muted"><LoaderCircle className="animate-spin" size={17}/>正在载入频道…</p>}
           </div>
 
+          <form className="mt-5 border-t border-[var(--line)] pt-4" onSubmit={(event) => {
+            event.preventDefault();
+            void mutate(
+              () => executeChannelOperation(adminChannelOperations.official({
+                slug: officialSlug,
+                name: officialName,
+                description: officialDescription
+              })),
+              "官方频道已建立。"
+            ).then((ok) => {
+              if (ok) {
+                setOfficialSlug("");
+                setOfficialName("");
+                setOfficialDescription("");
+              }
+            });
+          }}>
+            <h3 className="font-black">建立官方频道</h3>
+            <div className="mt-2 grid gap-2 md:grid-cols-3">
+              <input aria-label="官方频道名称" required minLength={3} value={officialName} onChange={(event) => setOfficialName(event.target.value)} className="rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-sm"/>
+              <input aria-label="官方频道 Slug" required pattern="[a-z0-9-]{3,50}" value={officialSlug} onChange={(event) => setOfficialSlug(event.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 50))} className="rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-sm"/>
+              <input aria-label="官方频道说明" value={officialDescription} onChange={(event) => setOfficialDescription(event.target.value)} className="rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-sm"/>
+            </div>
+            <button type="submit" className="mt-2 rounded-md bg-violet px-3 py-2 text-sm font-bold text-white">建立官方频道</button>
+          </form>
+
           <div className="mt-5 grid gap-5 lg:grid-cols-2">
             <form className="border-t border-[var(--line)] pt-4" onSubmit={(event) => {
               event.preventDefault();
-              const target = channels[0];
+              const target = selected;
               if (!target) return;
               if (window.confirm(`确认覆盖 ${target.ownerUserId} 的频道配额？`)) {
                 void mutate(
-                  () => api(`/api/admin/channels/quotas/${target.ownerUserId}`, { method: "PUT", body: JSON.stringify({ maxChannels: Number(quota), reason: quotaReason }) }),
+                  () => executeChannelOperation(adminChannelOperations.quota(
+                    target.ownerUserId,
+                    Number(quota),
+                    quotaReason
+                  )),
                   "Creator 频道配额已更新。"
                 );
               }
@@ -791,30 +617,65 @@ export function AdminChannelOperations({ admin }: { admin: AdminContext }) {
               <div className="mt-2 grid grid-cols-[120px_1fr_auto] gap-2">
                 <input aria-label="频道配额" type="number" min="0" max="100" required value={quota} onChange={(event) => setQuota(event.target.value)} className="rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-sm"/>
                 <input aria-label="配额原因" required value={quotaReason} onChange={(event) => setQuotaReason(event.target.value)} className="min-w-0 rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-sm"/>
-                <IconButton label="保存频道配额" type="submit" disabled={!channels.length}><UserCog size={15}/></IconButton>
+                <IconButton label="保存频道配额" type="submit" disabled={!selected}><UserCog size={15}/></IconButton>
               </div>
-              <p className="mt-1 text-xs muted">套用至目前筛选结果中的第一位频道所有者。</p>
+              <p className="mt-1 text-xs muted">{selected ? `套用至已选择频道的所有者 ${selected.ownerUserId}。` : "请先明确选择一个频道。"}</p>
             </form>
 
             <form className="border-t border-[var(--line)] pt-4" onSubmit={(event) => {
               event.preventDefault();
-              const target = channels[0];
+              const target = selected;
               if (!target) return;
               if (window.confirm(`确认由 ${takeoverUserId} 接管「${target.name}」？`)) {
                 void mutate(
-                  () => api(`/api/admin/channels/${target.id}/takeover`, { method: "POST", body: JSON.stringify({ newOwnerUserId: takeoverUserId }) }),
+                  () => executeChannelOperation(adminChannelOperations.takeover(target.id, takeoverUserId)),
                   "频道所有权已接管。"
-                ).then(() => setTakeoverUserId(""));
+                ).then((ok) => {
+                  if (ok) setTakeoverUserId("");
+                });
               }
             }}>
               <h3 className="font-black">所有权接管</h3>
               <div className="mt-2 flex gap-2">
                 <input aria-label="接管新所有者 ID" required value={takeoverUserId} onChange={(event) => setTakeoverUserId(event.target.value)} className="min-w-0 flex-1 rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-sm"/>
-                <IconButton label="接管频道" type="submit" disabled={!channels.length}><UserPlus size={15}/></IconButton>
+                <IconButton label="接管频道" type="submit" disabled={!selected}><UserPlus size={15}/></IconButton>
               </div>
               <p className="mt-1 text-xs muted">接管将原子化更新唯一 active owner，并留下审计记录。</p>
             </form>
           </div>
+
+          {selected?.kind === "official" && (
+            <div className="mt-6 space-y-6 border-t border-[var(--line)] pt-5">
+              <h3 className="font-black">已选择官方频道的成员与策展</h3>
+              <ChannelMembershipManager
+                channel={{
+                  ...(selected as ManagedChannel),
+                  access: {
+                    canRead: true,
+                    canManage: true,
+                    canCurate: true,
+                    canManageMembers: true,
+                    role: "owner"
+                  }
+                }}
+                canManage
+                runMutation={mutate}
+              />
+              <ChannelCurationManager
+                channel={{
+                  ...(selected as ManagedChannel),
+                  access: {
+                    canRead: true,
+                    canManage: true,
+                    canCurate: true,
+                    canManageMembers: true,
+                    role: "owner"
+                  }
+                }}
+                runMutation={mutate}
+              />
+            </div>
+          )}
         </>
       )}
 
@@ -826,7 +687,9 @@ export function AdminChannelOperations({ admin }: { admin: AdminContext }) {
             void mutate(
               () => api(`/api/admin/channels/${target.id}/review`, { method: "POST", body: JSON.stringify({ decision: reviewDecision, note: reviewNote }) }),
               reviewDecision === "approved" ? "频道已通过审核。" : "频道已拒绝。"
-            ).then(() => setReviewChannel(null));
+            ).then((ok) => {
+              if (ok) setReviewChannel(null);
+            });
           }}>
             <h3 className="text-lg font-black">审核频道</h3>
             <p className="mt-1 text-sm muted">{reviewChannel.name}</p>
