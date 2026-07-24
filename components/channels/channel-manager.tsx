@@ -20,7 +20,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AdminRole } from "@/lib/platform-config";
 import { ChannelCurationManager } from "./channel-curation-manager";
 import { channelErrorMessage, loadEveryChannelPage } from "./channel-management-api";
-import { adminChannelOperations, executeChannelOperation } from "./channel-management-operations";
+import {
+  adminChannelOperations,
+  executeChannelOperation,
+  officialChannelOperationsAvailable
+} from "./channel-management-operations";
 import type { ManagedChannel, MutationRunner } from "./channel-management-types";
 import { ChannelMembershipManager } from "./channel-membership-manager";
 
@@ -652,7 +656,7 @@ export function AdminChannelOperations({ admin }: { admin: AdminContext }) {
             </form>
           </div>
 
-          {selected?.kind === "official" && (
+          {selected && officialChannelOperationsAvailable(selected.kind, selected.status) && (
             <div className="mt-6 space-y-6 border-t border-[var(--line)] pt-5">
               <h3 className="font-black">已选择官方频道的成员与策展</h3>
               <ChannelMembershipManager
@@ -667,6 +671,11 @@ export function AdminChannelOperations({ admin }: { admin: AdminContext }) {
                 runMutation={mutate}
               />
             </div>
+          )}
+          {selected?.kind === "official" && selected.status !== "active" && (
+            <p role="status" className="mt-6 rounded-md bg-amber-500/10 px-4 py-3 text-sm font-bold text-amber-800 dark:text-amber-200">
+              此官方频道目前为 {selected.status}；只有 active 频道可管理成员与策展。
+            </p>
           )}
         </>
       )}

@@ -5,6 +5,10 @@ export type ChannelOperation = {
   init: RequestInit;
 };
 
+export function officialChannelOperationsAvailable(kind: string, status: string) {
+  return kind === "official" && status === "active";
+}
+
 function jsonOperation(url: string, method: "POST" | "PUT" | "PATCH", body: Record<string, unknown>): ChannelOperation {
   return { url, init: { method, body: JSON.stringify(body) } };
 }

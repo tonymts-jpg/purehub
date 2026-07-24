@@ -12,23 +12,30 @@ export default function ChannelInvitationPage() {
   const { data: session, isPending } = authClient.useSession();
   const [state, setState] = useState<InvitationState>("ready");
   const [error, setError] = useState("");
+  const [lastAction, setLastAction] = useState<"accept" | "reject" | null>(null);
   const token = params.token;
 
   async function decide(action: "accept" | "reject") {
+    setLastAction(action);
     setState("working");
     setError("");
-    const response = await fetch(`/api/channels/invitations/${encodeURIComponent(token)}`, {
-      method: action === "accept" ? "POST" : "DELETE",
-      headers: { "content-type": "application/json" },
-      body: "{}"
-    });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      setError(typeof body.error === "string" ? body.error : "邀请处理失败，请稍后重试。");
+    try {
+      const response = await fetch(`/api/channels/invitations/${encodeURIComponent(token)}`, {
+        method: action === "accept" ? "POST" : "DELETE",
+        headers: { "content-type": "application/json" },
+        body: "{}"
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setError(typeof body.error === "string" ? body.error : "邀请处理失败，请稍后重试。");
+        setState("error");
+        return;
+      }
+      setState(action === "accept" ? "accepted" : "rejected");
+    } catch {
+      setError("网络连接失败，请重试邀请操作。");
       setState("error");
-      return;
     }
-    setState(action === "accept" ? "accepted" : "rejected");
   }
 
   const callback = `/channels/invitations/${encodeURIComponent(token)}`;
@@ -55,7 +62,16 @@ export default function ChannelInvitationPage() {
         {state === "working" && <p role="status" className="mt-4 text-sm muted">正在处理邀请…</p>}
         {state === "accepted" && <p role="status" className="mt-4 text-sm font-bold text-emerald-600">邀请已接受，你现在可以访问该私人频道。</p>}
         {state === "rejected" && <p role="status" className="mt-4 text-sm font-bold">邀请已拒绝。</p>}
-        {state === "error" && <p role="alert" className="mt-4 text-sm font-bold text-rose-600">{error}</p>}
+        {state === "error" && (
+          <div className="mt-4">
+            <p role="alert" className="text-sm font-bold text-rose-600">{error}</p>
+            {lastAction && (
+              <button type="button" onClick={() => void decide(lastAction)} className="mt-3 rounded-xl border border-[var(--line)] px-4 py-2 text-sm font-bold">
+                重试{lastAction === "accept" ? "接受" : "拒绝"}邀请
+              </button>
+            )}
+          </div>
+        )}
       </section>
     </main>
   );

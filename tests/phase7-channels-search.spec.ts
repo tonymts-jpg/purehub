@@ -2,7 +2,8 @@ import { expect, request as playwrightRequest, test, type APIRequestContext, typ
 import { ADMIN_SECTIONS, isChannelAdminRole } from "../lib/admin-auth";
 import {
   adminChannelOperations,
-  executeChannelOperation
+  executeChannelOperation,
+  officialChannelOperationsAvailable
 } from "../components/channels/channel-management-operations";
 import { resolveChannelAccess } from "../lib/channels/auth";
 import { readChannelJson, requireEmptyChannelQuery } from "../lib/channels/http";
@@ -3448,6 +3449,9 @@ test("phase 7 disposable owner operations cover membership invitation policy and
   const invitee = await playwrightRequest.newContext({ baseURL });
   const applicant = await playwrightRequest.newContext({ baseURL });
   const cleanupEmails: string[] = [];
+  const channelPostIds = new Set<string>();
+  const channelRuleIds = new Set<string>();
+  const channelExclusionIds = new Set<string>();
   let channelId: string | null = null;
   try {
     await signInCreator(owner);
@@ -3514,32 +3518,67 @@ test("phase 7 disposable owner operations cover membership invitation policy and
       data: { postId: posts[0].id, position: 0 }
     });
     expect(added.ok(), await added.text()).toBeTruthy();
-    expect((await added.json()).channelPost.position).toBe(0);
+    const addedBody = await added.json();
+    channelPostIds.add(addedBody.channelPost.id);
+    expect(addedBody.channelPost.position).toBe(0);
     const rule = await owner.post(`/api/dashboard/channels/${channelId}/rules`, {
       headers: authHeaders,
       data: { kind: "tag", value: `owner-ops-${suffix}`, enabled: true }
     });
     expect(rule.ok(), await rule.text()).toBeTruthy();
+    channelRuleIds.add((await rule.json()).rule.id);
     const exclusion = await owner.post(`/api/dashboard/channels/${channelId}/exclusions`, {
       headers: authHeaders,
       data: { postId: posts[1].id, reason: "Disposable owner operations test." }
     });
     expect(exclusion.ok(), await exclusion.text()).toBeTruthy();
+    channelExclusionIds.add((await exclusion.json()).exclusion.id);
   } finally {
-    await cleanupPhase7MembershipArtifacts(cleanupEmails, [], channelId ? [channelId] : []);
-    const cleanupUsers = await prisma.user.findMany({
-      where: { email: { in: cleanupEmails } },
-      select: { id: true }
-    });
-    const cleanupUserIds = cleanupUsers.map(({ id }) => id);
-    if (cleanupUserIds.length) {
-      await prisma.$transaction([
-        prisma.session.deleteMany({ where: { userId: { in: cleanupUserIds } } }),
-        prisma.account.deleteMany({ where: { userId: { in: cleanupUserIds } } }),
-        prisma.user.deleteMany({ where: { id: { in: cleanupUserIds } } })
-      ]);
+    try {
+      if (channelId) {
+        const [posts, rules, exclusions] = await Promise.all([
+          prisma.channelPost.findMany({ where: { channelId }, select: { id: true } }),
+          prisma.channelRule.findMany({ where: { channelId }, select: { id: true } }),
+          prisma.channelPostExclusion.findMany({ where: { channelId }, select: { id: true } })
+        ]);
+        posts.forEach(({ id }) => channelPostIds.add(id));
+        rules.forEach(({ id }) => channelRuleIds.add(id));
+        exclusions.forEach(({ id }) => channelExclusionIds.add(id));
+      }
+      await prisma.auditLog.deleteMany({
+        where: {
+          OR: [
+            ...(channelPostIds.size
+              ? [{ targetType: "channel_post", targetId: { in: [...channelPostIds] } }]
+              : []),
+            ...(channelRuleIds.size
+              ? [{ targetType: "channel_rule", targetId: { in: [...channelRuleIds] } }]
+              : []),
+            ...(channelExclusionIds.size
+              ? [{ targetType: "channel_exclusion", targetId: { in: [...channelExclusionIds] } }]
+              : [])
+          ]
+        }
+      });
+    } finally {
+      try {
+        await cleanupPhase7MembershipArtifacts(cleanupEmails, [], channelId ? [channelId] : []);
+      } finally {
+        const cleanupUsers = await prisma.user.findMany({
+          where: { email: { in: cleanupEmails } },
+          select: { id: true }
+        });
+        const cleanupUserIds = cleanupUsers.map(({ id }) => id);
+        if (cleanupUserIds.length) {
+          await prisma.$transaction([
+            prisma.session.deleteMany({ where: { userId: { in: cleanupUserIds } } }),
+            prisma.account.deleteMany({ where: { userId: { in: cleanupUserIds } } }),
+            prisma.user.deleteMany({ where: { id: { in: cleanupUserIds } } })
+          ]);
+        }
+        await Promise.all([owner.dispose(), admin.dispose(), invitee.dispose(), applicant.dispose()]);
+      }
     }
-    await Promise.all([owner.dispose(), admin.dispose(), invitee.dispose(), applicant.dispose()]);
   }
 });
 
@@ -3936,6 +3975,7 @@ test("phase 7 dashboard channel operations use exact membership, invitation, pos
 
 test("phase 7 invitation recipient page authenticates and sends explicit accept or reject", async ({ page }) => {
   const calls: Array<{ method: string; body: unknown }> = [];
+  let rejectNetworkOnce = false;
   await page.route("**/api/auth/get-session", (route) => route.fulfill({
     status: 200,
     contentType: "application/json",
@@ -3947,6 +3987,10 @@ test("phase 7 invitation recipient page authenticates and sends explicit accept 
   await page.route("**/api/channels/invitations/recipient-token", async (route) => {
     const request = route.request();
     calls.push({ method: request.method(), body: request.postData() ? request.postDataJSON() : null });
+    if (rejectNetworkOnce) {
+      rejectNetworkOnce = false;
+      return route.abort("failed");
+    }
     return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ changed: true }) });
   });
 
@@ -3959,9 +4003,23 @@ test("phase 7 invitation recipient page authenticates and sends explicit accept 
   await page.getByRole("button", { name: "拒绝邀请" }).click();
   await expect(page.getByText("邀请已拒绝")).toBeVisible();
   expect(calls.at(-1)).toEqual({ method: "DELETE", body: {} });
+
+  rejectNetworkOnce = true;
+  await page.reload();
+  await page.getByRole("button", { name: "接受邀请" }).click();
+  await expect(page.getByText("网络连接失败，请重试邀请操作。")).toBeVisible();
+  const retry = page.getByRole("button", { name: "重试接受邀请" });
+  await expect(retry).toBeVisible();
+  await retry.click();
+  await expect(page.getByText("邀请已接受")).toBeVisible();
 });
 
 test("phase 7 admin channel operation builders use exact success and failure contracts", async () => {
+  expect(officialChannelOperationsAvailable("official", "active")).toBeTruthy();
+  for (const status of ["draft", "pending", "rejected", "suspended", "archived"]) {
+    expect(officialChannelOperationsAvailable("official", status)).toBeFalsy();
+  }
+  expect(officialChannelOperationsAvailable("creator", "active")).toBeFalsy();
   const calls: Array<{ url: string; method: string; body: unknown }> = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
