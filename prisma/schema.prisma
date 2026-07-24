@@ -9,40 +9,54 @@ datasource db {
 }
 
 model User {
-  id                  String               @id
-  name                String
-  handle              String               @unique
-  avatar              String
-  email               String               @unique
-  emailVerified       Boolean              @default(false)
-  image               String?
-  status              String               @default("active")
-  role                String               @default("fan")
-  creatorStatus       String               @default("none")
-  createdAt           DateTime             @default(now())
-  updatedAt           DateTime             @updatedAt
-  creatorProfile      CreatorProfile?
-  creatorApplications CreatorApplication[]
-  posts               Post[]
-  follows             Follow[]
-  followers           Follow[]             @relation("FollowedCreator")
-  bookmarks           Bookmark[]
-  postLikes           PostLike[]
-  postComments        PostComment[]
-  notifications       Notification[]       @relation("NotificationRecipient")
-  notificationActions Notification[]       @relation("NotificationActor")
-  sessions            Session[]
-  accounts            Account[]
-  subscriptions       Subscription[]
-  entitlements        Entitlement[]
-  transactions        Transaction[]
-  buyerOrders         Order[]              @relation("BuyerOrders")
-  creatorOrders       Order[]              @relation("CreatorOrders")
-  walletBalance       WalletBalance?
-  payoutRequests      PayoutRequest[]
-  kycCase             KycCase?
-  adminAccounts       AdminAccount[]
-  auditLogs           AuditLog[]
+  id                         String                 @id
+  name                       String
+  handle                     String                 @unique
+  avatar                     String
+  email                      String                 @unique
+  emailVerified              Boolean                @default(false)
+  image                      String?
+  status                     String                 @default("active")
+  role                       String                 @default("fan")
+  creatorStatus              String                 @default("none")
+  createdAt                  DateTime               @default(now())
+  updatedAt                  DateTime               @updatedAt
+  creatorProfile             CreatorProfile?
+  creatorApplications        CreatorApplication[]
+  posts                      Post[]
+  follows                    Follow[]
+  followers                  Follow[]               @relation("FollowedCreator")
+  bookmarks                  Bookmark[]
+  postLikes                  PostLike[]
+  postComments               PostComment[]
+  notifications              Notification[]         @relation("NotificationRecipient")
+  notificationActions        Notification[]         @relation("NotificationActor")
+  sessions                   Session[]
+  accounts                   Account[]
+  subscriptions              Subscription[]
+  entitlements               Entitlement[]
+  transactions               Transaction[]
+  buyerOrders                Order[]                @relation("BuyerOrders")
+  creatorOrders              Order[]                @relation("CreatorOrders")
+  walletBalance              WalletBalance?
+  payoutRequests             PayoutRequest[]
+  kycCase                    KycCase?
+  adminAccounts              AdminAccount[]
+  auditLogs                  AuditLog[]
+  ownedChannels              Channel[]              @relation("ChannelOwner")
+  createdChannels            Channel[]              @relation("ChannelCreator")
+  channelMemberships         ChannelMembership[]    @relation("ChannelMember")
+  invitedMemberships         ChannelMembership[]    @relation("ChannelMembershipInviter")
+  reviewedMemberships        ChannelMembership[]    @relation("ChannelMembershipReviewer")
+  addedChannelPosts          ChannelPost[]          @relation("ChannelPostAdder")
+  reviewedChannelPosts       ChannelPost[]          @relation("ChannelPostReviewer")
+  createdChannelRules        ChannelRule[]          @relation("ChannelRuleCreator")
+  channelExclusions          ChannelPostExclusion[] @relation("ChannelPostExcluder")
+  channelQuotaOverride       ChannelQuotaOverride?  @relation("ChannelQuotaUser")
+  createdQuotaOverrides      ChannelQuotaOverride[] @relation("ChannelQuotaAdmin")
+  channelInvitations         ChannelInvitation[]    @relation("ChannelInvitee")
+  sentChannelInvitations     ChannelInvitation[]    @relation("ChannelInvitationInviter")
+  acceptedChannelInvitations ChannelInvitation[]    @relation("ChannelInvitationAcceptor")
 }
 
 model CreatorProfile {
@@ -86,30 +100,204 @@ model MembershipPlan {
 }
 
 model Post {
-  id           String        @id
-  creatorId    String
-  title        String
-  excerpt      String
-  content      String
-  cover        String
-  category     String
-  tags         Json
-  visibility   String
-  contentType  String        @default("photo_short")
-  saleMode     String        @default("subscription_only")
-  price        Int?
-  likes        Int           @default(0)
-  comments     Json
-  createdLabel String        @default("刚刚")
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
-  creator      User          @relation(fields: [creatorId], references: [id], onDelete: Cascade)
-  media        MediaAsset[]
-  bookmarks    Bookmark[]
-  postLikes    PostLike[]
-  commentItems PostComment[]
-  notifications Notification[]
-  entitlements Entitlement[]
+  id                String                 @id
+  creatorId         String
+  title             String
+  excerpt           String
+  content           String
+  cover             String
+  category          String
+  tags              Json
+  visibility        String
+  contentType       String                 @default("photo_short")
+  saleMode          String                 @default("subscription_only")
+  price             Int?
+  likes             Int                    @default(0)
+  comments          Json
+  createdLabel      String                 @default("刚刚")
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+  creator           User                   @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  media             MediaAsset[]
+  bookmarks         Bookmark[]
+  postLikes         PostLike[]
+  commentItems      PostComment[]
+  notifications     Notification[]
+  entitlements      Entitlement[]
+  channelPosts      ChannelPost[]
+  channelExclusions ChannelPostExclusion[]
+}
+
+model Channel {
+  id                String                 @id @default(cuid())
+  slug              String                 @unique
+  name              String
+  description       String
+  avatarAssetId     String?
+  coverAssetId      String?
+  kind              String
+  visibility        String
+  discoverability   String
+  status            String                 @default("draft")
+  ownerUserId       String
+  createdByUserId   String
+  memberPostPolicy  String                 @default("approval_required")
+  reviewNote        String?
+  reviewedByAdminId String?
+  reviewedAt        DateTime?
+  suspendedAt       DateTime?
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+  owner             User                   @relation("ChannelOwner", fields: [ownerUserId], references: [id])
+  createdBy         User                   @relation("ChannelCreator", fields: [createdByUserId], references: [id])
+  memberships       ChannelMembership[]
+  posts             ChannelPost[]
+  rules             ChannelRule[]
+  exclusions        ChannelPostExclusion[]
+  invitations       ChannelInvitation[]
+  jobs              ChannelJob[]
+
+  @@index([status, visibility, createdAt])
+  @@index([ownerUserId, status])
+}
+
+model ChannelMembership {
+  id               String    @id @default(cuid())
+  channelId        String
+  userId           String
+  role             String
+  status           String    @default("invited")
+  invitedByUserId  String?
+  reviewedByUserId String?
+  reviewedAt       DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  channel          Channel   @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  user             User      @relation("ChannelMember", fields: [userId], references: [id], onDelete: Cascade)
+  invitedBy        User?     @relation("ChannelMembershipInviter", fields: [invitedByUserId], references: [id], onDelete: SetNull)
+  reviewedBy       User?     @relation("ChannelMembershipReviewer", fields: [reviewedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([channelId, userId])
+  @@index([userId, status])
+}
+
+model ChannelPost {
+  id               String    @id @default(cuid())
+  channelId        String
+  postId           String
+  source           String
+  status           String    @default("pending")
+  position         Int?
+  pinnedAt         DateTime?
+  addedByUserId    String
+  reviewedByUserId String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  channel          Channel   @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  post             Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
+  addedBy          User      @relation("ChannelPostAdder", fields: [addedByUserId], references: [id])
+  reviewedBy       User?     @relation("ChannelPostReviewer", fields: [reviewedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([channelId, postId])
+  @@index([channelId, status, pinnedAt(sort: Desc), position, createdAt(sort: Desc)])
+}
+
+model ChannelRule {
+  id              String   @id @default(cuid())
+  channelId       String
+  kind            String
+  value           String
+  enabled         Boolean  @default(true)
+  createdByUserId String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  channel         Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  createdBy       User     @relation("ChannelRuleCreator", fields: [createdByUserId], references: [id])
+
+  @@index([channelId, enabled])
+}
+
+model ChannelPostExclusion {
+  id               String   @id @default(cuid())
+  channelId        String
+  postId           String
+  excludedByUserId String
+  reason           String
+  createdAt        DateTime @default(now())
+  channel          Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  post             Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  excludedBy       User     @relation("ChannelPostExcluder", fields: [excludedByUserId], references: [id])
+
+  @@unique([channelId, postId])
+}
+
+model ChannelQuotaOverride {
+  id               String   @id @default(cuid())
+  userId           String   @unique
+  maxChannels      Int
+  reason           String
+  createdByAdminId String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  user             User     @relation("ChannelQuotaUser", fields: [userId], references: [id], onDelete: Cascade)
+  createdByAdmin   User     @relation("ChannelQuotaAdmin", fields: [createdByAdminId], references: [id])
+}
+
+model ChannelInvitation {
+  id               String   @id @default(cuid())
+  channelId        String
+  email            String
+  invitedUserId    String?
+  tokenHash        String   @unique
+  expiresAt        DateTime
+  status           String   @default("pending")
+  invitedByUserId  String
+  acceptedByUserId String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  channel          Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  invitedUser      User?    @relation("ChannelInvitee", fields: [invitedUserId], references: [id], onDelete: SetNull)
+  invitedBy        User     @relation("ChannelInvitationInviter", fields: [invitedByUserId], references: [id])
+  acceptedBy       User?    @relation("ChannelInvitationAcceptor", fields: [acceptedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([channelId, status, expiresAt])
+}
+
+model ChannelJob {
+  id             String    @id @default(cuid())
+  idempotencyKey String    @unique
+  kind           String
+  channelId      String?
+  entityType     String?
+  entityId       String?
+  status         String    @default("pending")
+  attempts       Int       @default(0)
+  availableAt    DateTime  @default(now())
+  lockedAt       DateTime?
+  lastError      String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  completedAt    DateTime?
+  channel        Channel?  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@index([status, availableAt])
+  @@index([channelId, status])
+}
+
+model SearchDocument {
+  id              String                  @id @default(cuid())
+  entityType      String
+  entityId        String
+  title           String
+  body            String
+  keywords        String
+  searchVector    Unsupported("tsvector") @default(dbgenerated())
+  popularityScore Float                   @default(0)
+  publishedAt     DateTime
+  updatedAt       DateTime                @updatedAt
+
+  @@unique([entityType, entityId])
+  @@index([entityType, publishedAt])
 }
 
 model MediaAsset {

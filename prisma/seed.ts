@@ -13,6 +13,15 @@ const levelForFollowers = (followers: number) => {
 
 async function main() {
   await prisma.$transaction([
+    prisma.searchDocument.deleteMany(),
+    prisma.channelJob.deleteMany(),
+    prisma.channelInvitation.deleteMany(),
+    prisma.channelPostExclusion.deleteMany(),
+    prisma.channelPost.deleteMany(),
+    prisma.channelRule.deleteMany(),
+    prisma.channelMembership.deleteMany(),
+    prisma.channelQuotaOverride.deleteMany(),
+    prisma.channel.deleteMany(),
     prisma.notification.deleteMany(),
     prisma.postComment.deleteMany(),
     prisma.postLike.deleteMany(),
@@ -342,6 +351,159 @@ async function main() {
     });
   }
 
+  const phase7SeededAt = new Date("2026-07-24T00:00:00.000Z");
+  await prisma.channel.createMany({
+    data: [
+      {
+        id: "channel-purehub-official",
+        slug: "purehub-official",
+        name: "PureHub Official",
+        description: "Platform announcements and featured public releases from PureHub.",
+        kind: "official",
+        visibility: "public",
+        discoverability: "discoverable",
+        status: "active",
+        ownerUserId: "admin-demo",
+        createdByUserId: "admin-demo",
+        memberPostPolicy: "approval_required",
+        reviewedByAdminId: "admin-demo",
+        reviewedAt: phase7SeededAt
+      },
+      {
+        id: "channel-yuki-studio",
+        slug: "yuki-studio",
+        name: "Yuki Studio",
+        description: "Public Cosplay curation from Yuki Studio.",
+        kind: "creator",
+        visibility: "public",
+        discoverability: "discoverable",
+        status: "active",
+        ownerUserId: "c1",
+        createdByUserId: "c1",
+        memberPostPolicy: "direct",
+        reviewedByAdminId: "admin-demo",
+        reviewedAt: phase7SeededAt
+      },
+      {
+        id: "channel-private-curators",
+        slug: "private-curators",
+        name: "Private Curators",
+        description: "A discoverable private channel for collaborative curation.",
+        kind: "creator",
+        visibility: "private",
+        discoverability: "discoverable",
+        status: "active",
+        ownerUserId: "c2",
+        createdByUserId: "c2",
+        memberPostPolicy: "approval_required",
+        reviewedByAdminId: "admin-demo",
+        reviewedAt: phase7SeededAt
+      }
+    ]
+  });
+
+  await prisma.channelMembership.createMany({
+    data: [
+      { id: "membership-official-owner", channelId: "channel-purehub-official", userId: "admin-demo", role: "owner", status: "active", reviewedByUserId: "admin-demo", reviewedAt: phase7SeededAt },
+      { id: "membership-yuki-owner", channelId: "channel-yuki-studio", userId: "c1", role: "owner", status: "active", reviewedByUserId: "admin-demo", reviewedAt: phase7SeededAt },
+      { id: "membership-curators-owner", channelId: "channel-private-curators", userId: "c2", role: "owner", status: "active", reviewedByUserId: "admin-demo", reviewedAt: phase7SeededAt },
+      { id: "membership-curators-editor", channelId: "channel-private-curators", userId: "c1", role: "editor", status: "active", invitedByUserId: "c2", reviewedByUserId: "c2", reviewedAt: phase7SeededAt },
+      { id: "membership-curators-member", channelId: "channel-private-curators", userId: "fan-demo", role: "member", status: "active", invitedByUserId: "c2", reviewedByUserId: "c2", reviewedAt: phase7SeededAt }
+    ]
+  });
+
+  await prisma.channelRule.create({
+    data: {
+      id: "rule-yuki-cosplay",
+      channelId: "channel-yuki-studio",
+      kind: "category",
+      value: "Cosplay",
+      enabled: true,
+      createdByUserId: "c1"
+    }
+  });
+
+  await prisma.channelPost.create({
+    data: {
+      id: "channel-post-curators-manual",
+      channelId: "channel-private-curators",
+      postId: "post-2",
+      source: "manual",
+      status: "active",
+      position: 1,
+      pinnedAt: phase7SeededAt,
+      addedByUserId: "c2",
+      reviewedByUserId: "c2"
+    }
+  });
+
+  await prisma.channelPostExclusion.create({
+    data: {
+      id: "exclusion-yuki-post-6",
+      channelId: "channel-yuki-studio",
+      postId: "post-6",
+      excludedByUserId: "c1",
+      reason: "Seeded example showing that manual exclusions override category-rule inclusion."
+    }
+  });
+
+  await prisma.searchDocument.createMany({
+    data: [
+      ...posts
+        .filter((post) => post.visibility === "free")
+        .map((post) => ({
+          id: `search-post-${post.id}`,
+          entityType: "post",
+          entityId: post.id,
+          title: post.title,
+          body: `${post.excerpt} ${post.content}`,
+          keywords: [post.category, ...post.tags].join(" "),
+          popularityScore: post.likes,
+          publishedAt: phase7SeededAt
+        })),
+      ...creators.map((creator) => ({
+        id: `search-creator-${creator.id}`,
+        entityType: "creator",
+        entityId: creator.id,
+        title: creator.name,
+        body: creator.bio,
+        keywords: `${creator.handle} ${creator.category}`,
+        popularityScore: creator.followers,
+        publishedAt: phase7SeededAt
+      })),
+      {
+        id: "search-channel-purehub-official",
+        entityType: "channel",
+        entityId: "channel-purehub-official",
+        title: "PureHub Official",
+        body: "Platform announcements and featured public releases from PureHub.",
+        keywords: "purehub-official official public",
+        popularityScore: 0,
+        publishedAt: phase7SeededAt
+      },
+      {
+        id: "search-channel-yuki-studio",
+        entityType: "channel",
+        entityId: "channel-yuki-studio",
+        title: "Yuki Studio",
+        body: "Public Cosplay curation from Yuki Studio.",
+        keywords: "yuki-studio creator public Cosplay",
+        popularityScore: 0,
+        publishedAt: phase7SeededAt
+      },
+      {
+        id: "search-channel-private-curators",
+        entityType: "channel",
+        entityId: "channel-private-curators",
+        title: "Private Curators",
+        body: "A discoverable private channel for collaborative curation.",
+        keywords: "private-curators creator private discoverable",
+        popularityScore: 0,
+        publishedAt: phase7SeededAt
+      }
+    ]
+  });
+
   const openingAccounts = await Promise.all([
     prisma.ledgerAccount.create({ data: { key: "creator:c1:available:CNY", ownerUserId: "c1", type: "creator_available", currency: "CNY", balance: 8620 } }),
     prisma.ledgerAccount.create({ data: { key: "creator:c1:pending:CNY", ownerUserId: "c1", type: "creator_pending", currency: "CNY", balance: 1280 } }),
@@ -390,5 +552,4 @@ main()
     await prisma.$disconnect();
     process.exit(1);
   });
-
 
