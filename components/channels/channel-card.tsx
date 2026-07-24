@@ -13,6 +13,7 @@ export function ChannelCard({ channel }: { channel: ChannelListItemDto }) {
   return (
     <article
       data-testid="channel-card"
+      data-channel-slug={channel.slug}
       className="glass flex min-w-0 flex-col overflow-hidden rounded-lg shadow-soft"
     >
       <div className="relative aspect-[16/7] overflow-hidden bg-gradient-to-br from-violet/80 via-[#b55dba] to-coral">

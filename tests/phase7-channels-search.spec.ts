@@ -3104,12 +3104,66 @@ test("phase 7 channel UI and search UI expose responsive public routes", async (
   await page.goto("/channels");
   await expect(page.getByRole("heading", { name: "探索频道" })).toBeVisible();
   await expect(page.locator("body")).not.toHaveCSS("overflow-x", "scroll");
+  if (page.viewportSize()!.width < 640) {
+    await expect(page.getByRole("link", { name: "成为博主" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "搜索" })).toBeVisible();
+  }
 
   await page.goto("/search?q=yuki");
   await expect(page.getByRole("heading", { name: "统一搜索" })).toBeVisible();
   for (const tab of ["全部", "作品", "创作者", "频道"]) {
     await expect(page.getByRole("tab", { name: tab })).toBeVisible();
   }
+  const allTab = page.getByRole("tab", { name: "全部" });
+  await allTab.focus();
+  await allTab.press("End");
+  await expect(page.getByRole("tab", { name: "频道" })).toBeFocused();
+  await expect(page).toHaveURL(/type=channel/);
+  await page.getByRole("tab", { name: "频道" }).press("Home");
+  await expect(page.getByRole("tab", { name: "全部" })).toBeFocused();
+});
+
+test("phase 7 channel UI ignores stale kind responses and search UI syncs URL input", async ({ page }) => {
+  let markOfficialStarted!: () => void;
+  const officialStarted = new Promise<void>((resolve) => {
+    markOfficialStarted = resolve;
+  });
+  await page.route("**/api/channels?*", async (route) => {
+    const kind = new URL(route.request().url()).searchParams.get("kind");
+    if (kind === "official") {
+      markOfficialStarted();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+    const creator = kind === "creator";
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        channels: [{
+          slug: creator ? "current-creator" : "stale-official",
+          name: creator ? "Current Creator Result" : "Stale Official Result",
+          description: "Safe private summary fixture.",
+          kind: creator ? "creator" : "official",
+          visibility: "private",
+          discoverability: "discoverable",
+          status: "active"
+        }],
+        nextCursor: null
+      })
+    });
+  });
+
+  await page.goto("/channels");
+  await page.getByRole("button", { name: "官方" }).click();
+  await officialStarted;
+  await page.getByRole("button", { name: "创作者" }).click();
+  await expect(page.getByText("Current Creator Result")).toBeVisible();
+  await expect(page.getByText("Stale Official Result")).toHaveCount(0);
+
+  await page.goto("/search?q=yuki");
+  await expect(page.getByRole("textbox", { name: "搜索关键词" })).toHaveValue("yuki");
+  await page.goto("/search?q=cosplay&type=channel");
+  await expect(page.getByRole("textbox", { name: "搜索关键词" })).toHaveValue("cosplay");
 });
 
 test("phase 7 channel UI renders safe cards and a member-only private feed", async ({ page, request }, testInfo) => {
@@ -3125,6 +3179,13 @@ test("phase 7 channel UI renders safe cards and a member-only private feed", asy
   await page.goto("/channels/private-curators");
   await expect(page.getByRole("button", { name: "申请加入频道" })).toBeVisible();
   await expect(page.getByTestId("channel-feed")).toHaveCount(0);
+  if (testInfo.project.name === "mobile") {
+    const width = page.viewportSize()!.width;
+    const actionBox = await page.getByRole("button", { name: "申请加入频道" }).boundingBox();
+    expect(actionBox).not.toBeNull();
+    expect(actionBox!.x).toBeGreaterThanOrEqual(0);
+    expect(actionBox!.x + actionBox!.width).toBeLessThanOrEqual(width + 1);
+  }
   await page.route("**/api/channels/private-curators/join-requests", async (route) => {
     await route.fulfill({
       status: 500,
@@ -3183,32 +3244,130 @@ test("phase 7 channel UI returns not-found for an anonymous hidden private chann
   }
 });
 
-test("phase 7 search UI filters typed results and appends a stable cursor page", async ({ page, request }, testInfo) => {
+test("phase 7 channel UI and search UI preserve complete ordered cursor pages", async ({ page, request, browser }, testInfo) => {
   test.skip(!(await hasDatabase(request)), "Phase 7 search UI requires the seeded PostgreSQL database.");
+  const nonce = `${testInfo.project.name}-${Date.now().toString(36)}`;
+  const query = `uituple${Date.now().toString(36)}`;
+  const fixtureChannels = Array.from({ length: 22 }, (_, index) => ({
+    id: `phase7-ui-page-${nonce}-${index}`,
+    slug: `phase7-ui-page-${nonce}-${index}`.slice(0, 50),
+    name: `UI Page ${index.toString().padStart(2, "0")}`,
+    description: `${query} deterministic directory pagination fixture ${index}.`,
+    kind: "creator",
+    visibility: "public",
+    discoverability: "discoverable",
+    status: "active",
+    ownerUserId: "c2",
+    createdByUserId: "c2",
+    createdAt: new Date(Date.now() + (30 - index) * 1000)
+  }));
+  const indexedChannels = fixtureChannels.slice(0, 9);
 
-  await page.goto("/search?q=yuki");
-  await expect(page.getByRole("heading", { name: "统一搜索" })).toBeVisible();
-  await expect(page.getByTestId("search-result").first()).toBeVisible();
-  await page.getByRole("tab", { name: "创作者" }).click();
-  await expect(page).toHaveURL(/type=creator/);
-  await expect(page.getByTestId("search-result").first()).toHaveAttribute("data-result-type", "creator");
+  await prisma.channel.createMany({ data: fixtureChannels });
 
-  await page.goto("/search?q=cosplay");
-  const firstResult = page.getByTestId("search-result").first();
-  await expect(firstResult).toBeVisible();
-  const before = await firstResult.boundingBox();
-  const beforeCount = await page.getByTestId("search-result").count();
-  const loadMore = page.getByRole("button", { name: "加载更多搜索结果" });
-  if (await loadMore.count()) {
-    await loadMore.click();
-    await expect.poll(() => page.getByTestId("search-result").count()).toBeGreaterThan(beforeCount);
-    const after = await firstResult.boundingBox();
-    expect(after?.y).toBe(before?.y);
-  }
+  try {
+    await prisma.searchDocument.createMany({
+      data: indexedChannels.map((channel, index) => ({
+        entityType: "channel",
+        entityId: channel.id,
+        title: `${query} channel ${index}`,
+        body: `Deterministic ${query} search pagination result ${index}.`,
+        keywords: `${query} channel`,
+        popularityScore: 0,
+        publishedAt: channel.createdAt
+      }))
+    });
+    const expectedDirectory: string[] = [];
+    let directoryCursor: string | null = null;
+    do {
+      const params = new URLSearchParams({ kind: "creator", limit: "20" });
+      if (directoryCursor) params.set("cursor", directoryCursor);
+      const response = await request.get(`/api/channels?${params}`);
+      expect(response.ok(), await response.text()).toBeTruthy();
+      const body = await response.json();
+      expectedDirectory.push(...body.channels.map((channel: { slug: string }) => channel.slug));
+      directoryCursor = body.nextCursor;
+    } while (directoryCursor);
 
-  if (testInfo.project.name === "mobile") {
-    const viewportWidth = page.viewportSize()?.width ?? 393;
-    const bodyWidth = await page.locator("body").evaluate((body) => body.scrollWidth);
-    expect(bodyWidth).toBeLessThanOrEqual(viewportWidth);
+    await page.goto("/channels");
+    await page.getByRole("button", { name: "创作者" }).click();
+    await expect(page.getByTestId("channel-card").first()).toBeVisible();
+    while (await page.getByRole("button", { name: "加载更多频道" }).count()) {
+      const beforeCount = await page.getByTestId("channel-card").count();
+      await page.getByRole("button", { name: "加载更多频道" }).click();
+      await expect.poll(() => page.getByTestId("channel-card").count()).toBeGreaterThan(beforeCount);
+    }
+    const actualDirectory = await page.getByTestId("channel-card")
+      .evaluateAll((cards) => cards.map((card) => card.getAttribute("data-channel-slug")));
+    expect(actualDirectory).toEqual(expectedDirectory);
+    expect(new Set(actualDirectory).size).toBe(actualDirectory.length);
+    if (testInfo.project.name === "mobile") {
+      const width = page.viewportSize()!.width;
+      const cardBox = await page.getByTestId("channel-card").first().boundingBox();
+      expect(cardBox).not.toBeNull();
+      expect(cardBox!.x).toBeGreaterThanOrEqual(0);
+      expect(cardBox!.x + cardBox!.width).toBeLessThanOrEqual(width + 1);
+    }
+
+    const expectedSearch: string[] = [];
+    let searchCursor: string | null = null;
+    do {
+      const params = new URLSearchParams({ q: query, type: "channel", limit: "6" });
+      if (searchCursor) params.set("cursor", searchCursor);
+      const response = await request.get(`/api/search?${params}`);
+      expect(response.ok(), await response.text()).toBeTruthy();
+      const body = await response.json();
+      expectedSearch.push(...body.results.map((result: { entityId: string }) => result.entityId));
+      searchCursor = body.nextCursor;
+    } while (searchCursor);
+
+    await page.goto(`/search?q=${query}&type=channel`);
+    const firstResult = page.getByTestId("search-result").first();
+    await expect(firstResult).toBeVisible();
+    const before = await firstResult.boundingBox();
+    while (await page.getByRole("button", { name: "加载更多搜索结果" }).count()) {
+      const beforeCount = await page.getByTestId("search-result").count();
+      await page.getByRole("button", { name: "加载更多搜索结果" }).click();
+      await expect.poll(() => page.getByTestId("search-result").count()).toBeGreaterThan(beforeCount);
+    }
+    const actualSearch = await page.getByTestId("search-result")
+      .evaluateAll((results) => results.map((result) => result.getAttribute("data-result-id")));
+    expect(actualSearch).toEqual(expectedSearch);
+    expect(new Set(actualSearch).size).toBe(actualSearch.length);
+    expect((await firstResult.boundingBox())?.y).toBe(before?.y);
+
+    const noScriptContext = await browser.newContext({ javaScriptEnabled: false });
+    const noScriptPage = await noScriptContext.newPage();
+    try {
+      const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3001";
+      await noScriptPage.goto(`${baseURL}/channels`);
+      await expect(noScriptPage.locator(`[data-channel-slug="${fixtureChannels[0].slug}"]`)).toBeVisible();
+      await noScriptPage.goto(`${baseURL}/search?q=${query}&type=channel`);
+      await expect(noScriptPage.locator(`[data-result-id="${indexedChannels[0].id}"]`)).toBeVisible();
+    } finally {
+      await noScriptContext.close();
+    }
+
+    if (testInfo.project.name === "mobile") {
+      const viewportWidth = page.viewportSize()?.width ?? 393;
+      const widths = await page.locator("html").evaluate((html) => ({
+        scrollWidth: html.scrollWidth,
+        clientWidth: html.clientWidth
+      }));
+      expect(widths.scrollWidth).toBe(widths.clientWidth);
+      expect(widths.clientWidth).toBe(viewportWidth);
+      for (const locator of [
+        page.getByRole("tablist", { name: "搜索结果类型" }),
+        page.getByTestId("search-result").first()
+      ]) {
+        const box = await locator.boundingBox();
+        expect(box).not.toBeNull();
+        expect(box!.x).toBeGreaterThanOrEqual(0);
+        expect(box!.x + box!.width).toBeLessThanOrEqual(viewportWidth + 1);
+      }
+    }
+  } finally {
+    await prisma.searchDocument.deleteMany({ where: { entityId: { in: fixtureChannels.map(({ id }) => id) } } });
+    await prisma.channel.deleteMany({ where: { id: { in: fixtureChannels.map(({ id }) => id) } } });
   }
 });
