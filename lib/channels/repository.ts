@@ -4,12 +4,16 @@ import { prisma } from "@/lib/prisma";
 import { getChannelAccess, resolveChannelAccess } from "./auth";
 import {
   createChannelInvitationToken,
+  encodeChannelMemberCursor,
   hashChannelInvitationToken,
+  normalizeChannelMemberListInput,
   normalizeChannelInvitationEmail,
-  resolveInvitationAcceptance,
+  resolveInvitationMutationTransition,
+  resolveMembershipMutationVisibility,
   resolveMembershipReviewTransition,
   resolveMembershipUpdateTransition,
   type ChannelInvitationStatus,
+  type ChannelMemberCursor,
   type MembershipReviewDecision,
   type MembershipUpdateInput
 } from "./membership";
@@ -325,6 +329,18 @@ export function channelFeedAfterPredicate(cursor: ChannelCursor): Prisma.Channel
   };
 }
 
+export function channelMemberAfterPredicate(
+  cursor: ChannelMemberCursor
+): Prisma.ChannelMembershipWhereInput {
+  const createdAt = new Date(cursor.createdAt);
+  return {
+    OR: [
+      { createdAt: { gt: createdAt } },
+      { createdAt, id: { gt: cursor.id } }
+    ]
+  };
+}
+
 export function isChannelSelfReview(actorUserId: string, ownerUserId: string): boolean {
   return actorUserId === ownerUserId;
 }
@@ -354,6 +370,26 @@ export async function retrySerializableOperation<T>(
     }
   }
   throw new ChannelRepositoryError("Serializable transaction retry failed.", 409);
+}
+
+export async function retryMembershipSerializableOperation<T>(
+  operation: () => Promise<T>,
+  maxAttempts = 3
+): Promise<T> {
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 5) {
+    throw new TypeError("Serializable transaction attempts must be between 1 and 5.");
+  }
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isSerializableConflict(error)) throw error;
+      if (attempt === maxAttempts) {
+        conflict("Channel membership operation conflicted with another update. Please retry.");
+      }
+    }
+  }
+  throw new ChannelRepositoryError("Serializable membership retry failed.", 409);
 }
 
 export async function getCreatorChannelQuota(userId: string): Promise<{
@@ -1360,12 +1396,29 @@ export async function requestChannelMembership(
   actorUserId: string,
   slug: string
 ): Promise<ChannelMembershipDto> {
-  return prisma.$transaction(async (tx) => {
+  return retryMembershipSerializableOperation(() => prisma.$transaction(async (tx) => {
     const channel = await tx.channel.findUnique({
       where: { slug },
-      select: { id: true, status: true, visibility: true, discoverability: true }
+      select: {
+        id: true,
+        status: true,
+        visibility: true,
+        discoverability: true,
+        memberships: {
+          where: { userId: actorUserId, status: "active", user: { status: "active" } },
+          select: { id: true },
+          take: 1
+        }
+      }
     });
-    if (!channel || channel.discoverability === "hidden") notFound();
+    resolveMembershipMutationVisibility("join", {
+      exists: Boolean(channel),
+      status: channel?.status ?? null,
+      visibility: channel?.visibility ?? null,
+      discoverability: channel?.discoverability ?? null,
+      hasMembership: Boolean(channel?.memberships.length)
+    });
+    if (!channel) notFound();
     if (channel.status !== "active") conflict("This channel is not accepting join requests.");
     if (channel.visibility !== "private") conflict("Public channels do not require membership requests.");
 
@@ -1409,24 +1462,42 @@ export async function requestChannelMembership(
       }
     });
     return mapMembership(membership);
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
 }
 
 export async function listChannelMembers(
   actorUserId: string,
-  channelId: string
-): Promise<ChannelMembershipDto[]> {
+  channelId: string,
+  input: { cursor?: string; limit?: number } = {}
+): Promise<{ memberships: ChannelMembershipDto[]; nextCursor: string | null }> {
+  const { cursor, limit } = normalizeChannelMemberListInput(input, channelId);
   return prisma.$transaction(async (tx) => {
     await requireMembershipManager(tx, actorUserId, channelId, true);
-    const memberships = await tx.channelMembership.findMany({
-      where: { channelId },
-      orderBy: [{ role: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+    const rows = await tx.channelMembership.findMany({
+      where: cursor
+        ? { AND: [{ channelId }, channelMemberAfterPredicate(cursor)] }
+        : { channelId },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: limit + 1,
       select: {
         ...channelMembershipSelect,
         user: { select: { id: true, name: true, handle: true, avatar: true } }
       }
     });
-    return memberships.map(mapMembership);
+    const hasMore = rows.length > limit;
+    if (hasMore) rows.pop();
+    const last = rows.at(-1);
+    return {
+      memberships: rows.map(mapMembership),
+      nextCursor: hasMore && last
+        ? encodeChannelMemberCursor({
+            scope: "channel-members",
+            channelId,
+            createdAt: last.createdAt.toISOString(),
+            id: last.id
+          })
+        : null
+    };
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 }
 
@@ -1436,7 +1507,7 @@ export async function reviewChannelMembership(
   membershipId: string,
   decision: MembershipReviewDecision
 ): Promise<ChannelMembershipDto> {
-  return prisma.$transaction(async (tx) => {
+  return retryMembershipSerializableOperation(() => prisma.$transaction(async (tx) => {
     await requireMembershipManager(tx, actorUserId, channelId, false);
     const membership = await tx.channelMembership.findFirst({
       where: { id: membershipId, channelId },
@@ -1475,7 +1546,7 @@ export async function reviewChannelMembership(
       }
     });
     return mapMembership(updated);
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
 }
 
 export async function updateChannelMembership(
@@ -1484,7 +1555,7 @@ export async function updateChannelMembership(
   membershipId: string,
   input: MembershipUpdateInput
 ): Promise<ChannelMembershipDto> {
-  return prisma.$transaction(async (tx) => {
+  return retryMembershipSerializableOperation(() => prisma.$transaction(async (tx) => {
     const channel = await requireMembershipManager(tx, actorUserId, channelId, false);
     const membership = await tx.channelMembership.findFirst({
       where: { id: membershipId, channelId },
@@ -1527,17 +1598,35 @@ export async function updateChannelMembership(
       }
     });
     return mapMembership(updated);
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
 }
 
 export async function leaveChannelMembership(
   actorUserId: string,
   slug: string
 ): Promise<{ membership: ChannelMembershipDto | null; changed: boolean }> {
-  return prisma.$transaction(async (tx) => {
+  return retryMembershipSerializableOperation(() => prisma.$transaction(async (tx) => {
     const channel = await tx.channel.findUnique({
       where: { slug },
-      select: { id: true, ownerUserId: true }
+      select: {
+        id: true,
+        ownerUserId: true,
+        status: true,
+        visibility: true,
+        discoverability: true,
+        memberships: {
+          where: { userId: actorUserId, status: "active", user: { status: "active" } },
+          select: { id: true },
+          take: 1
+        }
+      }
+    });
+    resolveMembershipMutationVisibility("leave", {
+      exists: Boolean(channel),
+      status: channel?.status ?? null,
+      visibility: channel?.visibility ?? null,
+      discoverability: channel?.discoverability ?? null,
+      hasMembership: Boolean(channel?.memberships.length)
     });
     if (!channel) notFound();
     const membership = await tx.channelMembership.findUnique({
@@ -1571,7 +1660,7 @@ export async function leaveChannelMembership(
       }
     });
     return { membership: mapMembership(updated), changed: true };
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
 }
 
 export async function createChannelInvitation(
@@ -1580,10 +1669,10 @@ export async function createChannelInvitation(
   emailValue: string
 ): Promise<{ invitation: ChannelInvitationDto; token: string }> {
   const email = normalizeChannelInvitationEmail(emailValue);
-  const { token, tokenHash } = createChannelInvitationToken();
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-
-  const invitation = await prisma.$transaction(async (tx) => {
+  return retryMembershipSerializableOperation(async () => {
+    const { token, tokenHash } = createChannelInvitationToken();
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const invitation = await prisma.$transaction(async (tx) => {
     await requireMembershipManager(tx, actorUserId, channelId, false);
     const channel = await tx.channel.findUnique({
       where: { id: channelId },
@@ -1609,7 +1698,7 @@ export async function createChannelInvitation(
       conflict("The channel owner cannot be invited.");
     }
 
-    await tx.channelInvitation.updateMany({
+    const revoked = await tx.channelInvitation.updateMany({
       where: { channelId, email, status: "pending" },
       data: { status: "revoked" }
     });
@@ -1674,10 +1763,44 @@ export async function createChannelInvitation(
         metadata: { channelId, status: "pending", expiresAt: expiresAt.toISOString() }
       }
     });
+    if (revoked.count > 0) {
+      await tx.auditLog.create({
+        data: {
+          actorUserId,
+          actorRole: "owner",
+          action: "channel.invitation_revoke",
+          targetType: "channel_invitation",
+          targetId: created.id,
+          metadata: { channelId, status: "revoked", revokedCount: revoked.count }
+        }
+      });
+    }
     return created;
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    return { invitation: mapInvitation(invitation), token };
+  });
+}
 
-  return { invitation: mapInvitation(invitation), token };
+async function persistExpiredInvitation(
+  tx: Prisma.TransactionClient,
+  invitation: { id: string; channelId: string },
+  actorUserId: string
+) {
+  const expired = await tx.channelInvitation.updateMany({
+    where: { id: invitation.id, status: "pending" },
+    data: { status: "expired" }
+  });
+  if (expired.count !== 1) throw { code: "P2034" };
+  await tx.auditLog.create({
+    data: {
+      actorUserId,
+      actorRole: "member",
+      action: "channel.invitation_expire",
+      targetType: "channel_invitation",
+      targetId: invitation.id,
+      metadata: { channelId: invitation.channelId, status: "expired" }
+    }
+  });
 }
 
 export async function acceptChannelInvitation(
@@ -1685,7 +1808,7 @@ export async function acceptChannelInvitation(
   token: string
 ): Promise<{ invitation: ChannelInvitationDto; membership: ChannelMembershipDto }> {
   const tokenHash = hashChannelInvitationToken(token);
-  const result = await prisma.$transaction(async (tx) => {
+  const result = await retryMembershipSerializableOperation(() => prisma.$transaction(async (tx) => {
     const invitation = await tx.channelInvitation.findUnique({
       where: { tokenHash },
       select: {
@@ -1696,22 +1819,6 @@ export async function acceptChannelInvitation(
     if (!invitation) throw new ChannelRepositoryError("Invitation not found.", 404);
     if (normalizeChannelInvitationEmail(actor.email) !== normalizeChannelInvitationEmail(invitation.email)) {
       denied("Invitation email does not match the authenticated user.");
-    }
-    if (invitation.status === "pending" && invitation.expiresAt.getTime() <= Date.now()) {
-      const expired = await tx.channelInvitation.update({
-        where: { id: invitation.id },
-        data: { status: "expired" },
-        select: channelInvitationSelect
-      });
-      return { failure: "Invitation is expired.", invitation: expired } as const;
-    }
-    resolveInvitationAcceptance({
-      status: invitation.status as ChannelInvitationStatus,
-      email: invitation.email,
-      expiresAt: invitation.expiresAt
-    }, actor.email);
-    if (invitation.channel.status !== "active" || invitation.channel.visibility !== "private") {
-      conflict("Invitation channel is not active and private.");
     }
 
     const user = await tx.user.findUnique({
@@ -1725,11 +1832,32 @@ export async function acceptChannelInvitation(
     ) {
       denied("Invitation email does not match the authenticated user.");
     }
+    const transition = resolveInvitationMutationTransition({
+      status: invitation.status as ChannelInvitationStatus,
+      expiresAt: invitation.expiresAt
+    }, "accept");
+    if (transition.status === "expired" && transition.changed) {
+      await persistExpiredInvitation(tx, invitation, actor.id);
+      return {
+        ok: false,
+        error: transition.conflict ?? "Invitation is expired."
+      } as const;
+    }
+    if (transition.conflict) conflict(transition.conflict);
+    if (invitation.channel.status !== "active" || invitation.channel.visibility !== "private") {
+      conflict("Invitation channel is not active and private.");
+    }
+
     const existing = await tx.channelMembership.findUnique({
       where: { channelId_userId: { channelId: invitation.channelId, userId: actor.id } },
       select: channelMembershipSelect
     });
     if (existing?.role === "owner") conflict("The channel owner cannot accept a member invitation.");
+    const claimed = await tx.channelInvitation.updateMany({
+      where: { id: invitation.id, status: "pending" },
+      data: { status: "accepted", acceptedByUserId: actor.id }
+    });
+    if (claimed.count !== 1) throw { code: "P2034" };
     const role = existing?.status === "active" && existing.role === "editor" ? "editor" : "member";
     const membership = await tx.channelMembership.upsert({
       where: { channelId_userId: { channelId: invitation.channelId, userId: actor.id } },
@@ -1751,9 +1879,8 @@ export async function acceptChannelInvitation(
       },
       select: channelMembershipSelect
     });
-    const accepted = await tx.channelInvitation.update({
+    const accepted = await tx.channelInvitation.findUniqueOrThrow({
       where: { id: invitation.id },
-      data: { status: "accepted", acceptedByUserId: actor.id },
       select: channelInvitationSelect
     });
     await tx.auditLog.create({
@@ -1771,11 +1898,11 @@ export async function acceptChannelInvitation(
         }
       }
     });
-    return { invitation: accepted, membership } as const;
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    return { ok: true, invitation: accepted, membership } as const;
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
 
-  if ("failure" in result && typeof result.failure === "string") {
-    throw new ChannelRepositoryError(result.failure, 409);
+  if (!result.ok) {
+    throw new ChannelRepositoryError(result.error, 409);
   }
   return {
     invitation: mapInvitation(result.invitation),
@@ -1788,7 +1915,7 @@ export async function rejectChannelInvitation(
   token: string
 ): Promise<{ invitation: ChannelInvitationDto }> {
   const tokenHash = hashChannelInvitationToken(token);
-  const invitation = await prisma.$transaction(async (tx) => {
+  const result = await retryMembershipSerializableOperation(() => prisma.$transaction(async (tx) => {
     const current = await tx.channelInvitation.findUnique({
       where: { tokenHash },
       select: channelInvitationSelect
@@ -1797,14 +1924,38 @@ export async function rejectChannelInvitation(
     if (normalizeChannelInvitationEmail(actor.email) !== normalizeChannelInvitationEmail(current.email)) {
       denied("Invitation email does not match the authenticated user.");
     }
-    if (current.status !== "pending") conflict(`Invitation is ${current.status}.`);
-    if (current.expiresAt.getTime() <= Date.now()) conflict("Invitation is expired.");
-
-    const rejected = await tx.channelInvitation.update({
-      where: { id: current.id },
-      data: { status: "rejected" },
-      select: channelInvitationSelect
+    const user = await tx.user.findUnique({
+      where: { id: actor.id },
+      select: { email: true, status: true }
     });
+    if (
+      !user
+      || user.status !== "active"
+      || normalizeChannelInvitationEmail(user.email) !== normalizeChannelInvitationEmail(current.email)
+    ) {
+      denied("Invitation email does not match the authenticated user.");
+    }
+    const transition = resolveInvitationMutationTransition({
+      status: current.status as ChannelInvitationStatus,
+      expiresAt: current.expiresAt
+    }, "reject");
+    if (transition.status === "expired" && transition.changed) {
+      await persistExpiredInvitation(tx, current, actor.id);
+      return {
+        ok: false,
+        error: transition.conflict ?? "Invitation is expired."
+      } as const;
+    }
+    if (transition.conflict) conflict(transition.conflict);
+    if (!transition.changed && transition.status === "rejected") {
+      return { ok: true, invitation: current } as const;
+    }
+
+    const claimed = await tx.channelInvitation.updateMany({
+      where: { id: current.id, status: "pending" },
+      data: { status: "rejected" },
+    });
+    if (claimed.count !== 1) throw { code: "P2034" };
     if (current.invitedUserId === actor.id) {
       const membership = await tx.channelMembership.findUnique({
         where: {
@@ -1851,7 +2002,14 @@ export async function rejectChannelInvitation(
         metadata: { channelId: current.channelId, status: "rejected" }
       }
     });
-    return rejected;
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-  return { invitation: mapInvitation(invitation) };
+    const rejected = await tx.channelInvitation.findUniqueOrThrow({
+      where: { id: current.id },
+      select: channelInvitationSelect
+    });
+    return { ok: true, invitation: rejected } as const;
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
+  if (!result.ok) {
+    throw new ChannelRepositoryError(result.error, 409);
+  }
+  return { invitation: mapInvitation(result.invitation) };
 }

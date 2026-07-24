@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import {
   channelRouteError,
   readChannelJson,
-  requireEmptyChannelMutation
+  requireEmptyChannelMutation,
+  requireEmptyChannelQuery
 } from "@/lib/channels/http";
 import { leaveChannelMembership } from "@/lib/channels/repository";
 import { assertNoChannelIdentityOverrides, normalizeChannelSlug } from "@/lib/channels/types";
@@ -18,7 +19,9 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ s
   if (!session.ok) return session.response;
   try {
     const input = await readChannelJson(request, true);
-    assertNoChannelIdentityOverrides(input, new URL(request.url).searchParams);
+    const searchParams = new URL(request.url).searchParams;
+    assertNoChannelIdentityOverrides(input, searchParams);
+    requireEmptyChannelQuery(searchParams);
     requireEmptyChannelMutation(input);
     return NextResponse.json(await leaveChannelMembership(
       session.user.id,

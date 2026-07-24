@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { channelRouteError, readChannelJson } from "@/lib/channels/http";
+import { channelRouteError, readChannelJson, requireEmptyChannelQuery } from "@/lib/channels/http";
 import { validateMembershipUpdateInput } from "@/lib/channels/membership";
 import { updateChannelMembership } from "@/lib/channels/repository";
 import { assertNoChannelIdentityOverrides } from "@/lib/channels/types";
@@ -17,7 +17,9 @@ export async function PATCH(request: Request, { params }: Context) {
   if (!session.ok) return session.response;
   try {
     const input = await readChannelJson(request);
-    assertNoChannelIdentityOverrides(input, new URL(request.url).searchParams);
+    const searchParams = new URL(request.url).searchParams;
+    assertNoChannelIdentityOverrides(input, searchParams);
+    requireEmptyChannelQuery(searchParams);
     const route = await params;
     const membership = await updateChannelMembership(
       session.user.id,

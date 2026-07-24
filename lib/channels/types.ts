@@ -217,8 +217,8 @@ export function assertNoChannelIdentityOverrides(
 function isChannelIdentityKey(value: string): boolean {
   const normalized = value.replace(/[^a-z0-9]/gi, "").toLowerCase();
   if (normalized === "email" || normalized.endsWith("email")) return true;
-  if (!normalized.endsWith("id")) return false;
-  return [
+  if (normalized.endsWith("assetid")) return false;
+  const markers = [
     "user",
     "actor",
     "owner",
@@ -229,7 +229,10 @@ function isChannelIdentityKey(value: string): boolean {
     "createdby",
     "invitedby",
     "acceptedby"
-  ].some((marker) => normalized.includes(marker));
+  ];
+  if (markers.includes(normalized)) return true;
+  if (normalized.startsWith("newowner") || normalized.startsWith("targetuser")) return true;
+  return normalized.endsWith("id") && markers.some((marker) => normalized.includes(marker));
 }
 
 export function resolveChannelLifecycleTransition(

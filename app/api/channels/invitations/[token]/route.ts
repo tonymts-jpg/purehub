@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import {
   channelRouteError,
   readChannelJson,
-  requireEmptyChannelMutation
+  requireEmptyChannelMutation,
+  requireEmptyChannelQuery
 } from "@/lib/channels/http";
 import { channelMembershipRateLimit } from "@/lib/channels/membership";
 import {
@@ -25,7 +26,9 @@ async function invitationMutation(request: Request, { params }: Context, action:
   if (!session.ok) return session.response;
   try {
     const input = await readChannelJson(request, true);
-    assertNoChannelIdentityOverrides(input, new URL(request.url).searchParams);
+    const searchParams = new URL(request.url).searchParams;
+    assertNoChannelIdentityOverrides(input, searchParams);
+    requireEmptyChannelQuery(searchParams);
     requireEmptyChannelMutation(input);
     const policy = channelMembershipRateLimit("invite-accept", session.user.id);
     if (!(await consumeRateLimit(policy.scope, policy.subject, policy.limit, policy.windowSeconds))) {

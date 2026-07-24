@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
-import { channelRouteError, readChannelJson } from "@/lib/channels/http";
+import {
+  channelRouteError,
+  readChannelJson,
+  requireEmptyChannelQuery
+} from "@/lib/channels/http";
 import {
   listChannelMembers,
   reviewChannelMembership
@@ -17,8 +21,16 @@ export async function GET(request: Request, { params }: Context) {
   const session = await requireUser(request);
   if (!session.ok) return session.response;
   try {
-    const memberships = await listChannelMembers(session.user.id, (await params).id);
-    return NextResponse.json({ memberships });
+    const channelId = (await params).id;
+    const searchParams = new URL(request.url).searchParams;
+    assertNoChannelIdentityOverrides({}, searchParams);
+    requireEmptyChannelQuery(searchParams, ["cursor", "limit"]);
+    const cursor = searchParams.get("cursor") ?? undefined;
+    const rawLimit = searchParams.get("limit");
+    return NextResponse.json(await listChannelMembers(session.user.id, channelId, {
+      ...(cursor ? { cursor } : {}),
+      ...(rawLimit !== null ? { limit: Number(rawLimit) } : {})
+    }));
   } catch (error) {
     return channelRouteError(error);
   }
@@ -31,7 +43,9 @@ export async function POST(request: Request, { params }: Context) {
   if (!session.ok) return session.response;
   try {
     const input = await readChannelJson(request);
-    assertNoChannelIdentityOverrides(input, new URL(request.url).searchParams);
+    const searchParams = new URL(request.url).searchParams;
+    assertNoChannelIdentityOverrides(input, searchParams);
+    requireEmptyChannelQuery(searchParams);
     const review = validateMembershipReviewInput(input);
     const membership = await reviewChannelMembership(
       session.user.id,

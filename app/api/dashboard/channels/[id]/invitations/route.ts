@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { channelRouteError, readChannelJson } from "@/lib/channels/http";
+import { channelRouteError, readChannelJson, requireEmptyChannelQuery } from "@/lib/channels/http";
 import {
   channelMembershipRateLimit,
   validateChannelInvitationInput
@@ -19,7 +19,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   if (!session.ok) return session.response;
   try {
     const input = await readChannelJson(request);
-    assertNoChannelIdentityOverrides(input, new URL(request.url).searchParams, { allowBody: ["email"] });
+    const searchParams = new URL(request.url).searchParams;
+    assertNoChannelIdentityOverrides(input, searchParams, { allowBody: ["email"] });
+    requireEmptyChannelQuery(searchParams);
     const validated = validateChannelInvitationInput(input);
     const policy = channelMembershipRateLimit("invite", session.user.id);
     if (!(await consumeRateLimit(policy.scope, policy.subject, policy.limit, policy.windowSeconds))) {

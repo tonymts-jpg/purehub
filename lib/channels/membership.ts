@@ -16,10 +16,17 @@ export type MembershipUpdateInput = {
   status?: "active" | "removed";
 };
 
+export type ChannelMemberCursor = {
+  scope: "channel-members";
+  channelId: string;
+  createdAt: string;
+  id: string;
+};
+
 export class ChannelMembershipError extends Error {
   constructor(
     message: string,
-    readonly status: 403 | 409
+    readonly status: 403 | 404 | 409
   ) {
     super(message);
     this.name = "ChannelMembershipError";
@@ -34,6 +41,12 @@ function requiredId(value: unknown, field: string): string {
   const id = typeof value === "string" ? value.trim() : "";
   if (!id || id.length > 191) throw new TypeError(`${field} must be a non-empty ID.`);
   return id;
+}
+
+function isIsoDate(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) && date.toISOString() === value;
 }
 
 export function normalizeChannelInvitationEmail(value: unknown): string {
@@ -160,13 +173,135 @@ export function resolveInvitationAcceptance(
   if (normalizeChannelInvitationEmail(sessionEmail) !== normalizeChannelInvitationEmail(invitation.email)) {
     throw new ChannelMembershipError("Invitation email does not match the authenticated user.", 403);
   }
+  const transition = resolveInvitationMutationTransition(invitation, "accept", now);
+  if (transition.conflict) throw new ChannelMembershipError(transition.conflict, 409);
+  return { status: "accepted", changed: true };
+}
+
+export function resolveInvitationMutationTransition(
+  invitation: { status: ChannelInvitationStatus; expiresAt: Date },
+  action: "accept" | "reject",
+  now = new Date()
+): {
+  status: ChannelInvitationStatus;
+  changed: boolean;
+  conflict: string | null;
+} {
+  if (action === "reject" && invitation.status === "rejected") {
+    return { status: "rejected", changed: false, conflict: null };
+  }
   if (invitation.status !== "pending") {
-    throw new ChannelMembershipError(`Invitation is ${invitation.status}.`, 409);
+    return {
+      status: invitation.status,
+      changed: false,
+      conflict: `Invitation is ${invitation.status}.`
+    };
   }
   if (invitation.expiresAt.getTime() <= now.getTime()) {
-    throw new ChannelMembershipError("Invitation is expired.", 409);
+    return { status: "expired", changed: true, conflict: "Invitation is expired." };
   }
-  return { status: "accepted", changed: true };
+  return {
+    status: action === "accept" ? "accepted" : "rejected",
+    changed: true,
+    conflict: null
+  };
+}
+
+export function resolveMembershipMutationVisibility(
+  action: "join" | "leave",
+  channel: {
+    exists: boolean;
+    status: string | null;
+    visibility: string | null;
+    discoverability: string | null;
+    hasMembership: boolean;
+  }
+): { allowed: true } {
+  if (!channel.exists) {
+    throw new ChannelMembershipError("Channel not found.", 404);
+  }
+  const publiclyVisible = channel.status === "active"
+    && (
+      channel.visibility === "public"
+      || (channel.visibility === "private" && channel.discoverability === "discoverable")
+    );
+  if (!channel.hasMembership && !publiclyVisible) {
+    throw new ChannelMembershipError("Channel not found.", 404);
+  }
+  if (
+    action === "join"
+    && !channel.hasMembership
+    && (
+      channel.status !== "active"
+      || channel.visibility !== "private"
+      || channel.discoverability !== "discoverable"
+    )
+  ) {
+    throw new ChannelMembershipError("Channel not found.", 404);
+  }
+  return { allowed: true };
+}
+
+export function parseChannelMemberCursor(
+  value?: string,
+  expectedChannelId?: string
+): ChannelMemberCursor | null {
+  if (!value) return null;
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    if (
+      typeof parsed !== "object"
+      || parsed === null
+      || Array.isArray(parsed)
+      || !("scope" in parsed)
+      || parsed.scope !== "channel-members"
+      || !("channelId" in parsed)
+      || typeof parsed.channelId !== "string"
+      || !parsed.channelId
+      || !("createdAt" in parsed)
+      || !isIsoDate(parsed.createdAt)
+      || !("id" in parsed)
+      || typeof parsed.id !== "string"
+      || !parsed.id
+    ) {
+      return null;
+    }
+    if (expectedChannelId && parsed.channelId !== expectedChannelId) {
+      throw new TypeError("Membership cursor does not belong to this resource.");
+    }
+    return {
+      scope: "channel-members",
+      channelId: parsed.channelId,
+      createdAt: parsed.createdAt,
+      id: parsed.id
+    };
+  } catch (error) {
+    if (error instanceof TypeError && error.message.includes("resource")) throw error;
+    return null;
+  }
+}
+
+export function encodeChannelMemberCursor(cursor: ChannelMemberCursor): string {
+  const encoded = Buffer.from(JSON.stringify(cursor)).toString("base64url");
+  if (!parseChannelMemberCursor(encoded, cursor.channelId)) {
+    throw new TypeError("Membership cursor is invalid.");
+  }
+  return encoded;
+}
+
+export function normalizeChannelMemberListInput(
+  input: { cursor?: string; limit?: number },
+  channelId: string
+): { cursor: ChannelMemberCursor | null; limit: number } {
+  const limit = input.limit ?? 20;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
+    throw new TypeError("Membership limit must be an integer between 1 and 50.");
+  }
+  const cursor = input.cursor
+    ? parseChannelMemberCursor(input.cursor, channelId)
+    : null;
+  if (input.cursor && !cursor) throw new TypeError("Membership cursor is invalid.");
+  return { cursor, limit };
 }
 
 export function channelMembershipRateLimit(

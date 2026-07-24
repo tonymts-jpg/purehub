@@ -28,6 +28,15 @@ export function requireEmptyChannelMutation(input: unknown): void {
   if (fields.length) throw new TypeError(`This mutation does not accept ${fields[0]}.`);
 }
 
+export function requireEmptyChannelQuery(
+  searchParams: URLSearchParams,
+  allowed: readonly string[] = []
+): void {
+  const allowedFields = new Set(allowed);
+  const field = Array.from(searchParams.keys()).find((candidate) => !allowedFields.has(candidate));
+  if (field) throw new TypeError(`This request does not accept the ${field} query parameter.`);
+}
+
 export function channelListInput(request: Request): ListChannelsInput {
   const searchParams = new URL(request.url).searchParams;
   const cursor = searchParams.get("cursor");
