@@ -380,23 +380,40 @@ async function executePhase7Job(job: {
   throw new Error("Unsupported Phase 7 job kind.");
 }
 
-export async function runPhase7Jobs(limit = 25): Promise<{
+export type Phase7JobRunCounter = {
   claimed: number;
   completed: number;
   failed: number;
-}> {
+};
+
+export type Phase7JobRunSummary = Phase7JobRunCounter & {
+  channelMaterialization: Phase7JobRunCounter;
+  searchIndexing: Phase7JobRunCounter;
+};
+
+export async function runPhase7Jobs(limit = 25): Promise<Phase7JobRunSummary> {
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_JOB_BATCH) {
     throw new TypeError(`Phase 7 job limit must be an integer between 1 and ${MAX_JOB_BATCH}.`);
   }
   const jobs = await claimPhase7Jobs(limit);
-  let completed = 0;
-  let failed = 0;
+  const summary: Phase7JobRunSummary = {
+    claimed: jobs.length,
+    completed: 0,
+    failed: 0,
+    channelMaterialization: { claimed: 0, completed: 0, failed: 0 },
+    searchIndexing: { claimed: 0, completed: 0, failed: 0 }
+  };
   for (const job of jobs) {
+    const group = job.kind === "materialize_channel"
+      ? summary.channelMaterialization
+      : summary.searchIndexing;
+    group.claimed += 1;
     try {
       const execution = await executePhase7Job(job);
       if (execution.completed) {
         if (await settlePhase7JobLease(job, { kind: "completed" })) {
-          completed += 1;
+          summary.completed += 1;
+          group.completed += 1;
         }
       } else {
         await settlePhase7JobLease(job, {
@@ -407,9 +424,10 @@ export async function runPhase7Jobs(limit = 25): Promise<{
       }
     } catch {
       if (await settlePhase7JobLease(job, { kind: "failed" })) {
-        failed += 1;
+        summary.failed += 1;
+        group.failed += 1;
       }
     }
   }
-  return { claimed: jobs.length, completed, failed };
+  return summary;
 }

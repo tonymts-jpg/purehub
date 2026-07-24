@@ -2004,7 +2004,21 @@ test("phase 7 curation resolves manual, member, rule, exclusion, and worker prec
       expect(response.ok(), await response.text()).toBeTruthy();
       return response.json();
     };
-    expect(await runWorker()).toMatchObject({ claimed: expect.any(Number), completed: expect.any(Number), failed: 0 });
+    expect(await runWorker()).toMatchObject({
+      claimed: expect.any(Number),
+      completed: expect.any(Number),
+      failed: 0,
+      channelMaterialization: {
+        claimed: expect.any(Number),
+        completed: expect.any(Number),
+        failed: 0
+      },
+      searchIndexing: {
+        claimed: expect.any(Number),
+        completed: expect.any(Number),
+        failed: 0
+      }
+    });
     expect(await runWorker()).toMatchObject({ failed: 0 });
     expect(await prisma.channelPost.count({ where: { channelId, postId: "post-1" } })).toBe(1);
     expect(await prisma.channelPost.findUniqueOrThrow({

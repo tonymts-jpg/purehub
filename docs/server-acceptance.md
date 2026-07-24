@@ -164,7 +164,8 @@ SMOKE_BASE_URL=http://127.0.0.1 npm run smoke
 ```
 
 The web health response must report `phase-7` with `channels`, `channelAcl`,
-and `postgresSearch` enabled. Worker health must include
+and `postgresSearch` enabled. It must also report the exact 40-character Git
+commit exported by `scripts/deploy.sh`. Worker health must include
 `channelMaterialization` and `searchIndexing` queue/task state. Both smoke
 runners verify the seeded public channel directory, typed creator search, and
 the unauthenticated dashboard mutation boundary.
@@ -187,8 +188,20 @@ database-gated lifecycle, ACL, membership, curation/concurrency,
 search/reindex, UI, cleanup, and entitlement-isolation test must execute with
 zero unexpected skips or failures.
 
-Record `git rev-parse HEAD`, `git ls-remote origin refs/heads/main`, the staging
-checkout SHA, `/api/health` phase/version, Docker service state, migration and
+Record and compare the local checkout, GitHub, staging checkout, and runtime
+commit:
+
+```bash
+local_sha="$(git rev-parse HEAD)"
+github_sha="$(git ls-remote origin refs/heads/main | cut -f1)"
+runtime_sha="$(curl -fsS http://127.0.0.1/api/health | node -e \
+  "let s='';process.stdin.on('data',c=>s+=c).on('end',()=>process.stdout.write(JSON.parse(s).commit))")"
+test "${local_sha}" = "${github_sha}"
+test "${local_sha}" = "${runtime_sha}"
+```
+
+Also record `/api/health` phase/version, Docker service state, migration and
 seed results, both smoke results, and exact Playwright passed/skipped/failed
 totals. Local, GitHub, staging checkout, and runtime commit SHAs must match
-before Phase 7 is accepted.
+before Phase 7 is accepted. A runtime value of `unknown` fails staging
+acceptance.

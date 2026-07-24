@@ -2,6 +2,7 @@
 set -euo pipefail
 
 BASE_URL="${SMOKE_BASE_URL:-http://127.0.0.1:80}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 check_url() {
   local name="$1"
@@ -10,26 +11,23 @@ check_url() {
   curl --fail --silent --show-error "${BASE_URL}${path}" >/dev/null
 }
 
+check_json() {
+  local name="$1"
+  local path="$2"
+  local validator="$3"
+  echo "Checking ${name}: ${BASE_URL}${path}"
+  curl --fail --silent --show-error "${BASE_URL}${path}" \
+    | node "${SCRIPT_DIR}/smoke-test.mjs" validate-json "${validator}" >/dev/null
+}
+
 check_url "home" "/"
 check_url "explore" "/explore"
 check_url "post detail" "/post/post-1"
 check_url "platform rules" "/api/platform/rules"
 
-echo "Checking Phase 7 health and capabilities"
-health_body="$(curl --fail --silent --show-error "${BASE_URL}/api/health")"
-printf '%s' "${health_body}" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"'
-printf '%s' "${health_body}" | grep -Eq '"phase"[[:space:]]*:[[:space:]]*"phase-7"'
-printf '%s' "${health_body}" | grep -Eq '"channels"[[:space:]]*:[[:space:]]*true'
-printf '%s' "${health_body}" | grep -Eq '"channelAcl"[[:space:]]*:[[:space:]]*true'
-printf '%s' "${health_body}" | grep -Eq '"postgresSearch"[[:space:]]*:[[:space:]]*true'
-
-echo "Checking seeded public channels"
-channels_body="$(curl --fail --silent --show-error "${BASE_URL}/api/channels")"
-printf '%s' "${channels_body}" | grep -Eq '"channels"[[:space:]]*:[[:space:]]*\['
-
-echo "Checking typed creator search"
-search_body="$(curl --fail --silent --show-error "${BASE_URL}/api/search?q=yuki&type=creator")"
-printf '%s' "${search_body}" | grep -Eq '"results"[[:space:]]*:[[:space:]]*\['
+check_json "Phase 7 health and capabilities" "/api/health" "health"
+check_json "seeded public channels" "/api/channels" "channels"
+check_json "typed creator search" "/api/search?q=yuki&type=creator" "creator-search"
 
 echo "Checking unauthenticated identity boundary"
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' "${BASE_URL}/api/me")" = "401"

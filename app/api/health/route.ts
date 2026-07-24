@@ -7,6 +7,11 @@ export const runtime = "nodejs";
 
 type DependencyStatus = "ok" | "skipped" | "error";
 
+function runtimeCommitSha() {
+  const value = process.env.PUREHUB_COMMIT_SHA ?? "";
+  return /^[0-9a-f]{40}$/.test(value) ? value : "unknown";
+}
+
 function checkTcp(host: string | undefined, port: string | undefined, timeoutMs = 1200): Promise<{ status: DependencyStatus; detail: string }> {
   if (!host || !port) return Promise.resolve({ status: "skipped", detail: "not configured" });
   const numericPort = Number(port);
@@ -40,6 +45,7 @@ export async function GET() {
     {
       status: hasErrors ? "degraded" : "ok",
       service: "purehub-web",
+      commit: runtimeCommitSha(),
       phase: process.env.PUREHUB_PHASE ?? "phase-1",
       environment: process.env.APP_ENV ?? process.env.NODE_ENV ?? "development",
       version: process.env.NEXT_PUBLIC_APP_VERSION ?? "0.1.0",

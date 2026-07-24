@@ -7,6 +7,13 @@ ENV_FILE=".env.${ENVIRONMENT}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 bash "${SCRIPT_DIR}/preflight.sh"
 
+PUREHUB_COMMIT_SHA="$(git rev-parse HEAD)"
+if ! [[ "${PUREHUB_COMMIT_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "Unable to resolve the exact PureHub commit for deployment." >&2
+  exit 1
+fi
+export PUREHUB_COMMIT_SHA
+
 if [ ! -f "${ENV_FILE}" ]; then
   echo "Missing ${ENV_FILE}. Create it from .env.example on the server." >&2
   exit 1
