@@ -6,6 +6,7 @@ export const dynamic = "force-dynamic";
 
 type ResultType = "post" | "creator" | "channel";
 type SearchPage = { results: SearchResult[]; nextCursor: string | null };
+const SSR_API_TIMEOUT_MS = 5_000;
 
 function single(value: string | string[] | undefined) {
   return typeof value === "string" ? value : "";
@@ -29,6 +30,7 @@ async function fetchInitialSearch(
   try {
     const response = await fetch(`http://127.0.0.1:${port}/api/search?${params}`, {
       cache: "no-store",
+      signal: AbortSignal.timeout(SSR_API_TIMEOUT_MS),
       headers: { cookie: requestHeaders.get("cookie") ?? "" }
     });
     if (!response.ok) throw new Error("Search request failed.");

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Plus, Search } from "lucide-react";
+import { Plus, RefreshCw, Search } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 import { PageHeader } from "@/components/app-shell";
 import { ChannelCard } from "@/components/channels/channel-card";
@@ -33,8 +33,7 @@ export function ChannelDirectory({
     ));
   }, [data.channels, query]);
 
-  async function selectKind(nextKind: KindFilter) {
-    if (nextKind === kind) return;
+  async function requestKind(nextKind: KindFilter) {
     const generation = requestGeneration.current + 1;
     requestGeneration.current = generation;
     activeRequest.current?.abort();
@@ -64,6 +63,11 @@ export function ChannelDirectory({
         activeRequest.current = null;
       }
     }
+  }
+
+  function selectKind(nextKind: KindFilter) {
+    if (nextKind === kind) return;
+    void requestKind(nextKind);
   }
 
   async function loadMore() {
@@ -124,7 +128,7 @@ export function ChannelDirectory({
             <button
               key={value}
               type="button"
-              onClick={() => void selectKind(value)}
+              onClick={() => selectKind(value)}
               aria-pressed={kind === value}
               className={`min-h-10 whitespace-nowrap rounded-lg px-4 text-sm font-black ${
                 kind === value ? "bg-ink text-white dark:bg-white dark:text-ink" : "border border-[var(--line)] muted"
@@ -145,6 +149,14 @@ export function ChannelDirectory({
         <div role="alert" className="glass rounded-lg px-5 py-16 text-center">
           <h2 className="font-black">无法显示频道</h2>
           <p className="mt-2 text-sm text-red-500">{error}</p>
+          <button
+            type="button"
+            onClick={() => void requestKind(kind)}
+            className="mx-auto mt-5 flex min-h-11 items-center gap-2 rounded-lg border border-[var(--line)] px-5 text-sm font-black"
+          >
+            <RefreshCw size={17} />
+            重试加载频道
+          </button>
         </div>
       ) : filtered.length === 0 ? (
         <div className="glass rounded-lg px-5 py-16 text-center">

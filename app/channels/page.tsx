@@ -5,6 +5,7 @@ import type { ChannelListItemDto } from "@/lib/channels/types";
 export const dynamic = "force-dynamic";
 
 type ChannelPage = { channels: ChannelListItemDto[]; nextCursor: string | null };
+const SSR_API_TIMEOUT_MS = 5_000;
 
 async function fetchInitialChannels(): Promise<{ page: ChannelPage; error: string }> {
   const requestHeaders = await headers();
@@ -12,6 +13,7 @@ async function fetchInitialChannels(): Promise<{ page: ChannelPage; error: strin
   try {
     const response = await fetch(`http://127.0.0.1:${port}/api/channels?limit=20`, {
       cache: "no-store",
+      signal: AbortSignal.timeout(SSR_API_TIMEOUT_MS),
       headers: { cookie: requestHeaders.get("cookie") ?? "" }
     });
     if (!response.ok) throw new Error("Channel directory request failed.");

@@ -6,6 +6,7 @@ import { ChannelMembershipAction } from "@/components/channels/channel-membershi
 import type { ChannelDetailDto, ChannelDetailResultDto } from "@/lib/channels/types";
 
 export const dynamic = "force-dynamic";
+const SSR_API_TIMEOUT_MS = 5_000;
 
 function isDetail(channel: ChannelDetailResultDto): channel is ChannelDetailDto {
   return "access" in channel;
@@ -16,26 +17,34 @@ async function fetchChannel(slug: string) {
   const port = process.env.PORT ?? "3000";
   return fetch(`http://127.0.0.1:${port}/api/channels/${encodeURIComponent(slug)}`, {
     cache: "no-store",
+    signal: AbortSignal.timeout(SSR_API_TIMEOUT_MS),
     headers: {
       cookie: requestHeaders.get("cookie") ?? ""
     }
   });
 }
 
+function ChannelUnavailable() {
+  return (
+    <div className="mx-auto max-w-5xl px-4 py-16 text-center sm:px-8">
+      <div role="alert" className="glass rounded-lg px-5 py-16">
+        <h1 className="text-2xl font-black">频道暂时无法显示</h1>
+        <p className="mt-2 text-sm muted">请稍后再试，或返回频道目录。</p>
+      </div>
+    </div>
+  );
+}
+
 export default async function ChannelDetailPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  const response = await fetchChannel(slug);
-  if (response.status === 404) notFound();
-  if (!response.ok) {
-    return (
-      <div className="mx-auto max-w-5xl px-4 py-16 text-center sm:px-8">
-        <div role="alert" className="glass rounded-lg px-5 py-16">
-          <h1 className="text-2xl font-black">频道暂时无法显示</h1>
-          <p className="mt-2 text-sm muted">请稍后再试，或返回频道目录。</p>
-        </div>
-      </div>
-    );
+  let response: Response;
+  try {
+    response = await fetchChannel(slug);
+  } catch {
+    return <ChannelUnavailable />;
   }
+  if (response.status === 404) notFound();
+  if (!response.ok) return <ChannelUnavailable />;
 
   const { channel } = await response.json() as { channel: ChannelDetailResultDto };
   const detail = isDetail(channel) ? channel : null;

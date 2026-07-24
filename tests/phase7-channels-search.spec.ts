@@ -3135,13 +3135,14 @@ test("phase 7 channel UI ignores stale kind responses and search UI syncs URL in
       await new Promise((resolve) => setTimeout(resolve, 400));
     }
     const creator = kind === "creator";
+    const retry = kind === null;
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
         channels: [{
-          slug: creator ? "current-creator" : "stale-official",
-          name: creator ? "Current Creator Result" : "Stale Official Result",
+          slug: creator ? "current-creator" : retry ? "retried-all" : "stale-official",
+          name: creator ? "Current Creator Result" : retry ? "Retried All Result" : "Stale Official Result",
           description: "Safe private summary fixture.",
           kind: creator ? "creator" : "official",
           visibility: "private",
@@ -3154,6 +3155,8 @@ test("phase 7 channel UI ignores stale kind responses and search UI syncs URL in
   });
 
   await page.goto("/channels");
+  await page.getByRole("button", { name: "重试加载频道" }).click();
+  await expect(page.getByText("Retried All Result")).toBeVisible();
   await page.getByRole("button", { name: "官方" }).click();
   await officialStarted;
   await page.getByRole("button", { name: "创作者" }).click();
