@@ -214,7 +214,8 @@ export function resolveMembershipMutationVisibility(
     status: string | null;
     visibility: string | null;
     discoverability: string | null;
-    hasMembership: boolean;
+    hasActiveMembership: boolean;
+    hasRemovedMembership: boolean;
   }
 ): { allowed: true } {
   if (!channel.exists) {
@@ -225,18 +226,10 @@ export function resolveMembershipMutationVisibility(
       channel.visibility === "public"
       || (channel.visibility === "private" && channel.discoverability === "discoverable")
     );
-  if (!channel.hasMembership && !publiclyVisible) {
-    throw new ChannelMembershipError("Channel not found.", 404);
-  }
-  if (
-    action === "join"
-    && !channel.hasMembership
-    && (
-      channel.status !== "active"
-      || channel.visibility !== "private"
-      || channel.discoverability !== "discoverable"
-    )
-  ) {
+  const hasRelevantAffiliation = action === "leave"
+    ? channel.hasActiveMembership || channel.hasRemovedMembership
+    : channel.hasActiveMembership;
+  if (!hasRelevantAffiliation && !publiclyVisible) {
     throw new ChannelMembershipError("Channel not found.", 404);
   }
   return { allowed: true };

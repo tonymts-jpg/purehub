@@ -1416,7 +1416,8 @@ export async function requestChannelMembership(
       status: channel?.status ?? null,
       visibility: channel?.visibility ?? null,
       discoverability: channel?.discoverability ?? null,
-      hasMembership: Boolean(channel?.memberships.length)
+      hasActiveMembership: Boolean(channel?.memberships.length),
+      hasRemovedMembership: false
     });
     if (!channel) notFound();
     if (channel.status !== "active") conflict("This channel is not accepting join requests.");
@@ -1615,8 +1616,8 @@ export async function leaveChannelMembership(
         visibility: true,
         discoverability: true,
         memberships: {
-          where: { userId: actorUserId, status: "active", user: { status: "active" } },
-          select: { id: true },
+          where: { userId: actorUserId, user: { status: "active" } },
+          select: { id: true, status: true },
           take: 1
         }
       }
@@ -1626,7 +1627,8 @@ export async function leaveChannelMembership(
       status: channel?.status ?? null,
       visibility: channel?.visibility ?? null,
       discoverability: channel?.discoverability ?? null,
-      hasMembership: Boolean(channel?.memberships.length)
+      hasActiveMembership: channel?.memberships[0]?.status === "active",
+      hasRemovedMembership: channel?.memberships[0]?.status === "removed"
     });
     if (!channel) notFound();
     const membership = await tx.channelMembership.findUnique({
@@ -1698,10 +1700,20 @@ export async function createChannelInvitation(
       conflict("The channel owner cannot be invited.");
     }
 
-    const revoked = await tx.channelInvitation.updateMany({
+    const invitationsToRevoke = await tx.channelInvitation.findMany({
       where: { channelId, email, status: "pending" },
-      data: { status: "revoked" }
+      select: { id: true }
     });
+    if (invitationsToRevoke.length) {
+      const revoked = await tx.channelInvitation.updateMany({
+        where: {
+          id: { in: invitationsToRevoke.map(({ id }) => id) },
+          status: "pending"
+        },
+        data: { status: "revoked" }
+      });
+      if (revoked.count !== invitationsToRevoke.length) throw { code: "P2034" };
+    }
     const created = await tx.channelInvitation.create({
       data: {
         channelId,
@@ -1763,16 +1775,16 @@ export async function createChannelInvitation(
         metadata: { channelId, status: "pending", expiresAt: expiresAt.toISOString() }
       }
     });
-    if (revoked.count > 0) {
-      await tx.auditLog.create({
-        data: {
+    if (invitationsToRevoke.length) {
+      await tx.auditLog.createMany({
+        data: invitationsToRevoke.map(({ id }) => ({
           actorUserId,
           actorRole: "owner",
           action: "channel.invitation_revoke",
           targetType: "channel_invitation",
-          targetId: created.id,
-          metadata: { channelId, status: "revoked", revokedCount: revoked.count }
-        }
+          targetId: id,
+          metadata: { channelId, status: "revoked" }
+        }))
       });
     }
     return created;

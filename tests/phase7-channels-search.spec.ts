@@ -69,15 +69,29 @@ function captureThrown(operation: () => unknown): unknown {
   }
 }
 
-async function cleanupPhase7MembershipArtifacts(emails: string[], assetIds: string[] = []) {
+async function cleanupPhase7MembershipArtifacts(
+  emails: string[],
+  assetIds: string[] = [],
+  channelIds: string[] = []
+) {
   const normalizedEmails = emails.map((email) => email.trim().toLowerCase());
   const [memberships, invitations] = await Promise.all([
     prisma.channelMembership.findMany({
-      where: { user: { email: { in: normalizedEmails } } },
+      where: {
+        OR: [
+          ...(normalizedEmails.length ? [{ user: { email: { in: normalizedEmails } } }] : []),
+          ...(channelIds.length ? [{ channelId: { in: channelIds } }] : [])
+        ]
+      },
       select: { id: true }
     }),
     prisma.channelInvitation.findMany({
-      where: { email: { in: normalizedEmails } },
+      where: {
+        OR: [
+          ...(normalizedEmails.length ? [{ email: { in: normalizedEmails } }] : []),
+          ...(channelIds.length ? [{ channelId: { in: channelIds } }] : [])
+        ]
+      },
       select: { id: true }
     })
   ]);
@@ -92,12 +106,19 @@ async function cleanupPhase7MembershipArtifacts(emails: string[], assetIds: stri
             : []),
           ...(invitationIds.length
             ? [{ targetType: "channel_invitation", targetId: { in: invitationIds } }]
+            : []),
+          ...(channelIds.length
+            ? [{ targetType: "channel", targetId: { in: channelIds } }]
             : [])
         ]
       }
     }),
+    prisma.searchDocument.deleteMany({
+      where: { entityType: "channel", entityId: { in: channelIds } }
+    }),
     prisma.channelInvitation.deleteMany({ where: { id: { in: invitationIds } } }),
     prisma.channelMembership.deleteMany({ where: { id: { in: membershipIds } } }),
+    prisma.channel.deleteMany({ where: { id: { in: channelIds } } }),
     prisma.mediaAsset.deleteMany({ where: { id: { in: assetIds } } })
   ]);
 }
@@ -275,12 +296,42 @@ test("phase 7 private membership validation and transitions are strict and idemp
     status: "active",
     visibility: "private",
     discoverability: "discoverable",
-    hasMembership: false
+    hasActiveMembership: false,
+    hasRemovedMembership: false
+  })).toEqual({ allowed: true });
+  expect(resolveMembershipMutationVisibility("join", {
+    exists: true,
+    status: "active",
+    visibility: "public",
+    discoverability: "discoverable",
+    hasActiveMembership: false,
+    hasRemovedMembership: false
   })).toEqual({ allowed: true });
   for (const channel of [
-    { exists: false, status: null, visibility: null, discoverability: null, hasMembership: false },
-    { exists: true, status: "suspended", visibility: "private", discoverability: "discoverable", hasMembership: false },
-    { exists: true, status: "active", visibility: "private", discoverability: "hidden", hasMembership: false }
+    {
+      exists: false,
+      status: null,
+      visibility: null,
+      discoverability: null,
+      hasActiveMembership: false,
+      hasRemovedMembership: false
+    },
+    {
+      exists: true,
+      status: "suspended",
+      visibility: "private",
+      discoverability: "discoverable",
+      hasActiveMembership: false,
+      hasRemovedMembership: false
+    },
+    {
+      exists: true,
+      status: "active",
+      visibility: "private",
+      discoverability: "hidden",
+      hasActiveMembership: false,
+      hasRemovedMembership: false
+    }
   ] as const) {
     expect(captureThrown(() => resolveMembershipMutationVisibility("join", channel)))
       .toMatchObject({ status: 404 });
@@ -290,8 +341,17 @@ test("phase 7 private membership validation and transitions are strict and idemp
     status: "active",
     visibility: "private",
     discoverability: "hidden",
-    hasMembership: false
+    hasActiveMembership: false,
+    hasRemovedMembership: false
   }))).toMatchObject({ status: 404 });
+  expect(resolveMembershipMutationVisibility("leave", {
+    exists: true,
+    status: "active",
+    visibility: "private",
+    discoverability: "hidden",
+    hasActiveMembership: false,
+    hasRemovedMembership: true
+  })).toEqual({ allowed: true });
 });
 
 test("phase 7 invitation tokens, email binding, and rate scopes use the approved contract", () => {
@@ -1069,6 +1129,12 @@ test("phase 7 private membership join, review, leave, and role boundaries are id
     const rejectedMember = await registerFan(rejectedRequest, "phase7-reject");
     cleanupEmails.push(member.email, rejectedMember.email);
 
+    const publicJoin = await rejectedRequest.post("/api/channels/yuki-studio/join-requests");
+    expect(publicJoin.status(), await publicJoin.text()).toBe(409);
+    expect(await publicJoin.json()).toMatchObject({
+      error: expect.stringMatching(/public channels do not require membership requests/i)
+    });
+
     const before = await memberRequest.get("/api/channels/private-curators");
     expect(before.ok(), await before.text()).toBeTruthy();
     expect((await before.json()).channel).not.toHaveProperty("posts");
@@ -1215,6 +1281,33 @@ test("phase 7 private membership join, review, leave, and role boundaries are id
       data: { discoverability: "discoverable" }
     });
     expect(discoverable.ok(), await discoverable.text()).toBeTruthy();
+    const temporaryJoin = await rejectedRequest.post(`/api/channels/${slug}/join-requests`);
+    expect(temporaryJoin.ok(), await temporaryJoin.text()).toBeTruthy();
+    const temporaryMembership = (await temporaryJoin.json()).membership;
+    const temporaryApproved = await ownerRequest.post(
+      `/api/dashboard/channels/${temporaryChannelId}/members`,
+      { data: { membershipId: temporaryMembership.id, decision: "approved" } }
+    );
+    expect(temporaryApproved.ok(), await temporaryApproved.text()).toBeTruthy();
+    const hiddenAgain = await ownerRequest.patch(`/api/dashboard/channels/${temporaryChannelId}`, {
+      data: { discoverability: "hidden" }
+    });
+    expect(hiddenAgain.ok(), await hiddenAgain.text()).toBeTruthy();
+    const firstHiddenLeave = await rejectedRequest.delete(`/api/channels/${slug}/membership`);
+    expect(firstHiddenLeave.ok(), await firstHiddenLeave.text()).toBeTruthy();
+    expect(await firstHiddenLeave.json()).toMatchObject({ changed: true });
+    const repeatedHiddenLeave = await rejectedRequest.delete(`/api/channels/${slug}/membership`);
+    expect(repeatedHiddenLeave.ok(), await repeatedHiddenLeave.text()).toBeTruthy();
+    expect(await repeatedHiddenLeave.json()).toMatchObject({
+      changed: false,
+      membership: { id: temporaryMembership.id, status: "removed" }
+    });
+    const neverMemberHiddenLeave = await memberRequest.delete(`/api/channels/${slug}/membership`);
+    expect(neverMemberHiddenLeave.status(), await neverMemberHiddenLeave.text()).toBe(404);
+    const rediscovered = await ownerRequest.patch(`/api/dashboard/channels/${temporaryChannelId}`, {
+      data: { discoverability: "discoverable" }
+    });
+    expect(rediscovered.ok(), await rediscovered.text()).toBeTruthy();
     const suspended = await adminRequest.post(`/api/admin/channels/${temporaryChannelId}/suspend`);
     expect(suspended.ok(), await suspended.text()).toBeTruthy();
     const suspendedJoin = await rejectedRequest.post(`/api/channels/${slug}/join-requests`);
@@ -1385,6 +1478,24 @@ test("phase 7 invitation acceptance binds session email and does not unlock paid
     );
     expect(rejectCurrent.ok(), await rejectCurrent.text()).toBeTruthy();
 
+    const revokeAudits = await prisma.auditLog.findMany({
+      where: {
+        action: "channel.invitation_revoke",
+        targetId: {
+          in: [
+            firstIssueBody.invitation.id,
+            secondIssueBody.invitation.id
+          ]
+        }
+      },
+      select: { targetId: true, metadata: true }
+    });
+    expect(revokeAudits).toHaveLength(1);
+    expect(revokeAudits[0]).toMatchObject({
+      targetId: firstIssueBody.invitation.id,
+      metadata: { channelId: "channel-private-curators", status: "revoked" }
+    });
+
     const transitionAudits = await prisma.auditLog.findMany({
       where: {
         action: {
@@ -1399,7 +1510,7 @@ test("phase 7 invitation acceptance binds session email and does not unlock paid
             rejectedInviteBody.invitation.id,
             expiredAcceptBody.invitation.id,
             expiredRejectBody.invitation.id,
-            secondIssueBody.invitation.id
+            firstIssueBody.invitation.id
           ]
         }
       },
@@ -1469,6 +1580,94 @@ test("phase 7 invitation acceptance binds session email and does not unlock paid
     await reissueRequest.dispose();
     await rateRequest.dispose();
     await mediaCreatorRequest.dispose();
+  }
+});
+
+test("phase 7 invitation creation enforces the actual 50 per owner hourly route limit", async ({}, testInfo) => {
+  test.setTimeout(180_000);
+  const probe = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  try {
+    await requirePhase7(probe, testInfo);
+  } finally {
+    await probe.dispose();
+  }
+
+  const ownerRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const adminRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const cleanupEmails: string[] = [];
+  let channelId: string | null = null;
+  let ownerEmail: string | null = null;
+  try {
+    await signInAdmin(adminRequest);
+    const nonce = `${Date.now().toString(36)}${Math.floor(Math.random() * 1_000_000).toString(36)}`;
+    const owner = await registerFan(ownerRequest, "phase7-rate-owner");
+    ownerEmail = owner.email;
+    cleanupEmails.push(owner.email);
+    const promotedOwner = await prisma.user.update({
+      where: { email: owner.email },
+      data: { role: "creator", creatorStatus: "approved" },
+      select: { id: true }
+    });
+    await prisma.creatorProfile.create({
+      data: {
+        id: `phase7-rate-profile-${nonce}`,
+        userId: promotedOwner.id,
+        bio: "Temporary Phase 7 rate-limit creator.",
+        category: "Test",
+        cover: "cover-1",
+        levelId: "level-1"
+      }
+    });
+    const slug = `phase7-invite-rate-${nonce}`;
+    const created = await ownerRequest.post("/api/dashboard/channels", {
+      data: {
+        slug,
+        name: "Phase Seven Invitation Rate",
+        description: "Temporary isolated invitation creation rate-limit acceptance.",
+        visibility: "private",
+        discoverability: "hidden",
+        memberPostPolicy: "approval_required"
+      }
+    });
+    expect(created.status(), await created.text()).toBe(201);
+    channelId = (await created.json()).channel.id;
+    const submitted = await ownerRequest.post(`/api/dashboard/channels/${channelId}/submit`);
+    expect(submitted.ok(), await submitted.text()).toBeTruthy();
+    const approved = await adminRequest.post(`/api/admin/channels/${channelId}/review`, {
+      data: { decision: "approved", note: "Task 5 invitation rate acceptance" }
+    });
+    expect(approved.ok(), await approved.text()).toBeTruthy();
+
+    for (let attempt = 1; attempt <= 50; attempt += 1) {
+      const email = `phase7-rate-${nonce}-${attempt}@e2e.purehub.local`;
+      cleanupEmails.push(email);
+      const invitation = await ownerRequest.post(
+        `/api/dashboard/channels/${channelId}/invitations`,
+        { data: { email } }
+      );
+      expect(invitation.status(), `attempt ${attempt}: ${await invitation.text()}`).toBe(201);
+    }
+    const overflowEmail = `phase7-rate-${nonce}-overflow@e2e.purehub.local`;
+    cleanupEmails.push(overflowEmail);
+    const rateLimited = await ownerRequest.post(
+      `/api/dashboard/channels/${channelId}/invitations`,
+      { data: { email: overflowEmail } }
+    );
+    expect(rateLimited.status(), await rateLimited.text()).toBe(429);
+  } finally {
+    try {
+      await cleanupPhase7MembershipArtifacts(
+        cleanupEmails,
+        [],
+        channelId ? [channelId] : []
+      );
+    } finally {
+      if (ownerEmail) {
+        await prisma.user.deleteMany({ where: { email: ownerEmail } });
+      }
+    }
+    await ownerRequest.dispose();
+    await adminRequest.dispose();
   }
 });
 
