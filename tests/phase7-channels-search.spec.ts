@@ -3124,27 +3124,54 @@ test("phase 7 channel UI and search UI expose responsive public routes", async (
 });
 
 test("phase 7 channel UI ignores stale kind responses and search UI syncs URL input", async ({ page }) => {
-  let markOfficialStarted!: () => void;
-  const officialStarted = new Promise<void>((resolve) => {
-    markOfficialStarted = resolve;
+  let markCreatorStarted!: () => void;
+  const creatorStarted = new Promise<void>((resolve) => {
+    markCreatorStarted = resolve;
   });
-  await page.route("**/api/channels?*", async (route) => {
+  let officialAttempts = 0;
+  const requestedKinds: Array<string | null> = [];
+  const channelRoute = "**/api/channels?*";
+  await page.route(channelRoute, async (route) => {
     const kind = new URL(route.request().url()).searchParams.get("kind");
-    if (kind === "official") {
-      markOfficialStarted();
-      await new Promise((resolve) => setTimeout(resolve, 400));
+    requestedKinds.push(kind);
+    if (kind === "official" && officialAttempts++ === 0) {
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "Deterministic channel directory failure." })
+      });
+      return;
     }
-    const creator = kind === "creator";
-    const retry = kind === null;
+    if (kind === "creator") {
+      markCreatorStarted();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          channels: [{
+            slug: "stale-creator",
+            name: "Stale Creator Result",
+            description: "Safe private summary fixture.",
+            kind: "creator",
+            visibility: "private",
+            discoverability: "discoverable",
+            status: "active"
+          }],
+          nextCursor: null
+        })
+      }).catch(() => undefined);
+      return;
+    }
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
         channels: [{
-          slug: creator ? "current-creator" : retry ? "retried-all" : "stale-official",
-          name: creator ? "Current Creator Result" : retry ? "Retried All Result" : "Stale Official Result",
+          slug: kind === "official" ? "recovered-official" : "current-all",
+          name: kind === "official" ? "Recovered Official Result" : "Current All Result",
           description: "Safe private summary fixture.",
-          kind: creator ? "creator" : "official",
+          kind: "official",
           visibility: "private",
           discoverability: "discoverable",
           status: "active"
@@ -3155,13 +3182,22 @@ test("phase 7 channel UI ignores stale kind responses and search UI syncs URL in
   });
 
   await page.goto("/channels");
-  await page.getByRole("button", { name: "重试加载频道" }).click();
-  await expect(page.getByText("Retried All Result")).toBeVisible();
   await page.getByRole("button", { name: "官方" }).click();
-  await officialStarted;
+  await expect(page.getByText("频道目录暂时无法使用。")).toBeVisible();
+  await expect(page.getByRole("button", { name: "重试加载频道" })).toBeVisible();
+  expect(requestedKinds).toEqual(["official"]);
+  await page.getByRole("button", { name: "重试加载频道" }).click();
+  await expect(page.getByText("Recovered Official Result")).toBeVisible();
+  expect(requestedKinds.slice(0, 2)).toEqual(["official", "official"]);
+
   await page.getByRole("button", { name: "创作者" }).click();
-  await expect(page.getByText("Current Creator Result")).toBeVisible();
-  await expect(page.getByText("Stale Official Result")).toHaveCount(0);
+  await creatorStarted;
+  await page.getByRole("button", { name: "全部" }).click();
+  await expect(page.getByText("Current All Result")).toBeVisible();
+  await page.waitForTimeout(500);
+  await expect(page.getByText("Stale Creator Result")).toHaveCount(0);
+  expect(requestedKinds.slice(-2)).toEqual(["creator", null]);
+  await page.unroute(channelRoute);
 
   await page.goto("/search?q=yuki");
   await expect(page.getByRole("textbox", { name: "搜索关键词" })).toHaveValue("yuki");
