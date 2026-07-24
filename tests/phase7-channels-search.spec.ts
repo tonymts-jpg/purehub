@@ -3,6 +3,18 @@ import { ADMIN_SECTIONS, isChannelAdminRole } from "../lib/admin-auth";
 import { resolveChannelAccess } from "../lib/channels/auth";
 import { readChannelJson } from "../lib/channels/http";
 import {
+  channelMembershipRateLimit,
+  createChannelInvitationToken,
+  hashChannelInvitationToken,
+  normalizeChannelInvitationEmail,
+  resolveInvitationAcceptance,
+  resolveMembershipReviewTransition,
+  resolveMembershipUpdateTransition,
+  validateChannelInvitationInput,
+  validateMembershipReviewInput,
+  validateMembershipUpdateInput
+} from "../lib/channels/membership";
+import {
   CHANNEL_QUOTAS,
   assertNoChannelIdentityOverrides,
   channelCursorMatchesScope,
@@ -20,11 +32,20 @@ import {
   ChannelRepositoryError,
   channelFeedAfterPredicate,
   channelListAfterPredicate,
+  channelPublicListingWhere,
   isChannelSelfReview,
   isSerializableConflict,
   retrySerializableOperation
 } from "../lib/channels/repository";
-import { authHeaders, hasDatabase, signInAdmin, signInCreator, signInFan, signInSupport } from "./auth-helpers";
+import {
+  authHeaders,
+  hasDatabase,
+  registerFan,
+  signInAdmin,
+  signInCreator,
+  signInFan,
+  signInSupport
+} from "./auth-helpers";
 
 async function requirePhase7(request: APIRequestContext, testInfo: TestInfo) {
   test.skip(testInfo.project.name === "mobile", "Phase 7 channel mutations run once against the shared staging database.");
@@ -155,6 +176,131 @@ test("phase 7 private safe summary omits internal and authorization fields", () 
   ]) {
     expect(summary).not.toHaveProperty(forbidden);
   }
+});
+
+test("phase 7 private membership validation and transitions are strict and idempotent", () => {
+  expect(() => assertNoChannelIdentityOverrides(
+    {},
+    new URLSearchParams("email=forged%40example.com")
+  )).toThrow(/authenticated context/i);
+  expect(validateMembershipReviewInput({ membershipId: "membership-1", decision: "approved" }))
+    .toEqual({ membershipId: "membership-1", decision: "approved" });
+  expect(validateMembershipReviewInput({ membershipId: "membership-1", decision: "rejected" }))
+    .toEqual({ membershipId: "membership-1", decision: "rejected" });
+  expect(() => validateMembershipReviewInput({
+    membershipId: "membership-1",
+    decision: "approved",
+    reviewedByUserId: "forged"
+  })).toThrow(/authenticated context/i);
+
+  expect(resolveMembershipReviewTransition("pending", "approved"))
+    .toEqual({ status: "active", changed: true });
+  expect(resolveMembershipReviewTransition("active", "approved"))
+    .toEqual({ status: "active", changed: false });
+  expect(resolveMembershipReviewTransition("pending", "rejected"))
+    .toEqual({ status: "rejected", changed: true });
+  expect(resolveMembershipReviewTransition("rejected", "rejected"))
+    .toEqual({ status: "rejected", changed: false });
+  expect(() => resolveMembershipReviewTransition("removed", "approved")).toThrow(/pending/i);
+
+  expect(validateMembershipUpdateInput({ role: "editor" })).toEqual({ role: "editor" });
+  expect(validateMembershipUpdateInput({ status: "removed" })).toEqual({ status: "removed" });
+  expect(() => validateMembershipUpdateInput({ role: "owner" })).toThrow(/owner/i);
+  expect(() => validateMembershipUpdateInput({ status: "pending" })).toThrow(/status/i);
+  expect(resolveMembershipUpdateTransition(
+    { role: "member", status: "active" },
+    { role: "editor" }
+  )).toEqual({ role: "editor", status: "active", changed: true });
+  expect(resolveMembershipUpdateTransition(
+    { role: "editor", status: "active" },
+    { role: "editor" }
+  )).toEqual({ role: "editor", status: "active", changed: false });
+  expect(() => resolveMembershipUpdateTransition(
+    { role: "owner", status: "active" },
+    { status: "removed" }
+  )).toThrow(/owner/i);
+});
+
+test("phase 7 invitation tokens, email binding, and rate scopes use the approved contract", () => {
+  const captureError = (operation: () => unknown) => {
+    try {
+      operation();
+      throw new Error("Expected operation to fail.");
+    } catch (error) {
+      return error;
+    }
+  };
+  expect(normalizeChannelInvitationEmail("  Fan@Example.COM ")).toBe("fan@example.com");
+  expect(() => normalizeChannelInvitationEmail("not-an-email")).toThrow(/email/i);
+  expect(validateChannelInvitationInput({ email: " Fan@Example.COM " }))
+    .toEqual({ email: "fan@example.com" });
+  expect(() => validateChannelInvitationInput({ email: "fan@example.com", userId: "forged" }))
+    .toThrow(/authenticated context/i);
+
+  const invitation = createChannelInvitationToken();
+  expect(invitation.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  expect(invitation.tokenHash).toMatch(/^[a-f0-9]{64}$/);
+  expect(hashChannelInvitationToken(invitation.token)).toBe(invitation.tokenHash);
+  expect(hashChannelInvitationToken(`${invitation.token}x`)).not.toBe(invitation.tokenHash);
+  const now = new Date("2026-07-24T00:00:00.000Z");
+  expect(resolveInvitationAcceptance({
+    status: "pending",
+    email: "fan@example.com",
+    expiresAt: new Date("2026-07-31T00:00:00.000Z")
+  }, " FAN@example.com ", now)).toEqual({ status: "accepted", changed: true });
+  expect(captureError(() => resolveInvitationAcceptance({
+    status: "pending",
+    email: "fan@example.com",
+    expiresAt: new Date("2026-07-31T00:00:00.000Z")
+  }, "wrong@example.com", now))).toMatchObject({ status: 403 });
+  expect(captureError(() => resolveInvitationAcceptance({
+    status: "pending",
+    email: "fan@example.com",
+    expiresAt: new Date("2026-07-23T23:59:59.999Z")
+  }, "fan@example.com", now))).toMatchObject({ status: 409 });
+  for (const status of ["revoked", "accepted", "rejected", "expired"] as const) {
+    expect(captureError(() => resolveInvitationAcceptance({
+      status,
+      email: "fan@example.com",
+      expiresAt: new Date("2026-07-31T00:00:00.000Z")
+    }, "fan@example.com", now))).toMatchObject({ status: 409 });
+  }
+
+  expect(channelMembershipRateLimit("join", "fan-1")).toEqual({
+    scope: "channel-join",
+    subject: "fan-1",
+    limit: 10,
+    windowSeconds: 3600
+  });
+  expect(channelMembershipRateLimit("invite", "owner-1")).toEqual({
+    scope: "channel-invite",
+    subject: "owner-1",
+    limit: 50,
+    windowSeconds: 3600
+  });
+  expect(channelMembershipRateLimit("invite-accept", "fan-1")).toEqual({
+    scope: "channel-invite-accept",
+    subject: "fan-1",
+    limit: 20,
+    windowSeconds: 3600
+  });
+});
+
+test("phase 7 private directory predicate always excludes hidden channels", () => {
+  expect(channelPublicListingWhere(null)).toEqual({
+    status: "active",
+    OR: [
+      { visibility: "public" },
+      { visibility: "private", discoverability: "discoverable" }
+    ]
+  });
+  expect(channelPublicListingWhere("fan-1")).toEqual({
+    status: "active",
+    OR: [
+      { visibility: "public" },
+      { visibility: "private", discoverability: "discoverable" }
+    ]
+  });
 });
 
 test("phase 7 cursor predicates use complete stable tuples without anchor lookup", () => {
@@ -738,6 +884,152 @@ test("phase 7 private discoverable route exposes safe summary only", async ({ re
     "reviewNote", "reviewedAt", "suspendedAt", "createdAt", "updatedAt", "owner", "access", "posts", "nextCursor"
   ]) {
     expect(channel).not.toHaveProperty(forbidden);
+  }
+});
+
+test("phase 7 private membership join, review, leave, and role boundaries are idempotent", async ({}, testInfo) => {
+  const probe = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  try {
+    await requirePhase7(probe, testInfo);
+  } finally {
+    await probe.dispose();
+  }
+
+  const ownerRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const editorRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const memberRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  try {
+    await signInCreator(ownerRequest, "chenmo");
+    await signInCreator(editorRequest);
+    await registerFan(memberRequest, "phase7-join");
+
+    const before = await memberRequest.get("/api/channels/private-curators");
+    expect(before.ok(), await before.text()).toBeTruthy();
+    expect((await before.json()).channel).not.toHaveProperty("posts");
+
+    const forged = await memberRequest.post("/api/channels/private-curators/join-requests?userId=c1");
+    expect(forged.status(), await forged.text()).toBe(400);
+    const first = await memberRequest.post("/api/channels/private-curators/join-requests");
+    expect(first.ok(), await first.text()).toBeTruthy();
+    const repeated = await memberRequest.post("/api/channels/private-curators/join-requests");
+    expect(repeated.ok(), await repeated.text()).toBeTruthy();
+    const pending = (await first.json()).membership;
+    expect((await repeated.json()).membership).toMatchObject({ id: pending.id, status: "pending" });
+
+    const editorList = await editorRequest.get("/api/dashboard/channels/channel-private-curators/members");
+    expect(editorList.ok(), await editorList.text()).toBeTruthy();
+    const editorReview = await editorRequest.post("/api/dashboard/channels/channel-private-curators/members", {
+      data: { membershipId: pending.id, decision: "approved" }
+    });
+    expect(editorReview.status(), await editorReview.text()).toBe(403);
+
+    const approved = await ownerRequest.post("/api/dashboard/channels/channel-private-curators/members", {
+      data: { membershipId: pending.id, decision: "approved" }
+    });
+    expect(approved.ok(), await approved.text()).toBeTruthy();
+    expect((await approved.json()).membership).toMatchObject({ id: pending.id, role: "member", status: "active" });
+    const approveAgain = await ownerRequest.post("/api/dashboard/channels/channel-private-curators/members", {
+      data: { membershipId: pending.id, decision: "approved" }
+    });
+    expect(approveAgain.ok(), await approveAgain.text()).toBeTruthy();
+    expect((await approveAgain.json()).membership).toMatchObject({ id: pending.id, status: "active" });
+
+    const roleDenied = await editorRequest.patch(
+      `/api/dashboard/channels/channel-private-curators/members/${pending.id}`,
+      { data: { role: "editor" } }
+    );
+    expect(roleDenied.status(), await roleDenied.text()).toBe(403);
+    const roleChanged = await ownerRequest.patch(
+      `/api/dashboard/channels/channel-private-curators/members/${pending.id}`,
+      { data: { role: "editor" } }
+    );
+    expect(roleChanged.ok(), await roleChanged.text()).toBeTruthy();
+    expect((await roleChanged.json()).membership).toMatchObject({ role: "editor", status: "active" });
+
+    const privateFeed = await memberRequest.get("/api/channels/private-curators");
+    expect(privateFeed.ok(), await privateFeed.text()).toBeTruthy();
+    expect((await privateFeed.json()).channel).toHaveProperty("posts");
+    const left = await memberRequest.delete("/api/channels/private-curators/membership");
+    expect(left.ok(), await left.text()).toBeTruthy();
+    const leftAgain = await memberRequest.delete("/api/channels/private-curators/membership");
+    expect(leftAgain.ok(), await leftAgain.text()).toBeTruthy();
+    const after = await memberRequest.get("/api/channels/private-curators");
+    expect((await after.json()).channel).not.toHaveProperty("posts");
+  } finally {
+    await ownerRequest.dispose();
+    await editorRequest.dispose();
+    await memberRequest.dispose();
+  }
+});
+
+test("phase 7 invitation acceptance binds session email and does not unlock paid media", async ({}, testInfo) => {
+  const probe = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  try {
+    await requirePhase7(probe, testInfo);
+  } finally {
+    await probe.dispose();
+  }
+
+  const ownerRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const inviteeRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const wrongRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const mediaCreatorRequest = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  try {
+    await signInCreator(ownerRequest, "chenmo");
+    const invitee = await registerFan(inviteeRequest, "phase7-invite");
+    await registerFan(wrongRequest, "phase7-wrong");
+    await signInCreator(mediaCreatorRequest);
+
+    const forged = await ownerRequest.post("/api/dashboard/channels/channel-private-curators/invitations", {
+      data: { email: invitee.email, invitedByUserId: "c1" }
+    });
+    expect(forged.status(), await forged.text()).toBe(400);
+    const created = await ownerRequest.post("/api/dashboard/channels/channel-private-curators/invitations", {
+      data: { email: ` ${invitee.email.toUpperCase()} ` }
+    });
+    expect(created.status(), await created.text()).toBe(201);
+    const createdBody = await created.json();
+    expect(createdBody.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(createdBody.invitation).toMatchObject({ email: invitee.email, status: "pending" });
+    expect(createdBody.invitation).not.toHaveProperty("token");
+    expect(createdBody.invitation).not.toHaveProperty("tokenHash");
+    expect(JSON.stringify(createdBody.invitation)).not.toContain(createdBody.token);
+
+    const wrongEmail = await wrongRequest.post(
+      `/api/channels/invitations/${encodeURIComponent(createdBody.token)}`
+    );
+    expect(wrongEmail.status(), await wrongEmail.text()).toBe(403);
+    const accepted = await inviteeRequest.post(
+      `/api/channels/invitations/${encodeURIComponent(createdBody.token)}`
+    );
+    expect(accepted.ok(), await accepted.text()).toBeTruthy();
+    expect((await accepted.json()).membership).toMatchObject({ role: "member", status: "active" });
+    const replayed = await inviteeRequest.post(
+      `/api/channels/invitations/${encodeURIComponent(createdBody.token)}`
+    );
+    expect(replayed.status(), await replayed.text()).toBe(409);
+
+    const prepared = await mediaCreatorRequest.post("/api/uploads/presign", {
+      data: {
+        fileName: "phase7-membership-entitlement.jpg",
+        mimeType: "image/jpeg",
+        sizeBytes: 100,
+        kind: "image",
+        visibility: "purchase"
+      }
+    });
+    expect(prepared.ok(), await prepared.text()).toBeTruthy();
+    const upload = await prepared.json();
+    const completed = await mediaCreatorRequest.post("/api/uploads/complete", {
+      data: { assetId: upload.assetId, simulate: true, width: 100, height: 100 }
+    });
+    expect(completed.ok(), await completed.text()).toBeTruthy();
+    expect((await inviteeRequest.get(`/api/media/${upload.assetId}/access`)).status()).toBe(403);
+  } finally {
+    await ownerRequest.dispose();
+    await inviteeRequest.dispose();
+    await wrongRequest.dispose();
+    await mediaCreatorRequest.dispose();
   }
 });
 

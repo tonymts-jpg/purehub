@@ -3,6 +3,17 @@ import { CHANNEL_ADMIN_ROLES, isChannelAdminRole, type AdminContext } from "@/li
 import { prisma } from "@/lib/prisma";
 import { getChannelAccess, resolveChannelAccess } from "./auth";
 import {
+  createChannelInvitationToken,
+  hashChannelInvitationToken,
+  normalizeChannelInvitationEmail,
+  resolveInvitationAcceptance,
+  resolveMembershipReviewTransition,
+  resolveMembershipUpdateTransition,
+  type ChannelInvitationStatus,
+  type MembershipReviewDecision,
+  type MembershipUpdateInput
+} from "./membership";
+import {
   CHANNEL_KINDS,
   CHANNEL_QUOTAS,
   CHANNEL_STATUSES,
@@ -15,9 +26,11 @@ import {
   type ChannelLevelId,
   type ChannelLifecycleAction,
   type ChannelListItemDto,
+  type ChannelMemberStatus,
   type ChannelPatchInput,
   type ChannelPostDto,
   type ChannelPostPolicy,
+  type ChannelRole,
   type ChannelStatus,
   type ChannelVisibility,
   type CreateChannelInput,
@@ -37,6 +50,32 @@ const channelOwnerInclude = {
   owner: { select: { id: true, name: true, handle: true, avatar: true } }
 } satisfies Prisma.ChannelInclude;
 
+const channelMembershipSelect = {
+  id: true,
+  channelId: true,
+  userId: true,
+  role: true,
+  status: true,
+  invitedByUserId: true,
+  reviewedByUserId: true,
+  reviewedAt: true,
+  createdAt: true,
+  updatedAt: true
+} satisfies Prisma.ChannelMembershipSelect;
+
+const channelInvitationSelect = {
+  id: true,
+  channelId: true,
+  email: true,
+  invitedUserId: true,
+  expiresAt: true,
+  status: true,
+  invitedByUserId: true,
+  acceptedByUserId: true,
+  createdAt: true,
+  updatedAt: true
+} satisfies Prisma.ChannelInvitationSelect;
+
 type ChannelWithOwner = Prisma.ChannelGetPayload<{ include: typeof channelOwnerInclude }>;
 type DatabaseClient = Prisma.TransactionClient | typeof prisma;
 
@@ -49,6 +88,33 @@ export class ChannelRepositoryError extends Error {
     this.name = "ChannelRepositoryError";
   }
 }
+
+export type ChannelMembershipDto = {
+  id: string;
+  channelId: string;
+  userId: string;
+  role: ChannelRole;
+  status: ChannelMemberStatus;
+  invitedByUserId: string | null;
+  reviewedByUserId: string | null;
+  reviewedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  user?: { id: string; name: string; handle: string; avatar: string };
+};
+
+export type ChannelInvitationDto = {
+  id: string;
+  channelId: string;
+  email: string;
+  invitedUserId: string | null;
+  expiresAt: string;
+  status: ChannelInvitationStatus;
+  invitedByUserId: string;
+  acceptedByUserId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
 
 function denied(message: string): never {
   throw new ChannelRepositoryError(message, 403);
@@ -145,6 +211,50 @@ function mapChannel(channel: ChannelWithOwner, access: ChannelAccess): ChannelDt
     updatedAt: channel.updatedAt.toISOString(),
     owner: channel.owner,
     access
+  };
+}
+
+function mapMembership(membership: {
+  id: string;
+  channelId: string;
+  userId: string;
+  role: string;
+  status: string;
+  invitedByUserId: string | null;
+  reviewedByUserId: string | null;
+  reviewedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+  user?: { id: string; name: string; handle: string; avatar: string };
+}): ChannelMembershipDto {
+  return {
+    ...membership,
+    role: membership.role as ChannelRole,
+    status: membership.status as ChannelMemberStatus,
+    reviewedAt: membership.reviewedAt?.toISOString() ?? null,
+    createdAt: membership.createdAt.toISOString(),
+    updatedAt: membership.updatedAt.toISOString()
+  };
+}
+
+function mapInvitation(invitation: {
+  id: string;
+  channelId: string;
+  email: string;
+  invitedUserId: string | null;
+  expiresAt: Date;
+  status: string;
+  invitedByUserId: string;
+  acceptedByUserId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}): ChannelInvitationDto {
+  return {
+    ...invitation,
+    expiresAt: invitation.expiresAt.toISOString(),
+    status: invitation.status as ChannelInvitationStatus,
+    createdAt: invitation.createdAt.toISOString(),
+    updatedAt: invitation.updatedAt.toISOString()
   };
 }
 
@@ -1001,15 +1111,50 @@ export async function getAdminChannelQuota(admin: AdminContext, userId: string) 
   return getCreatorChannelQuota(userId);
 }
 
+export function channelPublicListingWhere(viewerUserId: string | null): Prisma.ChannelWhereInput {
+  void viewerUserId;
+  return {
+    status: "active",
+    OR: [
+      { visibility: "public" },
+      { visibility: "private", discoverability: "discoverable" }
+    ]
+  };
+}
+
+async function getPublicChannelAccess(
+  viewerUserId: string | null,
+  channel: { id: string; status: string; visibility: string }
+): Promise<ChannelAccess> {
+  const membership = viewerUserId
+    ? await prisma.channelMembership.findFirst({
+        where: {
+          channelId: channel.id,
+          userId: viewerUserId,
+          status: "active",
+          user: { status: "active" }
+        },
+        select: { role: true }
+      })
+    : null;
+  return resolveChannelAccess({
+    status: channel.status as ChannelStatus,
+    visibility: channel.visibility as ChannelVisibility,
+    role: (membership?.role as ChannelRole | undefined) ?? null,
+    adminRole: null
+  });
+}
+
 export async function listChannels(
   input: ListChannelsInput,
-  viewerUserId: string | null
+  viewerUserId: string | null,
+  options: { publicOnly?: boolean } = {}
 ): Promise<{ channels: ChannelListItemDto[]; nextCursor: string | null }> {
   validateListInput(input);
   const limit = normalizeLimit(input.limit);
   const cursor = decodeRequiredCursor(input.cursor, "channel-list");
 
-  const activeAdmin = viewerUserId
+  const activeAdmin = !options.publicOnly && viewerUserId
       ? await prisma.adminAccount.findFirst({
         where: {
           userId: viewerUserId,
@@ -1027,7 +1172,9 @@ export async function listChannels(
     ...(input.visibility ? { visibility: input.visibility } : {})
   };
 
-  if (hasAdminVisibility) {
+  if (options.publicOnly) {
+    Object.assign(where, channelPublicListingWhere(viewerUserId));
+  } else if (hasAdminVisibility) {
     if (input.status) where.status = input.status;
   } else {
     where.status = "active";
@@ -1052,7 +1199,9 @@ export async function listChannels(
   const hasMore = rows.length > limit;
   if (hasMore) rows.pop();
   const channels = await Promise.all(rows.map(async (channel) => {
-    const access = await getChannelAccess(viewerUserId, channel.id);
+    const access = options.publicOnly
+      ? await getPublicChannelAccess(viewerUserId, channel)
+      : await getChannelAccess(viewerUserId, channel.id);
     return !access.canRead
       ? projectChannelSafeSummary(channel)
       : mapChannel(channel, access);
@@ -1076,16 +1225,18 @@ export async function listChannels(
 export async function getChannelBySlug(
   slug: string,
   viewerUserId: string | null,
-  cursorValue?: string
+  cursorValue?: string,
+  options: { publicOnly?: boolean } = {}
 ): Promise<ChannelDetailResultDto> {
   const channel = await prisma.channel.findUnique({
     where: { slug },
     include: channelOwnerInclude
   });
   if (!channel) notFound();
-  const cursor = decodeRequiredCursor(cursorValue, "channel-feed", channel.id);
 
-  const access = await getChannelAccess(viewerUserId, channel.id);
+  const access = options.publicOnly
+    ? await getPublicChannelAccess(viewerUserId, channel)
+    : await getChannelAccess(viewerUserId, channel.id);
   const maySeeSafeSummary = channel.status === "active"
     && channel.visibility === "private"
     && channel.discoverability === "discoverable";
@@ -1094,6 +1245,7 @@ export async function getChannelBySlug(
   if (!access.canRead) {
     return projectChannelSafeSummary(channel);
   }
+  const cursor = decodeRequiredCursor(cursorValue, "channel-feed", channel.id);
 
   const excluded = await prisma.channelPostExclusion.findMany({
     where: { channelId: channel.id },
@@ -1164,4 +1316,542 @@ export async function getChannelBySlug(
         })
       : null
   };
+}
+
+async function requireMembershipManager(
+  tx: Prisma.TransactionClient,
+  actorUserId: string,
+  channelId: string,
+  allowEditor: boolean
+) {
+  const channel = await tx.channel.findUnique({
+    where: { id: channelId },
+    select: {
+      id: true,
+      status: true,
+      visibility: true,
+      ownerUserId: true,
+      memberships: {
+        where: {
+          userId: actorUserId,
+          status: "active",
+          role: { in: allowEditor ? ["owner", "editor"] : ["owner"] },
+          user: { status: "active" }
+        },
+        select: { role: true },
+        take: 1
+      }
+    }
+  });
+  if (!channel) notFound();
+  if (channel.status !== "active") {
+    conflict("Membership management requires an active channel.");
+  }
+  const role = channel.memberships[0]?.role;
+  if (!role || (!allowEditor && (role !== "owner" || channel.ownerUserId !== actorUserId))) {
+    denied(allowEditor
+      ? "Only an active channel owner or editor may view members."
+      : "Only the active channel owner may manage members.");
+  }
+  return { ...channel, actorRole: role as "owner" | "editor" };
+}
+
+export async function requestChannelMembership(
+  actorUserId: string,
+  slug: string
+): Promise<ChannelMembershipDto> {
+  return prisma.$transaction(async (tx) => {
+    const channel = await tx.channel.findUnique({
+      where: { slug },
+      select: { id: true, status: true, visibility: true, discoverability: true }
+    });
+    if (!channel || channel.discoverability === "hidden") notFound();
+    if (channel.status !== "active") conflict("This channel is not accepting join requests.");
+    if (channel.visibility !== "private") conflict("Public channels do not require membership requests.");
+
+    const existing = await tx.channelMembership.findUnique({
+      where: { channelId_userId: { channelId: channel.id, userId: actorUserId } },
+      select: channelMembershipSelect
+    });
+    if (existing?.status === "pending") return mapMembership(existing);
+    if (existing?.status === "active") {
+      conflict("The authenticated user is already an active channel member.");
+    }
+    if (existing?.status === "invited") {
+      conflict("The authenticated user already has a pending invitation.");
+    }
+
+    const membership = await tx.channelMembership.upsert({
+      where: { channelId_userId: { channelId: channel.id, userId: actorUserId } },
+      update: {
+        role: "member",
+        status: "pending",
+        invitedByUserId: null,
+        reviewedByUserId: null,
+        reviewedAt: null
+      },
+      create: {
+        channelId: channel.id,
+        userId: actorUserId,
+        role: "member",
+        status: "pending"
+      },
+      select: channelMembershipSelect
+    });
+    await tx.auditLog.create({
+      data: {
+        actorUserId,
+        actorRole: "user",
+        action: "channel.membership_request",
+        targetType: "channel_membership",
+        targetId: membership.id,
+        metadata: { previousStatus: existing?.status ?? null, status: "pending", channelId: channel.id }
+      }
+    });
+    return mapMembership(membership);
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+}
+
+export async function listChannelMembers(
+  actorUserId: string,
+  channelId: string
+): Promise<ChannelMembershipDto[]> {
+  return prisma.$transaction(async (tx) => {
+    await requireMembershipManager(tx, actorUserId, channelId, true);
+    const memberships = await tx.channelMembership.findMany({
+      where: { channelId },
+      orderBy: [{ role: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+      select: {
+        ...channelMembershipSelect,
+        user: { select: { id: true, name: true, handle: true, avatar: true } }
+      }
+    });
+    return memberships.map(mapMembership);
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+}
+
+export async function reviewChannelMembership(
+  actorUserId: string,
+  channelId: string,
+  membershipId: string,
+  decision: MembershipReviewDecision
+): Promise<ChannelMembershipDto> {
+  return prisma.$transaction(async (tx) => {
+    await requireMembershipManager(tx, actorUserId, channelId, false);
+    const membership = await tx.channelMembership.findFirst({
+      where: { id: membershipId, channelId },
+      select: channelMembershipSelect
+    });
+    if (!membership) throw new ChannelRepositoryError("Channel membership not found.", 404);
+    const transition = resolveMembershipReviewTransition(
+      membership.status as ChannelMemberStatus,
+      decision
+    );
+    if (!transition.changed) return mapMembership(membership);
+
+    const updated = await tx.channelMembership.update({
+      where: { id: membership.id },
+      data: {
+        role: "member",
+        status: transition.status,
+        reviewedByUserId: actorUserId,
+        reviewedAt: new Date()
+      },
+      select: channelMembershipSelect
+    });
+    await tx.auditLog.create({
+      data: {
+        actorUserId,
+        actorRole: "owner",
+        action: "channel.membership_review",
+        targetType: "channel_membership",
+        targetId: membership.id,
+        metadata: {
+          channelId,
+          decision,
+          previousStatus: membership.status,
+          status: transition.status
+        }
+      }
+    });
+    return mapMembership(updated);
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+}
+
+export async function updateChannelMembership(
+  actorUserId: string,
+  channelId: string,
+  membershipId: string,
+  input: MembershipUpdateInput
+): Promise<ChannelMembershipDto> {
+  return prisma.$transaction(async (tx) => {
+    const channel = await requireMembershipManager(tx, actorUserId, channelId, false);
+    const membership = await tx.channelMembership.findFirst({
+      where: { id: membershipId, channelId },
+      select: channelMembershipSelect
+    });
+    if (!membership) throw new ChannelRepositoryError("Channel membership not found.", 404);
+    if (membership.userId === channel.ownerUserId || membership.role === "owner") {
+      conflict("The channel owner membership cannot be changed here.");
+    }
+    const transition = resolveMembershipUpdateTransition({
+      role: membership.role as ChannelRole,
+      status: membership.status as ChannelMemberStatus
+    }, input);
+    if (!transition.changed) return mapMembership(membership);
+
+    const updated = await tx.channelMembership.update({
+      where: { id: membership.id },
+      data: {
+        role: transition.role,
+        status: transition.status,
+        reviewedByUserId: actorUserId,
+        reviewedAt: new Date()
+      },
+      select: channelMembershipSelect
+    });
+    await tx.auditLog.create({
+      data: {
+        actorUserId,
+        actorRole: "owner",
+        action: "channel.membership_update",
+        targetType: "channel_membership",
+        targetId: membership.id,
+        metadata: {
+          channelId,
+          previousRole: membership.role,
+          role: transition.role,
+          previousStatus: membership.status,
+          status: transition.status
+        }
+      }
+    });
+    return mapMembership(updated);
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+}
+
+export async function leaveChannelMembership(
+  actorUserId: string,
+  slug: string
+): Promise<{ membership: ChannelMembershipDto | null; changed: boolean }> {
+  return prisma.$transaction(async (tx) => {
+    const channel = await tx.channel.findUnique({
+      where: { slug },
+      select: { id: true, ownerUserId: true }
+    });
+    if (!channel) notFound();
+    const membership = await tx.channelMembership.findUnique({
+      where: { channelId_userId: { channelId: channel.id, userId: actorUserId } },
+      select: channelMembershipSelect
+    });
+    if (!membership) return { membership: null, changed: false };
+    if (membership.userId === channel.ownerUserId || membership.role === "owner") {
+      conflict("The channel owner cannot leave without transferring ownership.");
+    }
+    if (membership.status === "removed") {
+      return { membership: mapMembership(membership), changed: false };
+    }
+    const updated = await tx.channelMembership.update({
+      where: { id: membership.id },
+      data: {
+        status: "removed",
+        reviewedByUserId: actorUserId,
+        reviewedAt: new Date()
+      },
+      select: channelMembershipSelect
+    });
+    await tx.auditLog.create({
+      data: {
+        actorUserId,
+        actorRole: "member",
+        action: "channel.membership_leave",
+        targetType: "channel_membership",
+        targetId: membership.id,
+        metadata: { channelId: channel.id, previousStatus: membership.status, status: "removed" }
+      }
+    });
+    return { membership: mapMembership(updated), changed: true };
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+}
+
+export async function createChannelInvitation(
+  actorUserId: string,
+  channelId: string,
+  emailValue: string
+): Promise<{ invitation: ChannelInvitationDto; token: string }> {
+  const email = normalizeChannelInvitationEmail(emailValue);
+  const { token, tokenHash } = createChannelInvitationToken();
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+  const invitation = await prisma.$transaction(async (tx) => {
+    await requireMembershipManager(tx, actorUserId, channelId, false);
+    const channel = await tx.channel.findUnique({
+      where: { id: channelId },
+      select: { visibility: true }
+    });
+    if (!channel) notFound();
+    if (channel.visibility !== "private") conflict("Invitations are only available for private channels.");
+
+    const invitedUser = await tx.user.findFirst({
+      where: { email: { equals: email, mode: "insensitive" }, status: "active" },
+      select: { id: true }
+    });
+    const existingMembership = invitedUser
+      ? await tx.channelMembership.findUnique({
+          where: { channelId_userId: { channelId, userId: invitedUser.id } },
+          select: channelMembershipSelect
+        })
+      : null;
+    if (existingMembership?.status === "active") {
+      conflict("The invited user is already an active channel member.");
+    }
+    if (existingMembership?.role === "owner") {
+      conflict("The channel owner cannot be invited.");
+    }
+
+    await tx.channelInvitation.updateMany({
+      where: { channelId, email, status: "pending" },
+      data: { status: "revoked" }
+    });
+    const created = await tx.channelInvitation.create({
+      data: {
+        channelId,
+        email,
+        invitedUserId: invitedUser?.id ?? null,
+        tokenHash,
+        expiresAt,
+        status: "pending",
+        invitedByUserId: actorUserId
+      },
+      select: channelInvitationSelect
+    });
+    if (
+      invitedUser
+      && existingMembership?.status !== "pending"
+      && existingMembership?.status !== "invited"
+    ) {
+      const invitedMembership = await tx.channelMembership.upsert({
+        where: { channelId_userId: { channelId, userId: invitedUser.id } },
+        update: {
+          role: "member",
+          status: "invited",
+          invitedByUserId: actorUserId,
+          reviewedByUserId: null,
+          reviewedAt: null
+        },
+        create: {
+          channelId,
+          userId: invitedUser.id,
+          role: "member",
+          status: "invited",
+          invitedByUserId: actorUserId
+        },
+        select: channelMembershipSelect
+      });
+      await tx.auditLog.create({
+        data: {
+          actorUserId,
+          actorRole: "owner",
+          action: "channel.membership_invite",
+          targetType: "channel_membership",
+          targetId: invitedMembership.id,
+          metadata: {
+            channelId,
+            invitationId: created.id,
+            previousStatus: existingMembership?.status ?? null,
+            status: "invited"
+          }
+        }
+      });
+    }
+    await tx.auditLog.create({
+      data: {
+        actorUserId,
+        actorRole: "owner",
+        action: "channel.invitation_create",
+        targetType: "channel_invitation",
+        targetId: created.id,
+        metadata: { channelId, status: "pending", expiresAt: expiresAt.toISOString() }
+      }
+    });
+    return created;
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+
+  return { invitation: mapInvitation(invitation), token };
+}
+
+export async function acceptChannelInvitation(
+  actor: { id: string; email: string },
+  token: string
+): Promise<{ invitation: ChannelInvitationDto; membership: ChannelMembershipDto }> {
+  const tokenHash = hashChannelInvitationToken(token);
+  const result = await prisma.$transaction(async (tx) => {
+    const invitation = await tx.channelInvitation.findUnique({
+      where: { tokenHash },
+      select: {
+        ...channelInvitationSelect,
+        channel: { select: { status: true, visibility: true } }
+      }
+    });
+    if (!invitation) throw new ChannelRepositoryError("Invitation not found.", 404);
+    if (normalizeChannelInvitationEmail(actor.email) !== normalizeChannelInvitationEmail(invitation.email)) {
+      denied("Invitation email does not match the authenticated user.");
+    }
+    if (invitation.status === "pending" && invitation.expiresAt.getTime() <= Date.now()) {
+      const expired = await tx.channelInvitation.update({
+        where: { id: invitation.id },
+        data: { status: "expired" },
+        select: channelInvitationSelect
+      });
+      return { failure: "Invitation is expired.", invitation: expired } as const;
+    }
+    resolveInvitationAcceptance({
+      status: invitation.status as ChannelInvitationStatus,
+      email: invitation.email,
+      expiresAt: invitation.expiresAt
+    }, actor.email);
+    if (invitation.channel.status !== "active" || invitation.channel.visibility !== "private") {
+      conflict("Invitation channel is not active and private.");
+    }
+
+    const user = await tx.user.findUnique({
+      where: { id: actor.id },
+      select: { id: true, email: true, status: true }
+    });
+    if (
+      !user
+      || user.status !== "active"
+      || normalizeChannelInvitationEmail(user.email) !== normalizeChannelInvitationEmail(invitation.email)
+    ) {
+      denied("Invitation email does not match the authenticated user.");
+    }
+    const existing = await tx.channelMembership.findUnique({
+      where: { channelId_userId: { channelId: invitation.channelId, userId: actor.id } },
+      select: channelMembershipSelect
+    });
+    if (existing?.role === "owner") conflict("The channel owner cannot accept a member invitation.");
+    const role = existing?.status === "active" && existing.role === "editor" ? "editor" : "member";
+    const membership = await tx.channelMembership.upsert({
+      where: { channelId_userId: { channelId: invitation.channelId, userId: actor.id } },
+      update: {
+        role,
+        status: "active",
+        invitedByUserId: invitation.invitedByUserId,
+        reviewedByUserId: invitation.invitedByUserId,
+        reviewedAt: new Date()
+      },
+      create: {
+        channelId: invitation.channelId,
+        userId: actor.id,
+        role: "member",
+        status: "active",
+        invitedByUserId: invitation.invitedByUserId,
+        reviewedByUserId: invitation.invitedByUserId,
+        reviewedAt: new Date()
+      },
+      select: channelMembershipSelect
+    });
+    const accepted = await tx.channelInvitation.update({
+      where: { id: invitation.id },
+      data: { status: "accepted", acceptedByUserId: actor.id },
+      select: channelInvitationSelect
+    });
+    await tx.auditLog.create({
+      data: {
+        actorUserId: actor.id,
+        actorRole: "member",
+        action: "channel.invitation_accept",
+        targetType: "channel_membership",
+        targetId: membership.id,
+        metadata: {
+          channelId: invitation.channelId,
+          invitationId: invitation.id,
+          previousStatus: existing?.status ?? null,
+          status: "active"
+        }
+      }
+    });
+    return { invitation: accepted, membership } as const;
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+
+  if ("failure" in result && typeof result.failure === "string") {
+    throw new ChannelRepositoryError(result.failure, 409);
+  }
+  return {
+    invitation: mapInvitation(result.invitation),
+    membership: mapMembership(result.membership)
+  };
+}
+
+export async function rejectChannelInvitation(
+  actor: { id: string; email: string },
+  token: string
+): Promise<{ invitation: ChannelInvitationDto }> {
+  const tokenHash = hashChannelInvitationToken(token);
+  const invitation = await prisma.$transaction(async (tx) => {
+    const current = await tx.channelInvitation.findUnique({
+      where: { tokenHash },
+      select: channelInvitationSelect
+    });
+    if (!current) throw new ChannelRepositoryError("Invitation not found.", 404);
+    if (normalizeChannelInvitationEmail(actor.email) !== normalizeChannelInvitationEmail(current.email)) {
+      denied("Invitation email does not match the authenticated user.");
+    }
+    if (current.status !== "pending") conflict(`Invitation is ${current.status}.`);
+    if (current.expiresAt.getTime() <= Date.now()) conflict("Invitation is expired.");
+
+    const rejected = await tx.channelInvitation.update({
+      where: { id: current.id },
+      data: { status: "rejected" },
+      select: channelInvitationSelect
+    });
+    if (current.invitedUserId === actor.id) {
+      const membership = await tx.channelMembership.findUnique({
+        where: {
+          channelId_userId: {
+            channelId: current.channelId,
+            userId: actor.id
+          }
+        },
+        select: channelMembershipSelect
+      });
+      if (membership?.status === "invited" && membership.role === "member") {
+        await tx.channelMembership.update({
+          where: { id: membership.id },
+          data: {
+            status: "rejected",
+            reviewedByUserId: actor.id,
+            reviewedAt: new Date()
+          }
+        });
+        await tx.auditLog.create({
+          data: {
+            actorUserId: actor.id,
+            actorRole: "member",
+            action: "channel.membership_reject_invitation",
+            targetType: "channel_membership",
+            targetId: membership.id,
+            metadata: {
+              channelId: current.channelId,
+              invitationId: current.id,
+              previousStatus: "invited",
+              status: "rejected"
+            }
+          }
+        });
+      }
+    }
+    await tx.auditLog.create({
+      data: {
+        actorUserId: actor.id,
+        actorRole: "member",
+        action: "channel.invitation_reject",
+        targetType: "channel_invitation",
+        targetId: current.id,
+        metadata: { channelId: current.channelId, status: "rejected" }
+      }
+    });
+    return rejected;
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  return { invitation: mapInvitation(invitation) };
 }

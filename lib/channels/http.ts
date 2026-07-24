@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { ChannelMembershipError } from "./membership";
 import { ChannelRepositoryError } from "./repository";
 import type { ListChannelsInput } from "./types";
 
@@ -45,6 +46,9 @@ export function channelListInput(request: Request): ListChannelsInput {
 
 export function channelRouteError(error: unknown): NextResponse {
   if (error instanceof ChannelRepositoryError) {
+    return NextResponse.json({ error: error.message }, { status: error.status });
+  }
+  if (error instanceof ChannelMembershipError) {
     return NextResponse.json({ error: error.message }, { status: error.status });
   }
   if (error instanceof TypeError) {

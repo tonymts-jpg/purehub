@@ -216,6 +216,7 @@ export function assertNoChannelIdentityOverrides(
 
 function isChannelIdentityKey(value: string): boolean {
   const normalized = value.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  if (normalized === "email" || normalized.endsWith("email")) return true;
   if (!normalized.endsWith("id")) return false;
   return [
     "user",
