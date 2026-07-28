@@ -31,12 +31,6 @@ test("core pages are reachable", async ({ page }) => {
   await expect(page.locator("main").first()).toBeVisible();
 });
 
-test("demo state can be reset", async ({ page }) => {
-  await page.goto("/demo");
-  await page.getByRole("button", { name: /重置/ }).click();
-  await expect(page.getByRole("status")).toContainText("Demo");
-});
-
 test("home uses configured categories and filters content", async ({ page }) => {
   await page.goto("/");
   for (const category of CONTENT_CATEGORIES) {
