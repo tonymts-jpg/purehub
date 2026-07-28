@@ -15,9 +15,11 @@ import {
   assertPhase7MediaLifecycleAbsent,
   cleanupPhase7MediaLifecycle,
   createPhase7MediaLifecycleCleanupScope,
+  deletePhase7MediaObjectsThroughRaceWindow,
   lifecycleObjectKeysForAsset,
   objectStorageTestConfigAvailable,
-  putPhase7LifecycleTestObject
+  putPhase7LifecycleTestObject,
+  quiescePhase7MediaAssetForCleanup
 } from "./phase7-media-lifecycle-cleanup";
 
 test("media MIME policy rejects active content and kind mismatches", () => {
@@ -118,6 +120,81 @@ test("lifecycle cleanup derives an image derivative key before the worker record
     "derivatives/isolated-asset/attempts/44444444-4444-4444-8444-444444444444.jpg",
     "derivatives/isolated-asset/watermarked.jpg"
   ]);
+});
+
+test("lifecycle cleanup retries a lost status CAS and re-lists late exact-prefix objects without crossing assets", async () => {
+  const assetId = "cleanup-cas-asset";
+  const ownerId = "cleanup-cas-owner";
+  const claimStatus = "processing_claimed:66666666-6666-4666-8666-666666666666";
+  const lateAttemptKey = `derivatives/${assetId}/attempts/late-orphan.jpg`;
+  const otherAssetKey = "derivatives/cleanup-other-asset/attempts/must-remain.jpg";
+  const record = {
+    id: assetId,
+    uploaderUserId: ownerId,
+    kind: "image",
+    storageKey: `original/${ownerId}/source.png`,
+    derivativeKey: null,
+    status: "processing"
+  };
+  let casAttempts = 0;
+  const claimed = await quiescePhase7MediaAssetForCleanup({
+    assetId,
+    identityIds: [ownerId],
+    database: {
+      findFirst: async () => ({ ...record }),
+      updateMany: async ({ where, data }) => {
+        casAttempts += 1;
+        if (casAttempts === 1) {
+          record.status = claimStatus;
+          return { count: 0 };
+        }
+        if (
+          where.id === record.id
+          && where.uploaderUserId.in.includes(record.uploaderUserId)
+          && where.status === record.status
+        ) {
+          record.status = data.status;
+          return { count: 1 };
+        }
+        return { count: 0 };
+      }
+    }
+  });
+
+  expect(casAttempts).toBe(2);
+  expect(record.status).toBe("cleanup_pending");
+  expect(claimed?.status).toBe(claimStatus);
+
+  const scope = createPhase7MediaLifecycleCleanupScope();
+  scope.identities.push({ id: ownerId, email: `${ownerId}@e2e.purehub.local` });
+  scope.assetIds.add(assetId);
+  scope.assetKinds.set(assetId, "image");
+  lifecycleObjectKeysForAsset(claimed!).forEach((key) => scope.objectKeys.add(key));
+  const objects = new Map<string, Buffer>([[otherAssetKey, Buffer.from("other")]]);
+  const deletedKeys: string[] = [];
+  let listCalls = 0;
+  await deletePhase7MediaObjectsThroughRaceWindow(scope, {
+    delaysMs: [0, 0, 0, 0],
+    store: {
+      listObjects: async (prefix) => {
+        listCalls += 1;
+        const keys = [...objects.keys()].filter((key) => key.startsWith(prefix));
+        if (listCalls === 1) objects.set(lateAttemptKey, Buffer.from("late"));
+        return { keys };
+      },
+      deleteObject: async (key) => {
+        deletedKeys.push(key);
+        objects.delete(key);
+      },
+      objectExists: async (key) => objects.has(key)
+    }
+  });
+
+  expect(listCalls).toBeGreaterThanOrEqual(4);
+  expect(scope.objectKeys.has(lateAttemptKey)).toBe(true);
+  expect(objects.has(lateAttemptKey)).toBe(false);
+  expect(objects.get(otherAssetKey)?.toString()).toBe("other");
+  expect(deletedKeys).not.toContain(otherAssetKey);
 });
 
 test("lifecycle cleanup accepts exact processing and claimed media assets", async ({ request }, testInfo: TestInfo) => {

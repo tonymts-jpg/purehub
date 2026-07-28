@@ -142,24 +142,6 @@ function isMissingObject(error: unknown) {
     || candidate.Code === "NoSuchKey";
 }
 
-async function assertObjectsAbsent(objectKeys: string[]) {
-  if (!objectKeys.length) return;
-  if (!objectStorageTestConfigAvailable()) throw new Error("Object storage test configuration is unavailable.");
-  const client = storageClient();
-  try {
-    for (const key of objectKeys) {
-      try {
-        await client.send(new HeadObjectCommand({ Bucket: storageBucket(), Key: key }));
-        throw new Error(`Acceptance object cleanup failed for ${key}.`);
-      } catch (error) {
-        if (!isMissingObject(error)) throw error;
-      }
-    }
-  } finally {
-    client.destroy();
-  }
-}
-
 export function lifecycleObjectKeysForAsset(asset: {
   id: string;
   kind: string;
@@ -182,27 +164,113 @@ export function lifecycleObjectKeysForAsset(asset: {
   return [...keys];
 }
 
-async function discoverDerivativeObjects(scope: Phase7MediaLifecycleCleanupScope) {
-  if (!scope.assetIds.size || !objectStorageTestConfigAvailable()) return;
-  const client = storageClient();
-  try {
-    for (const assetId of scope.assetIds) {
-      let continuationToken: string | undefined;
-      do {
-        const listed = await client.send(new ListObjectsV2Command({
-          Bucket: storageBucket(),
-          Prefix: `derivatives/${assetId}/`,
-          ContinuationToken: continuationToken
-        }));
-        for (const object of listed.Contents ?? []) {
-          if (object.Key) scope.objectKeys.add(object.Key);
-        }
-        continuationToken = listed.IsTruncated ? listed.NextContinuationToken : undefined;
-      } while (continuationToken);
-    }
-  } finally {
-    client.destroy();
+type CleanupMediaRecord = {
+  id: string;
+  uploaderUserId: string | null;
+  kind: string;
+  storageKey: string | null;
+  derivativeKey: string | null;
+  status: string;
+};
+
+type CleanupMediaDatabase = {
+  findFirst(input: {
+    where: { id: string; uploaderUserId: { in: string[] } };
+    select: Record<keyof CleanupMediaRecord, true>;
+  }): Promise<CleanupMediaRecord | null>;
+  updateMany(input: {
+    where: { id: string; uploaderUserId: { in: string[] }; status: string };
+    data: { status: string };
+  }): Promise<{ count: number }>;
+};
+
+export async function quiescePhase7MediaAssetForCleanup(input: {
+  assetId: string;
+  identityIds: string[];
+  database: CleanupMediaDatabase;
+}) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const current = await input.database.findFirst({
+      where: { id: input.assetId, uploaderUserId: { in: input.identityIds } },
+      select: {
+        id: true,
+        uploaderUserId: true,
+        kind: true,
+        storageKey: true,
+        derivativeKey: true,
+        status: true
+      }
+    });
+    if (!current) return null;
+    const claimed = await input.database.updateMany({
+      where: {
+        id: current.id,
+        uploaderUserId: { in: input.identityIds },
+        status: current.status
+      },
+      data: { status: "cleanup_pending" }
+    });
+    if (claimed.count === 1) return current;
   }
+  throw new Error(`Cleanup could not quiesce exact media asset ${input.assetId}.`);
+}
+
+type CleanupObjectStore = {
+  listObjects(prefix: string, continuationToken?: string): Promise<{
+    keys: string[];
+    nextToken?: string;
+  }>;
+  deleteObject(key: string): Promise<void>;
+  objectExists(key: string): Promise<boolean>;
+  destroy?: () => void;
+};
+
+function defaultCleanupObjectStore(): CleanupObjectStore {
+  const client = storageClient();
+  return {
+    listObjects: async (prefix, continuationToken) => {
+      const listed = await client.send(new ListObjectsV2Command({
+        Bucket: storageBucket(),
+        Prefix: prefix,
+        ContinuationToken: continuationToken
+      }));
+      return {
+        keys: (listed.Contents ?? []).flatMap((object) => object.Key ? [object.Key] : []),
+        ...(listed.IsTruncated && listed.NextContinuationToken
+          ? { nextToken: listed.NextContinuationToken }
+          : {})
+      };
+    },
+    deleteObject: async (key) => {
+      await client.send(new DeleteObjectCommand({ Bucket: storageBucket(), Key: key }));
+    },
+    objectExists: async (key) => {
+      try {
+        await client.send(new HeadObjectCommand({ Bucket: storageBucket(), Key: key }));
+        return true;
+      } catch (error) {
+        if (isMissingObject(error)) return false;
+        throw error;
+      }
+    },
+    destroy: () => client.destroy()
+  };
+}
+
+async function listExactDerivativePrefixes(
+  scope: Phase7MediaLifecycleCleanupScope,
+  store: CleanupObjectStore
+) {
+  const keys: string[] = [];
+  for (const assetId of scope.assetIds) {
+    let continuationToken: string | undefined;
+    do {
+      const listed = await store.listObjects(`derivatives/${assetId}/`, continuationToken);
+      keys.push(...listed.keys);
+      continuationToken = listed.nextToken;
+    } while (continuationToken);
+  }
+  return keys;
 }
 
 export async function putPhase7LifecycleTestObject(key: string, body: Buffer, contentType = "video/mp4") {
@@ -221,21 +289,42 @@ export async function putPhase7LifecycleTestObject(key: string, body: Buffer, co
   }
 }
 
-async function deleteObjectsThroughRaceWindow(objectKeys: string[]) {
-  if (!objectKeys.length) return;
-  if (!objectStorageTestConfigAvailable()) throw new Error("Object storage test configuration is unavailable.");
-  const client = storageClient();
-  const retryDelaysMs = [0, 100, 200, 400, 800];
+export async function deletePhase7MediaObjectsThroughRaceWindow(
+  scope: Phase7MediaLifecycleCleanupScope,
+  options: {
+    store?: CleanupObjectStore;
+    delaysMs?: number[];
+  } = {}
+) {
+  assertSafeScope(scope);
+  if (!options.store && !objectStorageTestConfigAvailable()) {
+    if (!scope.objectKeys.size) return;
+    throw new Error("Object storage test configuration is unavailable.");
+  }
+  const store = options.store ?? defaultCleanupObjectStore();
+  const retryDelaysMs = options.delaysMs ?? [0, 100, 200, 400, 800, 1000];
+  let consecutiveCleanObservations = 0;
   try {
     for (const delayMs of retryDelaysMs) {
       if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
-      for (const key of objectKeys) {
-        await client.send(new DeleteObjectCommand({ Bucket: storageBucket(), Key: key }));
+      const beforeDelete = await listExactDerivativePrefixes(scope, store);
+      beforeDelete.forEach((key) => scope.objectKeys.add(key));
+      for (const key of scope.objectKeys) {
+        await store.deleteObject(key);
       }
-      await assertObjectsAbsent(objectKeys);
+      const afterDelete = await listExactDerivativePrefixes(scope, store);
+      afterDelete.forEach((key) => scope.objectKeys.add(key));
+      let knownObjectExists = false;
+      for (const key of scope.objectKeys) {
+        if (await store.objectExists(key)) knownObjectExists = true;
+      }
+      const clean = afterDelete.length === 0 && !knownObjectExists;
+      consecutiveCleanObservations = clean ? consecutiveCleanObservations + 1 : 0;
+      if (consecutiveCleanObservations >= 2) return;
     }
+    throw new Error("Acceptance media object cleanup did not reach two consecutive clean observations.");
   } finally {
-    client.destroy();
+    store.destroy?.();
   }
 }
 
@@ -248,14 +337,13 @@ export async function cleanupPhase7MediaLifecycle(scope: Phase7MediaLifecycleCle
   const assetIds = [...scope.assetIds];
   const orderIds = [...scope.orderIds];
 
-  await discoverDerivativeObjects(scope);
   for (const [assetId, kind] of scope.assetKinds) {
     if (kind === "image") scope.objectKeys.add(`derivatives/${assetId}/watermarked.jpg`);
   }
   const storedAssets = assetIds.length
     ? await prisma.mediaAsset.findMany({
       where: { id: { in: assetIds } },
-      select: { id: true, uploaderUserId: true, kind: true, storageKey: true, derivativeKey: true, status: true }
+      select: { id: true, uploaderUserId: true, kind: true, storageKey: true, derivativeKey: true }
     })
     : [];
   for (const asset of storedAssets) {
@@ -300,18 +388,13 @@ export async function cleanupPhase7MediaLifecycle(scope: Phase7MediaLifecycleCle
       throw new Error("Cleanup orders must be isolated to exact E2E identities.");
     }
 
-    if (assetIds.length) {
-      const claimingAssets = await tx.mediaAsset.findMany({
-        where: { id: { in: assetIds }, uploaderUserId: { in: identityIds } },
-        select: { id: true, kind: true, storageKey: true, derivativeKey: true, status: true }
+    for (const assetId of assetIds) {
+      const claimed = await quiescePhase7MediaAssetForCleanup({
+        assetId,
+        identityIds,
+        database: tx.mediaAsset as unknown as CleanupMediaDatabase
       });
-      claimingAssets.forEach((asset) => {
-        lifecycleObjectKeysForAsset(asset).forEach((key) => scope.objectKeys.add(key));
-      });
-      await tx.mediaAsset.updateMany({
-        where: { id: { in: assetIds }, uploaderUserId: { in: identityIds } },
-        data: { status: "cleanup_pending" }
-      });
+      if (claimed) lifecycleObjectKeysForAsset(claimed).forEach((key) => scope.objectKeys.add(key));
     }
 
     const ownedLedgerAccounts = identityIds.length
@@ -409,9 +492,7 @@ export async function cleanupPhase7MediaLifecycle(scope: Phase7MediaLifecycleCle
     }
   });
 
-  await discoverDerivativeObjects(scope);
-  const objectKeys = [...scope.objectKeys];
-  await deleteObjectsThroughRaceWindow(objectKeys);
+  await deletePhase7MediaObjectsThroughRaceWindow(scope);
   await assertPhase7MediaLifecycleAbsent(scope);
 }
 
@@ -454,5 +535,5 @@ export async function assertPhase7MediaLifecycleAbsent(scope: Phase7MediaLifecyc
       throw new Error("Phase 7 lifecycle cleanup did not restore exact shared ledger balances.");
     }
   }
-  await assertObjectsAbsent([...scope.objectKeys]);
+  await deletePhase7MediaObjectsThroughRaceWindow(scope);
 }
