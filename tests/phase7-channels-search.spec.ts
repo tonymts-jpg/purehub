@@ -3313,7 +3313,6 @@ test("phase 7 channel UI returns not-found for an anonymous hidden private chann
 });
 
 test("phase 7 channel UI and search UI preserve complete ordered cursor pages", async ({ page, request, browser }, testInfo) => {
-  test.slow();
   test.skip(!(await hasDatabase(request)), "Phase 7 search UI requires the seeded PostgreSQL database.");
   const nonce = `${testInfo.project.name}-${Date.now().toString(36)}`;
   const query = `uituple${Date.now().toString(36)}`;
@@ -3347,6 +3346,7 @@ test("phase 7 channel UI and search UI preserve complete ordered cursor pages", 
       }))
     });
     const expectedDirectory: string[] = [];
+    const directoryCursors = new Set<string>();
     let directoryCursor: string | null = null;
     do {
       const params = new URLSearchParams({ kind: "creator", limit: "20" });
@@ -3356,6 +3356,10 @@ test("phase 7 channel UI and search UI preserve complete ordered cursor pages", 
       const body = await response.json();
       expectedDirectory.push(...body.channels.map((channel: { slug: string }) => channel.slug));
       directoryCursor = body.nextCursor;
+      if (directoryCursor) {
+        expect(directoryCursors.has(directoryCursor), "Channel directory cursor repeated.").toBeFalsy();
+        directoryCursors.add(directoryCursor);
+      }
     } while (directoryCursor);
 
     await page.goto("/channels");
@@ -3379,6 +3383,7 @@ test("phase 7 channel UI and search UI preserve complete ordered cursor pages", 
     }
 
     const expectedSearch: string[] = [];
+    const searchCursors = new Set<string>();
     let searchCursor: string | null = null;
     do {
       const params = new URLSearchParams({ q: query, type: "channel", limit: "6" });
@@ -3388,6 +3393,10 @@ test("phase 7 channel UI and search UI preserve complete ordered cursor pages", 
       const body = await response.json();
       expectedSearch.push(...body.results.map((result: { entityId: string }) => result.entityId));
       searchCursor = body.nextCursor;
+      if (searchCursor) {
+        expect(searchCursors.has(searchCursor), "Search cursor repeated.").toBeFalsy();
+        searchCursors.add(searchCursor);
+      }
     } while (searchCursor);
 
     await page.goto(`/search?q=${query}&type=channel`);

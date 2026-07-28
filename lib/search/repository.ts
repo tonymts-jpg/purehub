@@ -524,14 +524,14 @@ export async function searchEntities(
         document."title",
         document."body",
         document."publishedAt",
-        (
+        round((
           ts_rank_cd(
             document."searchVector",
             websearch_to_tsquery('simple', ${normalized.query})
           ) * 1.0
           + similarity(lower(document."title"), lower(${normalized.query})) * 0.35
           + LEAST(document."popularityScore", 100000) / 100000.0 * 0.05
-        )::double precision AS "rank"
+        )::numeric, 12)::double precision AS "rank"
       FROM "SearchDocument" AS document
       WHERE (
         document."searchVector" @@ websearch_to_tsquery('simple', ${normalized.query})

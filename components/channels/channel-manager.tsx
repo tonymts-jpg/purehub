@@ -240,7 +240,7 @@ export function ChannelManager() {
 
           {isOwner && selected.access.canManageMembers && (
             <ChannelMembershipManager
-              key={selected.id}
+              key={`membership-${selected.id}`}
               channel={selected as ManagedChannel}
               canManage={selected.access.role === "owner"}
               runMutation={mutate}
@@ -249,7 +249,7 @@ export function ChannelManager() {
 
           {canCurate && (
             <ChannelCurationManager
-              key={selected.id}
+              key={`curation-${selected.id}`}
               channel={selected as ManagedChannel}
               runMutation={mutate}
             />
