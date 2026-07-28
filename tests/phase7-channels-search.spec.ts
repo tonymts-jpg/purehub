@@ -1,5 +1,4 @@
 import { expect, request as playwrightRequest, test, type APIRequestContext, type TestInfo } from "@playwright/test";
-import type { Prisma } from "@prisma/client";
 import sharp from "sharp";
 import { ADMIN_SECTIONS, isChannelAdminRole } from "../lib/admin-auth";
 import {
@@ -3356,7 +3355,6 @@ test("phase 7 uploaded free image and video assets publish into safe search prev
   }).png().toBuffer();
   const freeVideoBytes = Buffer.from("0123456789abcdef");
   const paidVideoBytes = Buffer.from("paid-video-0123456789");
-  const priorCard = await prisma.paymentChannelConfig.findUnique({ where: { provider: "card" } }).catch(() => null);
 
   async function uploadActualMedia(input: {
     kind: "image" | "video";
@@ -3383,6 +3381,7 @@ test("phase 7 uploaded free image and video assets publish into safe search prev
     };
     assetIds.push(body.assetId);
     cleanupScope.assetIds.add(body.assetId);
+    cleanupScope.assetKinds.set(body.assetId, input.kind);
     expect(body.uploadUrl).toBe(`/api/uploads/${body.assetId}/content`);
     const stored = await creator.put(body.uploadUrl, {
       headers: {
@@ -3553,14 +3552,27 @@ test("phase 7 uploaded free image and video assets publish into safe search prev
     expect(invalidRange.headers()["content-range"]).toBe(`bytes */${freeVideoBytes.length}`);
 
     expect((await anonymous.get(`/api/media/${paidAssetId}/content`)).status()).toBe(403);
-    if (!priorCard) throw new Error("Seeded card payment channel is missing.");
-    await prisma.paymentChannelConfig.update({
+    const cardPrerequisite = await prisma.paymentChannelConfig.findUnique({
       where: { provider: "card" },
-      data: { enabled: true, mode: "test", statusNote: "phase7_real_media_entitlement", config: { adapter: "manual_confirm" } }
+      select: { enabled: true, mode: true, config: true, updatedAt: true }
     });
-    const ledgerAccountsBefore = await prisma.ledgerAccount.findMany({ select: { id: true, balance: true } });
-    const ledgerAccountIdsBefore = new Set(ledgerAccountsBefore.map(({ id }) => id));
-    const ledgerAccountBalancesBefore = new Map(ledgerAccountsBefore.map(({ id, balance }) => [id, balance]));
+    const cardConfig = cardPrerequisite?.config as { adapter?: string } | undefined;
+    if (
+      !cardPrerequisite?.enabled
+      || cardPrerequisite.mode !== "test"
+      || cardConfig?.adapter !== "manual_confirm"
+    ) {
+      throw new Error("Staging prerequisite failed: seeded card test channel must use the manual_confirm adapter.");
+    }
+    const ledgerAccountsBefore = await prisma.ledgerAccount.findMany({
+      select: { id: true, balance: true, ownerUserId: true }
+    });
+    const isolatedUserIds = new Set(cleanupScope.identities.map(({ id }) => id));
+    for (const account of ledgerAccountsBefore) {
+      if (!account.ownerUserId || !isolatedUserIds.has(account.ownerUserId)) {
+        cleanupScope.ledgerAccountBalancesBefore.set(account.id, account.balance);
+      }
+    }
     const orderResponse = await fan.post("/api/payments/orders", {
       headers: authHeaders,
       data: { kind: "post_unlock", itemId: paidPostId }
@@ -3579,20 +3591,11 @@ test("phase 7 uploaded free image and video assets publish into safe search prev
       data: { source: "phase7_real_media_entitlement" }
     });
     expect(confirmed.ok(), await confirmed.text()).toBeTruthy();
-    const paymentLedger = await prisma.ledgerTransaction.findFirstOrThrow({
-      where: { referenceType: "order", referenceId: order.id },
-      include: { entries: true }
+    const cardAfterConfirmation = await prisma.paymentChannelConfig.findUniqueOrThrow({
+      where: { provider: "card" },
+      select: { updatedAt: true }
     });
-    for (const entry of paymentLedger.entries) {
-      if (ledgerAccountIdsBefore.has(entry.accountId)) {
-        cleanupScope.ledgerAccountBalancesBefore.set(
-          entry.accountId,
-          ledgerAccountBalancesBefore.get(entry.accountId)!
-        );
-      } else {
-        cleanupScope.ledgerAccountIdsToDelete.add(entry.accountId);
-      }
-    }
+    expect(cardAfterConfirmation.updatedAt).toEqual(cardPrerequisite.updatedAt);
     const entitledRange = await fan.get(`/api/media/${paidAssetId}/content`, {
       headers: { range: "bytes=0-3" }
     });
@@ -3601,24 +3604,6 @@ test("phase 7 uploaded free image and video assets publish into safe search prev
     expect(entitledRangeBody.toString()).toBe("paid");
   } finally {
     let cleanupError: unknown;
-    if (priorCard) {
-      try {
-        await prisma.paymentChannelConfig.update({
-          where: { provider: "card" },
-          data: {
-            enabled: priorCard.enabled,
-            mode: priorCard.mode,
-            currencies: priorCard.currencies as Prisma.InputJsonValue,
-            regions: priorCard.regions as Prisma.InputJsonValue,
-            feeNote: priorCard.feeNote,
-            statusNote: priorCard.statusNote,
-            config: priorCard.config as Prisma.InputJsonValue
-          }
-        });
-      } catch (error) {
-        cleanupError = error;
-      }
-    }
     try {
       if (databaseReady) {
         let lifecycleCleanupError: unknown;

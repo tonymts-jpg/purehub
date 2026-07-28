@@ -14,6 +14,7 @@ import {
   assertPhase7MediaLifecycleAbsent,
   cleanupPhase7MediaLifecycle,
   createPhase7MediaLifecycleCleanupScope,
+  lifecycleObjectKeysForAsset,
   objectStorageTestConfigAvailable,
   putPhase7LifecycleTestObject
 } from "./phase7-media-lifecycle-cleanup";
@@ -102,6 +103,18 @@ test("lifecycle cleanup refuses shared seeded identities", async () => {
   );
 });
 
+test("lifecycle cleanup derives an image derivative key before the worker records it", () => {
+  expect(lifecycleObjectKeysForAsset({
+    id: "isolated-asset",
+    kind: "image",
+    storageKey: "original/isolated-user/source.png",
+    derivativeKey: null
+  })).toEqual([
+    "original/isolated-user/source.png",
+    "derivatives/isolated-asset/watermarked.jpg"
+  ]);
+});
+
 test("upload API rejects SVG and MIME-kind mismatch before creating an asset", async ({ request }, testInfo: TestInfo) => {
   test.skip(testInfo.project.name === "mobile", "The shared storage mutation runs once.");
   test.skip(!(await hasDatabase(request)), "Upload boundary integration requires PostgreSQL.");
@@ -165,7 +178,8 @@ test("isolated media lifecycle cleanup removes exact finance, identity, and obje
   const postId = `cleanup-post-${nonce}`;
   const assetId = `cleanup-asset-${nonce}`;
   const orderId = `cleanup-order-${nonce}`;
-  const objectKey = `original/${creatorId}/${nonce}.mp4`;
+  const objectKey = `original/${creatorId}/${nonce}.png`;
+  const derivativeKey = `derivatives/${assetId}/watermarked.jpg`;
   const accountIds = [
     `cleanup-provider-${nonce}`,
     `cleanup-platform-${nonce}`,
@@ -178,9 +192,11 @@ test("isolated media lifecycle cleanup removes exact finance, identity, and obje
   );
   scope.postIds.add(postId);
   scope.assetIds.add(assetId);
+  scope.assetKinds.set(assetId, "image");
   scope.orderIds.add(orderId);
   scope.objectKeys.add(objectKey);
-  accountIds.forEach((id) => scope.ledgerAccountIdsToDelete.add(id));
+  accountIds.slice(0, 2).forEach((id) => scope.ledgerAccountIdsToDelete.add(id));
+  let delayedDerivativeWrite: Promise<void> | null = null;
 
   try {
     await prisma.$transaction(async (tx) => {
@@ -217,14 +233,14 @@ test("isolated media lifecycle cleanup removes exact finance, identity, and obje
           uploaderUserId: creatorId,
           src: `/api/media/${assetId}/content`,
           alt: "Cleanup media",
-          width: 0,
-          height: 0,
+          width: 720,
+          height: 900,
           order: 0,
-          kind: "video",
-          mimeType: "video/mp4",
+          kind: "image",
+          mimeType: "image/png",
           sizeBytes: 7,
           storageKey: objectKey,
-          derivativeKey: objectKey,
+          derivativeKey: null,
           status: "ready",
           visibility: "purchase"
         }
@@ -293,12 +309,24 @@ test("isolated media lifecycle cleanup removes exact finance, identity, and obje
         }
       });
     });
-    await putPhase7LifecycleTestObject(objectKey, Buffer.from("cleanup"));
+    await putPhase7LifecycleTestObject(objectKey, Buffer.from("cleanup"), "image/png");
+    delayedDerivativeWrite = new Promise<void>((resolveWrite, rejectWrite) => {
+      setTimeout(() => {
+        void putPhase7LifecycleTestObject(derivativeKey, Buffer.from("delayed"), "image/jpeg")
+          .then(() => resolveWrite())
+          .catch(rejectWrite);
+      }, 150);
+    });
 
     await cleanupPhase7MediaLifecycle(scope);
+    await delayedDerivativeWrite;
+    expect(scope.objectKeys.has(derivativeKey)).toBe(true);
+    expect(scope.ledgerAccountIdsToDelete.has(accountIds[2])).toBe(true);
+    expect(await prisma.ledgerAccount.count({ where: { id: accountIds[2] } })).toBe(0);
     await cleanupPhase7MediaLifecycle(scope);
     await assertPhase7MediaLifecycleAbsent(scope);
   } finally {
+    await delayedDerivativeWrite?.catch(() => undefined);
     let finalCleanupError: unknown;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {

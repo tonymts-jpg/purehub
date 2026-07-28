@@ -15,10 +15,12 @@ export type Phase7MediaLifecycleCleanupScope = {
   identities: AcceptanceIdentity[];
   postIds: Set<string>;
   assetIds: Set<string>;
+  assetKinds: Map<string, string>;
   orderIds: Set<string>;
   objectKeys: Set<string>;
   ledgerAccountIdsToDelete: Set<string>;
   ledgerAccountBalancesBefore: Map<string, number>;
+  ledgerAccountIdsToVerify: Set<string>;
   webhookEventIds: Set<string>;
 };
 
@@ -36,10 +38,12 @@ export function createPhase7MediaLifecycleCleanupScope(): Phase7MediaLifecycleCl
     identities: [],
     postIds: new Set(),
     assetIds: new Set(),
+    assetKinds: new Map(),
     orderIds: new Set(),
     objectKeys: new Set(),
     ledgerAccountIdsToDelete: new Set(),
     ledgerAccountBalancesBefore: new Map(),
+    ledgerAccountIdsToVerify: new Set(),
     webhookEventIds: new Set()
   };
 }
@@ -120,7 +124,20 @@ async function assertObjectsAbsent(objectKeys: string[]) {
   }
 }
 
-export async function putPhase7LifecycleTestObject(key: string, body: Buffer) {
+export function lifecycleObjectKeysForAsset(asset: {
+  id: string;
+  kind: string;
+  storageKey: string | null;
+  derivativeKey: string | null;
+}) {
+  const keys = new Set<string>();
+  if (asset.storageKey) keys.add(asset.storageKey);
+  if (asset.derivativeKey) keys.add(asset.derivativeKey);
+  if (asset.kind === "image") keys.add(`derivatives/${asset.id}/watermarked.jpg`);
+  return [...keys];
+}
+
+export async function putPhase7LifecycleTestObject(key: string, body: Buffer, contentType = "video/mp4") {
   if (!objectStorageTestConfigAvailable()) throw new Error("Object storage test configuration is unavailable.");
   const client = storageClient();
   try {
@@ -129,8 +146,26 @@ export async function putPhase7LifecycleTestObject(key: string, body: Buffer) {
       Key: key,
       Body: body,
       ContentLength: body.length,
-      ContentType: "video/mp4"
+      ContentType: contentType
     }));
+  } finally {
+    client.destroy();
+  }
+}
+
+async function deleteObjectsThroughRaceWindow(objectKeys: string[]) {
+  if (!objectKeys.length) return;
+  if (!objectStorageTestConfigAvailable()) throw new Error("Object storage test configuration is unavailable.");
+  const client = storageClient();
+  const retryDelaysMs = [0, 100, 200, 400, 800];
+  try {
+    for (const delayMs of retryDelaysMs) {
+      if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      for (const key of objectKeys) {
+        await client.send(new DeleteObjectCommand({ Bucket: storageBucket(), Key: key }));
+      }
+      await assertObjectsAbsent(objectKeys);
+    }
   } finally {
     client.destroy();
   }
@@ -143,20 +178,22 @@ export async function cleanupPhase7MediaLifecycle(scope: Phase7MediaLifecycleCle
   const postIds = [...scope.postIds];
   const assetIds = [...scope.assetIds];
   const orderIds = [...scope.orderIds];
-  const requestedLedgerAccountIds = [...scope.ledgerAccountIdsToDelete];
 
+  for (const [assetId, kind] of scope.assetKinds) {
+    if (kind === "image") scope.objectKeys.add(`derivatives/${assetId}/watermarked.jpg`);
+  }
   const storedAssets = assetIds.length
     ? await prisma.mediaAsset.findMany({
       where: { id: { in: assetIds } },
-      select: { id: true, uploaderUserId: true, storageKey: true, derivativeKey: true }
+      select: { id: true, uploaderUserId: true, kind: true, storageKey: true, derivativeKey: true }
     })
     : [];
   for (const asset of storedAssets) {
     if (!asset.uploaderUserId || !identityIds.includes(asset.uploaderUserId)) {
       throw new Error("Cleanup media must belong to an isolated E2E identity.");
     }
-    if (asset.storageKey) scope.objectKeys.add(asset.storageKey);
-    if (asset.derivativeKey) scope.objectKeys.add(asset.derivativeKey);
+    scope.assetKinds.set(asset.id, asset.kind);
+    lifecycleObjectKeysForAsset(asset).forEach((key) => scope.objectKeys.add(key));
   }
   assertSafeScope(scope);
 
@@ -193,6 +230,28 @@ export async function cleanupPhase7MediaLifecycle(scope: Phase7MediaLifecycleCle
       throw new Error("Cleanup orders must be isolated to exact E2E identities.");
     }
 
+    if (assetIds.length) {
+      await tx.mediaAsset.updateMany({
+        where: { id: { in: assetIds }, uploaderUserId: { in: identityIds } },
+        data: { status: "cleanup_pending" }
+      });
+    }
+
+    const ownedLedgerAccounts = identityIds.length
+      ? await tx.ledgerAccount.findMany({
+        where: { ownerUserId: { in: identityIds } },
+        select: { id: true, ownerUserId: true }
+      })
+      : [];
+    for (const account of ownedLedgerAccounts) {
+      if (!account.ownerUserId || !identityIds.includes(account.ownerUserId)) {
+        throw new Error("Cleanup discovered a ledger account outside isolated E2E ownership.");
+      }
+      scope.ledgerAccountBalancesBefore.delete(account.id);
+      scope.ledgerAccountIdsToVerify.delete(account.id);
+      scope.ledgerAccountIdsToDelete.add(account.id);
+    }
+
     const ledgerTransactions = orderIds.length
       ? await tx.ledgerTransaction.findMany({
         where: { referenceType: "order", referenceId: { in: orderIds } },
@@ -201,6 +260,18 @@ export async function cleanupPhase7MediaLifecycle(scope: Phase7MediaLifecycleCle
       : [];
     for (const ledger of ledgerTransactions) {
       for (const entry of ledger.entries) {
+        if (scope.ledgerAccountBalancesBefore.has(entry.accountId)) {
+          scope.ledgerAccountIdsToVerify.add(entry.accountId);
+        } else {
+          const account = await tx.ledgerAccount.findUnique({
+            where: { id: entry.accountId },
+            select: { ownerUserId: true }
+          });
+          if (account?.ownerUserId && !identityIds.includes(account.ownerUserId)) {
+            throw new Error("Cleanup refuses to delete a ledger account owned by a shared user.");
+          }
+          scope.ledgerAccountIdsToDelete.add(entry.accountId);
+        }
         await tx.ledgerAccount.update({
           where: { id: entry.accountId },
           data: { balance: { decrement: entry.amount } }
@@ -227,11 +298,14 @@ export async function cleanupPhase7MediaLifecycle(scope: Phase7MediaLifecycleCle
     if (postIds.length) {
       await tx.searchDocument.deleteMany({ where: { entityType: "post", entityId: { in: postIds } } });
       await tx.channelJob.deleteMany({ where: { entityType: "post", entityId: { in: postIds } } });
-      await tx.post.deleteMany({ where: { id: { in: postIds } } });
     }
     if (assetIds.length) {
       await tx.mediaAsset.deleteMany({ where: { id: { in: assetIds } } });
     }
+    if (postIds.length) {
+      await tx.post.deleteMany({ where: { id: { in: postIds } } });
+    }
+    const requestedLedgerAccountIds = [...scope.ledgerAccountIdsToDelete];
     if (requestedLedgerAccountIds.length) {
       await tx.ledgerAccount.deleteMany({
         where: { id: { in: requestedLedgerAccountIds }, entries: { none: {} } }
@@ -249,17 +323,7 @@ export async function cleanupPhase7MediaLifecycle(scope: Phase7MediaLifecycleCle
   });
 
   const objectKeys = [...scope.objectKeys];
-  if (objectKeys.length) {
-    if (!objectStorageTestConfigAvailable()) throw new Error("Object storage test configuration is unavailable.");
-    const client = storageClient();
-    try {
-      for (const key of objectKeys) {
-        await client.send(new DeleteObjectCommand({ Bucket: storageBucket(), Key: key }));
-      }
-    } finally {
-      client.destroy();
-    }
-  }
+  await deleteObjectsThroughRaceWindow(objectKeys);
   await assertPhase7MediaLifecycleAbsent(scope);
 }
 
@@ -283,6 +347,7 @@ export async function assertPhase7MediaLifecycleAbsent(scope: Phase7MediaLifecyc
     prisma.walletBalance.count({ where: { userId: { in: identityIds } } }),
     prisma.ledgerTransaction.count({ where: { referenceType: "order", referenceId: { in: orderIds } } }),
     prisma.ledgerAccount.count({ where: { id: { in: [...scope.ledgerAccountIdsToDelete] } } }),
+    prisma.ledgerAccount.count({ where: { ownerUserId: { in: identityIds } } }),
     prisma.searchDocument.count({ where: { entityType: "post", entityId: { in: postIds } } }),
     prisma.channelJob.count({ where: { entityType: "post", entityId: { in: postIds } } }),
     prisma.webhookEvent.count({ where: { id: { in: [...scope.webhookEventIds] } } })
@@ -290,13 +355,13 @@ export async function assertPhase7MediaLifecycleAbsent(scope: Phase7MediaLifecyc
   if (checks.some((count) => count !== 0)) {
     throw new Error(`Phase 7 lifecycle cleanup left database rows: ${checks.join(",")}`);
   }
-  if (scope.ledgerAccountBalancesBefore.size) {
+  if (scope.ledgerAccountIdsToVerify.size) {
     const restoredAccounts = await prisma.ledgerAccount.findMany({
-      where: { id: { in: [...scope.ledgerAccountBalancesBefore.keys()] } },
+      where: { id: { in: [...scope.ledgerAccountIdsToVerify] } },
       select: { id: true, balance: true }
     });
     if (
-      restoredAccounts.length !== scope.ledgerAccountBalancesBefore.size
+      restoredAccounts.length !== scope.ledgerAccountIdsToVerify.size
       || restoredAccounts.some(({ id, balance }) => scope.ledgerAccountBalancesBefore.get(id) !== balance)
     ) {
       throw new Error("Phase 7 lifecycle cleanup did not restore exact shared ledger balances.");

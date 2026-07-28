@@ -133,13 +133,21 @@ export async function processPendingMedia() {
         const input = await bodyToBuffer(object.Body as AsyncIterable<Uint8Array> | undefined);
         const watermark = Buffer.from(`<svg width="600" height="100"><text x="20" y="65" font-size="42" fill="white" fill-opacity="0.55">PureHub</text></svg>`);
         const output = await sharp(input).rotate().composite([{ input: watermark, gravity: "southeast" }]).jpeg({ quality: 88 }).toBuffer();
+        const stillProcessing = await prisma.mediaAsset.count({ where: { id: asset.id, status: "processing" } });
+        if (!stillProcessing) continue;
         derivativeKey = `derivatives/${asset.id}/watermarked.jpg`;
         await client().send(new PutObjectCommand({ Bucket: bucket(), Key: derivativeKey, Body: output, ContentType: "image/jpeg" }));
       }
-      await prisma.mediaAsset.update({ where: { id: asset.id }, data: { derivativeKey, status: "ready", processingError: null, src: `/api/media/${asset.id}/content` } });
-      processed += 1;
+      const completed = await prisma.mediaAsset.updateMany({
+        where: { id: asset.id, status: "processing" },
+        data: { derivativeKey, status: "ready", processingError: null, src: `/api/media/${asset.id}/content` }
+      });
+      processed += completed.count;
     } catch (error) {
-      await prisma.mediaAsset.update({ where: { id: asset.id }, data: { status: "failed", processingError: error instanceof Error ? error.message : "Media processing failed." } });
+      await prisma.mediaAsset.updateMany({
+        where: { id: asset.id, status: "processing" },
+        data: { status: "failed", processingError: error instanceof Error ? error.message : "Media processing failed." }
+      });
     }
   }
   return { processed, skipped: false };
