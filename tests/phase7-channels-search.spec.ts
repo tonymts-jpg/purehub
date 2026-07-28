@@ -4209,7 +4209,7 @@ test("phase 7 admin channel UI exposes operations only to channel admins", async
 
     await expect(operations.getByRole("button", { name: "重新索引搜索" })).toBeVisible();
     await expect(operations.getByRole("button", { name: "重新物化频道" }).first()).toBeVisible();
-    await expect(operations.getByLabel("频道配额")).toBeVisible();
+    await expect(operations.getByLabel("频道配额", { exact: true })).toBeVisible();
     await expect(operations.getByLabel("接管新所有者 ID")).toBeVisible();
 
     await signInSupport(page.request);
