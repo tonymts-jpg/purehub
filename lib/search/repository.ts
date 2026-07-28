@@ -5,6 +5,7 @@ import type {
 } from "@/lib/channels/types";
 import type { AdminContext } from "@/lib/admin-auth";
 import { prisma } from "@/lib/prisma";
+import { SAFE_IMAGE_MIME_TYPES, SAFE_VIDEO_MIME_TYPES } from "@/lib/storage/media-policy";
 import {
   SEARCH_ENTITY_TYPES,
   type SearchEntityType
@@ -617,7 +618,11 @@ export async function searchEntities(
             postId: { in: postIds },
             status: "ready",
             visibility: { in: ["public", "free"] },
-            post: { is: { visibility: "free" } }
+            post: { is: { visibility: "free" } },
+            OR: [
+              { kind: "image", mimeType: { in: [...SAFE_IMAGE_MIME_TYPES] } },
+              { kind: "video", mimeType: { in: [...SAFE_VIDEO_MIME_TYPES] } }
+            ]
           },
           select: { postId: true, alt: true, kind: true, order: true, id: true },
           orderBy: [{ postId: "asc" }, { order: "asc" }, { id: "asc" }]

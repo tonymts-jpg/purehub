@@ -1,4 +1,6 @@
 import { expect, request as playwrightRequest, test, type APIRequestContext, type TestInfo } from "@playwright/test";
+import type { Prisma } from "@prisma/client";
+import sharp from "sharp";
 import { ADMIN_SECTIONS, isChannelAdminRole } from "../lib/admin-auth";
 import {
   adminChannelOperations,
@@ -3219,6 +3221,19 @@ test("phase 7 search preview projects only ready public media for free posts", a
             visibility: "public"
           },
           {
+            id: `phase7-search-preview-unsafe-${nonce}`,
+            postId: freePostId,
+            src: "/generated/posts/post-1/01.webp",
+            alt: "Unsafe legacy active media",
+            width: 720,
+            height: 900,
+            order: -1,
+            kind: "video",
+            mimeType: "image/svg+xml",
+            status: "ready",
+            visibility: "public"
+          },
+          {
             id: `phase7-search-preview-unready-${nonce}`,
             postId: noPreviewPostId,
             src: `/generated/phase7/${nonce}-unready.webp`,
@@ -3293,6 +3308,7 @@ test("phase 7 search preview projects only ready public media for free posts", a
     const renderedPreview = await anonymous.get(`/api/media/${publicAsset.id}/content`);
     expect(renderedPreview.ok(), await renderedPreview.text()).toBeTruthy();
     expect(renderedPreview.headers()["content-type"]).toMatch(/^image\//);
+    expect((await anonymous.get(`/api/media/phase7-search-preview-unsafe-${nonce}/content`)).status()).toBe(404);
     expect((await anonymous.get(`/api/media/${secretAsset.id}/content`)).status()).toBe(403);
 
     const creatorResponse = await anonymous.get("/api/search?q=yuki&type=creator");
@@ -3320,52 +3336,91 @@ test("phase 7 search preview projects only ready public media for free posts", a
 });
 
 test("phase 7 uploaded free image and video assets publish into safe search previews", async ({}, testInfo) => {
-  test.setTimeout(120_000);
+  test.setTimeout(180_000);
   const baseURL = testInfo.project.use.baseURL;
   const creator = await playwrightRequest.newContext({ baseURL });
   const anonymous = await playwrightRequest.newContext({ baseURL });
+  const fan = await playwrightRequest.newContext({ baseURL });
   const nonce = `${Date.now().toString(36)}${Math.floor(Math.random() * 1_000_000).toString(36)}`;
   const query = `phase7uploadpreview${nonce}`;
   const postIds: string[] = [];
   const assetIds: string[] = [];
+  const imageBytes = await sharp({
+    create: { width: 720, height: 900, channels: 3, background: { r: 91, g: 65, b: 170 } }
+  }).png().toBuffer();
+  const freeVideoBytes = Buffer.from("0123456789abcdef");
+  const paidVideoBytes = Buffer.from("paid-video-0123456789");
+  const priorCard = await prisma.paymentChannelConfig.findUnique({ where: { provider: "card" } }).catch(() => null);
+
+  async function uploadActualMedia(input: {
+    kind: "image" | "video";
+    mimeType: "image/png" | "video/mp4";
+    bytes: Buffer;
+    visibility: "public" | "purchase";
+    label: string;
+  }) {
+    const prepared = await creator.post("/api/uploads/presign", {
+      headers: authHeaders,
+      data: {
+        fileName: `${query}-${input.label}.${input.kind === "image" ? "png" : "mp4"}`,
+        mimeType: input.mimeType,
+        sizeBytes: input.bytes.length,
+        kind: input.kind,
+        visibility: input.visibility
+      }
+    });
+    expect(prepared.ok(), await prepared.text()).toBeTruthy();
+    const body = await prepared.json() as {
+      assetId: string;
+      uploadUrl: string;
+      headers: Record<string, string>;
+    };
+    assetIds.push(body.assetId);
+    expect(body.uploadUrl).toBe(`/api/uploads/${body.assetId}/content`);
+    const stored = await creator.put(body.uploadUrl, {
+      headers: {
+        ...authHeaders,
+        ...body.headers,
+        "content-length": String(input.bytes.length)
+      },
+      data: input.bytes
+    });
+    expect(stored.status(), await stored.text()).toBe(204);
+
+    const completed = await creator.post("/api/uploads/complete", {
+      headers: authHeaders,
+      data: {
+        assetId: body.assetId,
+        width: input.kind === "image" ? 720 : 0,
+        height: input.kind === "image" ? 900 : 0,
+        ...(input.kind === "video" ? { durationSeconds: 30 } : {})
+      }
+    });
+    expect(completed.ok(), await completed.text()).toBeTruthy();
+    await expect.poll(async () => {
+      const response = await creator.get(`/api/uploads/complete?ids=${body.assetId}`);
+      if (!response.ok()) return "request_failed";
+      return (await response.json()).assets[0]?.status ?? "missing";
+    }, { timeout: 60_000, intervals: [1_000, 2_000, 3_000] }).toBe("ready");
+    return body.assetId;
+  }
 
   try {
     await requirePhase7(anonymous, testInfo);
     await signInCreator(creator);
 
-    for (const kind of ["image", "video"] as const) {
-      const prepared = await creator.post("/api/uploads/presign", {
-        headers: authHeaders,
-        data: {
-          fileName: `${query}.${kind === "image" ? "png" : "mp4"}`,
-          mimeType: kind === "image" ? "image/png" : "video/mp4",
-          sizeBytes: 100,
-          kind,
-          visibility: "public"
-        }
-      });
-      expect(prepared.ok(), await prepared.text()).toBeTruthy();
-      const { assetId } = await prepared.json();
-      assetIds.push(assetId);
-
-      const completed = await creator.post("/api/uploads/complete", {
-        headers: authHeaders,
-        data: {
-          assetId,
-          simulate: true,
-          width: 720,
-          height: 900,
-          ...(kind === "video" ? { durationSeconds: 30 } : {})
-        }
-      });
-      expect(completed.ok(), await completed.text()).toBeTruthy();
-
+    const freeMedia = [
+      { kind: "image" as const, mimeType: "image/png" as const, bytes: imageBytes, visibility: "public" as const, label: "free-image" },
+      { kind: "video" as const, mimeType: "video/mp4" as const, bytes: freeVideoBytes, visibility: "public" as const, label: "free-video" }
+    ];
+    for (const media of freeMedia) {
+      const assetId = await uploadActualMedia(media);
       const created = await creator.post("/api/posts", {
         headers: authHeaders,
         data: {
-          title: `${query} ${kind}`,
-          excerpt: `Uploaded ${kind} search preview lifecycle fixture.`,
-          content: `This normal upload, completion, publish, index, and search lifecycle covers ${kind} media.`,
+          title: `${query} ${media.kind}`,
+          excerpt: `Uploaded ${media.kind} search preview lifecycle fixture.`,
+          content: `This normal upload, completion, publish, index, and search lifecycle covers ${media.kind} media.`,
           category: "Cosplay",
           visibility: "free",
           contentType: "photo_short",
@@ -3378,15 +3433,40 @@ test("phase 7 uploaded free image and video assets publish into safe search prev
       postIds.push(postId);
       await synchronizeSearchEntity("post", postId);
     }
+    const paidAssetId = await uploadActualMedia({
+      kind: "video",
+      mimeType: "video/mp4",
+      bytes: paidVideoBytes,
+      visibility: "purchase",
+      label: "paid-video"
+    });
+    const paidPostResponse = await creator.post("/api/posts", {
+      headers: authHeaders,
+      data: {
+        title: `${query} paid video`,
+        excerpt: "Uploaded paid video remains protected by entitlement.",
+        content: "This paid media fixture proves MIME and kind never imply anonymous authorization.",
+        category: "Cosplay",
+        visibility: "purchase",
+        contentType: "photo_short",
+        saleMode: "single_plus_subscription",
+        price: 28,
+        mediaAssetIds: [paidAssetId]
+      }
+    });
+    expect(paidPostResponse.ok(), await paidPostResponse.text()).toBeTruthy();
+    const paidPostId = (await paidPostResponse.json()).post.id as string;
+    postIds.push(paidPostId);
 
     const publishedAssets = await prisma.mediaAsset.findMany({
       where: { id: { in: assetIds } },
       select: { id: true, kind: true, status: true, visibility: true, postId: true, src: true }
     });
-    expect(publishedAssets).toHaveLength(2);
+    expect(publishedAssets).toHaveLength(3);
     expect(publishedAssets).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: "image", status: "ready", visibility: "public" }),
-      expect.objectContaining({ kind: "video", status: "ready", visibility: "public" })
+      expect.objectContaining({ kind: "video", status: "ready", visibility: "public" }),
+      expect.objectContaining({ id: paidAssetId, kind: "video", status: "ready", visibility: "purchase" })
     ]));
     for (const asset of publishedAssets) {
       expect(asset.src).toBe(`/api/media/${asset.id}/content`);
@@ -3406,15 +3486,88 @@ test("phase 7 uploaded free image and video assets publish into safe search prev
         kind: asset?.kind
       });
     }
-    expect(results.filter(({ entityId }) => postIds.includes(entityId))).toHaveLength(2);
+    expect(results.filter(({ entityId }) => postIds.slice(0, 2).includes(entityId))).toHaveLength(2);
+    expect(results.some(({ entityId }) => entityId === paidPostId)).toBe(false);
     expect(JSON.stringify(results)).not.toContain("original/");
     expect(JSON.stringify(results)).not.toContain("X-Amz-Signature");
+
+    const imageAsset = publishedAssets.find(({ kind, visibility }) => kind === "image" && visibility === "public")!;
+    const freeVideoAsset = publishedAssets.find(({ kind, visibility }) => kind === "video" && visibility === "public")!;
+    const imageContent = await anonymous.get(`/api/media/${imageAsset.id}/content`);
+    const imageContentBody = await imageContent.body();
+    expect(imageContent.status(), imageContentBody.toString()).toBe(200);
+    expect(imageContent.headers()["content-type"]).toBe("image/jpeg");
+    expect(imageContent.headers()["content-disposition"]).toBe("inline");
+    expect(imageContent.headers()["x-content-type-options"]).toBe("nosniff");
+    expect(imageContentBody.length).toBeGreaterThan(0);
+
+    const freeRange = await anonymous.get(`/api/media/${freeVideoAsset.id}/content`, {
+      headers: { range: "bytes=2-6" }
+    });
+    const freeRangeBody = await freeRange.body();
+    expect(freeRange.status(), freeRangeBody.toString()).toBe(206);
+    expect(freeRange.headers()["content-range"]).toBe(`bytes 2-6/${freeVideoBytes.length}`);
+    expect(freeRange.headers()["content-length"]).toBe("5");
+    expect(freeRangeBody.toString()).toBe("23456");
+
+    const invalidRange = await anonymous.get(`/api/media/${freeVideoAsset.id}/content`, {
+      headers: { range: `bytes=${freeVideoBytes.length}-99` },
+      maxRedirects: 0
+    });
+    expect(invalidRange.status()).toBe(416);
+    expect(invalidRange.headers()["content-range"]).toBe(`bytes */${freeVideoBytes.length}`);
+
+    expect((await anonymous.get(`/api/media/${paidAssetId}/content`)).status()).toBe(403);
+    if (!priorCard) throw new Error("Seeded card payment channel is missing.");
+    await prisma.paymentChannelConfig.update({
+      where: { provider: "card" },
+      data: { enabled: true, mode: "test", statusNote: "phase7_real_media_entitlement", config: { adapter: "manual_confirm" } }
+    });
+    await signInFan(fan);
+    const orderResponse = await fan.post("/api/payments/orders", {
+      headers: authHeaders,
+      data: { kind: "post_unlock", itemId: paidPostId }
+    });
+    expect(orderResponse.ok(), await orderResponse.text()).toBeTruthy();
+    const order = (await orderResponse.json()).order;
+    const intentResponse = await fan.post("/api/payments/intents", {
+      headers: authHeaders,
+      data: { orderId: order.id, provider: "card" }
+    });
+    expect(intentResponse.ok(), await intentResponse.text()).toBeTruthy();
+    const intent = (await intentResponse.json()).intent;
+    const confirmed = await fan.post(`/api/payments/intents/${intent.id}/confirm`, {
+      headers: authHeaders,
+      data: { source: "phase7_real_media_entitlement" }
+    });
+    expect(confirmed.ok(), await confirmed.text()).toBeTruthy();
+    const entitledRange = await fan.get(`/api/media/${paidAssetId}/content`, {
+      headers: { range: "bytes=0-3" }
+    });
+    const entitledRangeBody = await entitledRange.body();
+    expect(entitledRange.status(), entitledRangeBody.toString()).toBe(206);
+    expect(entitledRangeBody.toString()).toBe("paid");
   } finally {
+    if (priorCard) {
+      await prisma.paymentChannelConfig.update({
+        where: { provider: "card" },
+        data: {
+          enabled: priorCard.enabled,
+          mode: priorCard.mode,
+          currencies: priorCard.currencies as Prisma.InputJsonValue,
+          regions: priorCard.regions as Prisma.InputJsonValue,
+          feeNote: priorCard.feeNote,
+          statusNote: priorCard.statusNote,
+          config: priorCard.config as Prisma.InputJsonValue
+        }
+      }).catch(() => undefined);
+    }
     await prisma.searchDocument.deleteMany({ where: { entityId: { in: postIds } } }).catch(() => undefined);
     await prisma.post.deleteMany({ where: { id: { in: postIds } } }).catch(() => undefined);
     await prisma.mediaAsset.deleteMany({ where: { id: { in: assetIds } } }).catch(() => undefined);
     await creator.dispose();
     await anonymous.dispose();
+    await fan.dispose();
   }
 });
 

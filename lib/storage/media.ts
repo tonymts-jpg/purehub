@@ -4,6 +4,7 @@ import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from 
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import sharp from "sharp";
 import { prisma } from "@/lib/prisma";
+import { acceptsUploadMediaType, normalizeByteRange, safeMediaContentType } from "@/lib/storage/media-policy";
 
 const configured = () => Boolean(process.env.OBJECT_STORAGE_ENDPOINT && process.env.OBJECT_STORAGE_ACCESS_KEY && process.env.OBJECT_STORAGE_SECRET_KEY);
 const bucket = () => process.env.OBJECT_STORAGE_BUCKET ?? "purehub-media";
@@ -28,6 +29,7 @@ export async function createUpload(input: {
   kind: "image" | "video";
   visibility: "public" | "members" | "purchase";
 }) {
+  if (!acceptsUploadMediaType(input)) throw new Error("Unsupported media type.");
   const extension = input.fileName.split(".").pop()?.replace(/[^a-zA-Z0-9]/g, "").toLowerCase() || "bin";
   const storageKey = `original/${input.userId}/${randomUUID()}.${extension}`;
   const asset = await prisma.mediaAsset.create({
@@ -46,8 +48,39 @@ export async function createUpload(input: {
     }
   });
   if (!configured()) return { asset, uploadUrl: `mock://upload/${asset.id}`, headers: { "content-type": input.mimeType } };
-  const uploadUrl = await getSignedUrl(client(), new PutObjectCommand({ Bucket: bucket(), Key: storageKey, ContentType: input.mimeType }), { expiresIn: 900 });
-  return { asset, uploadUrl, headers: { "content-type": input.mimeType } };
+  return { asset, uploadUrl: `/api/uploads/${asset.id}/content`, headers: { "content-type": input.mimeType } };
+}
+
+export async function storeUploadContent(input: {
+  assetId: string;
+  userId: string;
+  mimeType: string;
+  sizeBytes: number;
+  body: Readable;
+}) {
+  const asset = await prisma.mediaAsset.findUnique({ where: { id: input.assetId } });
+  if (!asset || asset.uploaderUserId !== input.userId || asset.status !== "uploading" || !asset.storageKey) {
+    throw new Error("Upload asset not found.");
+  }
+  if (
+    !acceptsUploadMediaType({
+      kind: asset.kind === "video" ? "video" : "image",
+      mimeType: asset.mimeType
+    })
+    || input.mimeType !== asset.mimeType
+    || input.sizeBytes !== asset.sizeBytes
+  ) {
+    throw new Error("Upload content metadata does not match the prepared asset.");
+  }
+  if (!configured()) throw new Error("Object storage is unavailable.");
+
+  await client().send(new PutObjectCommand({
+    Bucket: bucket(),
+    Key: asset.storageKey,
+    Body: input.body,
+    ContentType: asset.mimeType,
+    ContentLength: asset.sizeBytes
+  }));
 }
 
 export async function createKycDocumentUpload(input: { userId: string; fileName: string; mimeType: string }) {
@@ -149,6 +182,11 @@ function webStream(body: unknown): ReadableStream<Uint8Array> {
 
 export async function mediaContent(assetId: string, userId?: string, range?: string | null) {
   const { asset, isPublic } = await authorizeReadyMedia(assetId, userId);
+  const contentType = safeMediaContentType({
+    kind: asset.kind === "video" ? "video" : "image",
+    mimeType: asset.mimeType,
+    derivativeKey: asset.derivativeKey
+  });
   if (!asset.storageKey) {
     if (!asset.src.startsWith("/") || asset.src.startsWith("//") || asset.src === `/api/media/${asset.id}/content`) {
       throw new Error("Media content is unavailable.");
@@ -158,12 +196,15 @@ export async function mediaContent(assetId: string, userId?: string, range?: str
   if (!configured()) throw new Error("Media content is unavailable.");
 
   const key = asset.derivativeKey ?? asset.storageKey;
+  const objectSize = range
+    ? (await client().send(new HeadObjectCommand({ Bucket: bucket(), Key: key }))).ContentLength
+    : undefined;
+  const objectRange = range ? normalizeByteRange(range, objectSize ?? 0) : undefined;
   const object = await client().send(new GetObjectCommand({
     Bucket: bucket(),
     Key: key,
-    ...(range ? { Range: range } : {})
+    ...(objectRange ? { Range: objectRange } : {})
   }));
-  const contentType = asset.kind === "image" && asset.derivativeKey ? "image/jpeg" : asset.mimeType;
   return {
     kind: "stream" as const,
     body: webStream(object.Body),
@@ -171,7 +212,7 @@ export async function mediaContent(assetId: string, userId?: string, range?: str
     isPublic,
     headers: {
       "accept-ranges": object.AcceptRanges ?? "bytes",
-      "content-type": object.ContentType ?? contentType,
+      "content-type": contentType,
       ...(object.ContentLength === undefined ? {} : { "content-length": String(object.ContentLength) }),
       ...(object.ContentRange ? { "content-range": object.ContentRange } : {}),
       ...(object.ETag ? { etag: object.ETag } : {})
