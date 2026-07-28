@@ -3402,7 +3402,9 @@ test("phase 7 channel UI and search UI preserve complete ordered cursor pages", 
     await page.goto(`/search?q=${query}&type=channel`);
     const firstResult = page.getByTestId("search-result").first();
     await expect(firstResult).toBeVisible();
-    const before = await firstResult.boundingBox();
+    const beforeDocumentY = await firstResult.evaluate(
+      (result) => result.getBoundingClientRect().top + window.scrollY
+    );
     while (await page.getByRole("button", { name: "加载更多搜索结果" }).count()) {
       const beforeCount = await page.getByTestId("search-result").count();
       await page.getByRole("button", { name: "加载更多搜索结果" }).click();
@@ -3412,7 +3414,9 @@ test("phase 7 channel UI and search UI preserve complete ordered cursor pages", 
       .evaluateAll((results) => results.map((result) => result.getAttribute("data-result-id")));
     expect(actualSearch).toEqual(expectedSearch);
     expect(new Set(actualSearch).size).toBe(actualSearch.length);
-    expect((await firstResult.boundingBox())?.y).toBe(before?.y);
+    await expect.poll(() => firstResult.evaluate(
+      (result) => result.getBoundingClientRect().top + window.scrollY
+    )).toBe(beforeDocumentY);
 
     const noScriptContext = await browser.newContext({ javaScriptEnabled: false });
     const noScriptPage = await noScriptContext.newPage();
