@@ -4171,7 +4171,9 @@ test("phase 7 admin channel UI exposes operations only to channel admins", async
     await activeRow.getByLabel(`选择频道 UI Review ${suffix}`).check();
     await activeRow.getByRole("button", { name: "重新物化频道" }).click();
     await operations.getByRole("button", { name: "重新索引搜索" }).click();
-    await expect(operations.getByRole("status")).toContainText("重新索引作业已排程");
+    await expect(
+      operations.getByRole("status").filter({ hasText: "重新索引作业已排程" })
+    ).toBeVisible();
     const newReindexJobs = await prisma.channelJob.findMany({
       where: { kind: "reindex_all", createdAt: { gte: reindexRequestedAfter } },
       select: { id: true }
