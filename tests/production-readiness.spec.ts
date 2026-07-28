@@ -1,9 +1,11 @@
 import { expect, test } from "@playwright/test";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { readFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 async function listen(server: Server): Promise<number> {
   server.listen(0, "127.0.0.1");
@@ -43,6 +45,118 @@ function runSmokeValidator(kind: string, input: string) {
     input
   });
 }
+
+function bashExecutable() {
+  return process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "bash";
+}
+
+function shellPath(path: string) {
+  return process.platform === "win32"
+    ? path.replace(/^([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`).replaceAll("\\", "/")
+    : path;
+}
+
+async function writeExecutable(path: string, contents: string) {
+  await writeFile(path, contents, "utf8");
+  await chmod(path, 0o755);
+}
+
+async function runDeployHarness(environment: string) {
+  const directory = await mkdtemp(join(tmpdir(), "purehub-deploy-"));
+  const fakeBin = join(directory, "bin");
+  const commandLog = join(directory, "docker-commands.log");
+  await mkdir(fakeBin);
+  await writeFile(join(directory, ".env.staging"), environment, "utf8");
+  await writeExecutable(
+    join(fakeBin, "docker"),
+    "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$COMMAND_LOG\"\nexit 0\n"
+  );
+  await writeExecutable(
+    join(fakeBin, "git"),
+    "#!/usr/bin/env bash\nprintf '%040d\\n' 0 | tr '0' 'a'\n"
+  );
+  await writeExecutable(
+    join(fakeBin, "curl"),
+    "#!/usr/bin/env bash\nfor arg in \"$@\"; do\n  if [[ \"$arg\" == *'%{http_code}'* ]]; then printf '401'; fi\ndone\nexit 0\n"
+  );
+  await writeExecutable(join(fakeBin, "node"), "#!/usr/bin/env bash\nexit 0\n");
+
+  try {
+    const result = spawnSync(
+      bashExecutable(),
+      [
+        "-c",
+        'PATH="$1:$PATH" "$2" staging',
+        "_",
+        shellPath(fakeBin),
+        shellPath(resolve("scripts/deploy.sh"))
+      ],
+      {
+        cwd: directory,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          COMMAND_LOG: shellPath(commandLog)
+        }
+      }
+    );
+    const commands = await readFile(commandLog, "utf8");
+    return { ...result, commands };
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+test("healthcheck uses port 80 when HTTP_PORT is absent", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "purehub-healthcheck-"));
+  const fakeBin = join(directory, "bin");
+  await mkdir(fakeBin);
+  await writeFile(join(directory, ".env.staging"), "APP_ENV=staging\n", "utf8");
+  await writeExecutable(join(fakeBin, "docker"), "#!/usr/bin/env bash\nexit 0\n");
+  await writeExecutable(join(fakeBin, "curl"), "#!/usr/bin/env bash\nexit 0\n");
+
+  try {
+    const result = spawnSync(
+      bashExecutable(),
+      [
+        "-c",
+        'PATH="$1:$PATH" "$2" staging',
+        "_",
+        shellPath(fakeBin),
+        shellPath(resolve("scripts/healthcheck.sh"))
+      ],
+      {
+        cwd: directory,
+        encoding: "utf8",
+        env: process.env
+      }
+    );
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain("PureHub staging healthcheck passed");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("deploy refreshes nginx after recreating upstream services", async () => {
+  const result = await runDeployHarness(
+    "HTTP_PORT=80\nADMIN_ACCESS_TOKEN=test-admin-token\n",
+  );
+
+  expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+  const upIndex = result.commands.indexOf("compose --env-file .env.staging up -d --remove-orphans");
+  const restartIndex = result.commands.indexOf("compose --env-file .env.staging restart nginx");
+  expect(upIndex).toBeGreaterThanOrEqual(0);
+  expect(restartIndex).toBeGreaterThan(upIndex);
+});
+
+test("deploy uses port 80 when HTTP_PORT is absent", async () => {
+  const result = await runDeployHarness("ADMIN_ACCESS_TOKEN=test-admin-token\n");
+
+  expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+  expect(result.stdout).toContain("Deployment complete");
+});
 
 test("health endpoint exposes server dependency status", async ({ request }) => {
   const response = await request.get("/api/health");

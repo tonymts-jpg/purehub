@@ -12,7 +12,7 @@ if [ ! -f "${ENV_FILE}" ]; then
   exit 1
 fi
 
-HTTP_PORT_VALUE="$(grep -E '^HTTP_PORT=' "${ENV_FILE}" | tail -1 | cut -d= -f2-)"
+HTTP_PORT_VALUE="$(grep -E '^HTTP_PORT=' "${ENV_FILE}" | tail -1 | cut -d= -f2- || true)"
 HTTP_PORT_VALUE="${HTTP_PORT_VALUE:-80}"
 
 docker compose --env-file "${ENV_FILE}" ps

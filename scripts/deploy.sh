@@ -41,6 +41,8 @@ echo "Pulling runtime images"
 retry 3 15 docker compose --env-file "${ENV_FILE}" pull postgres redis nginx minio minio-init
 retry 2 20 docker compose --env-file "${ENV_FILE}" build
 retry 3 15 docker compose --env-file "${ENV_FILE}" up -d --remove-orphans
+echo "Refreshing Nginx upstream service resolution"
+docker compose --env-file "${ENV_FILE}" restart nginx
 
 echo "Running database migrations"
 retry 3 10 docker compose --env-file "${ENV_FILE}" exec -T web npm run db:migrate
@@ -54,7 +56,7 @@ echo "Waiting for services to become healthy"
 bash "${SCRIPT_DIR}/healthcheck.sh" "${ENVIRONMENT}"
 
 echo "Running smoke tests"
-HTTP_PORT_VALUE="$(grep -E '^HTTP_PORT=' "${ENV_FILE}" | tail -1 | cut -d= -f2-)"
+HTTP_PORT_VALUE="$(grep -E '^HTTP_PORT=' "${ENV_FILE}" | tail -1 | cut -d= -f2- || true)"
 HTTP_PORT_VALUE="${HTTP_PORT_VALUE:-80}"
 ADMIN_ACCESS_TOKEN_VALUE="$(grep -E '^ADMIN_ACCESS_TOKEN=' "${ENV_FILE}" | tail -1 | cut -d= -f2-)"
 SMOKE_ADMIN_TOKEN="${SMOKE_ADMIN_TOKEN:-${ADMIN_ACCESS_TOKEN_VALUE}}" SMOKE_BASE_URL="${SMOKE_BASE_URL:-http://127.0.0.1:${HTTP_PORT_VALUE}}" bash "${SCRIPT_DIR}/smoke-test.sh"
