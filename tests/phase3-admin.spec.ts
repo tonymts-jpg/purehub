@@ -33,6 +33,8 @@ test("phase 3 admin UI is reachable with an admin session", async ({ page }) => 
   test.skip(!(await hasDatabase(page.request)), "Admin UI sessions require the seeded database.");
   await signInAdmin(page.request);
   await page.goto("/admin");
+  await expect(page.getByTestId("admin-shell")).toBeVisible();
+  await expect(page.getByTestId("site-shell")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "站务后台" })).toBeVisible();
   await expect(page.getByRole("status")).toBeVisible();
   await expect(page.getByTestId("admin-pricing-panel")).toBeVisible();
