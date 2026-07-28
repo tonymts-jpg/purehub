@@ -2,7 +2,6 @@
 import path from "node:path";
 import { expect, test } from "@playwright/test";
 import { CONTENT_CATEGORIES } from "../lib/categories";
-import { hasDatabase, registerFan } from "./auth-helpers";
 
 test("default gallery assets are complete", async () => {
   const seen = new Set<string>();
@@ -58,26 +57,16 @@ test("SM and male creator profile pages are reachable", async ({ page }) => {
   await expect(page.getByRole("heading", { name: /沈越/ })).toBeVisible();
 });
 
-test("member-only post previews lead fans to membership unlock", async ({ page }) => {
+test("member-only post previews send visitors to the membership sign-in action", async ({ page }) => {
   await page.goto("/post/post-3");
   const gallery = page.getByTestId("post-detail-gallery");
   await expect(gallery.locator("button")).toHaveCount(8);
-  await expect(async () => {
-    await gallery.getByRole("button", { name: /3/ }).click();
-    await expect(page).toHaveURL(/\/membership\/momo/, { timeout: 1500 });
-  }).toPass({ timeout: 15000 });
-  await expect(page.locator("main")).toBeVisible();
+  await gallery.getByRole("button", { name: /3/ }).click();
+  const dialog = page.getByRole("dialog", { name: "解锁作品" });
+  await expect(dialog.getByRole("link", { name: "登录后查看会员方案" })).toHaveAttribute("href", "/sign-in?callbackUrl=%2Fpost%2Fpost-3");
 });
 
-test("single purchase unlocks full post gallery after payment", async ({ page }) => {
-  if (await hasDatabase(page.request)) {
-    await registerFan(page.request, "purchase");
-    const channel = await page.request.patch("/api/admin/payment-channels/card", {
-      headers: { "x-admin-token": process.env.ADMIN_ACCESS_TOKEN ?? "purehub-admin-demo-token" },
-      data: { enabled: true, mode: "test", statusNote: "phase6_ui_purchase", config: { adapter: "manual_confirm" } }
-    });
-    expect(channel.ok(), await channel.text()).toBeTruthy();
-  }
+test("anonymous purchase unlock sends visitors to sign in instead of collecting card details", async ({ page }) => {
   await page.goto("/post/post-4");
   const gallery = page.getByTestId("post-detail-gallery");
   await expect(gallery.locator("button")).toHaveCount(8);
@@ -85,9 +74,9 @@ test("single purchase unlocks full post gallery after payment", async ({ page })
     await gallery.getByRole("button", { name: /3/ }).click();
     await expect(page.getByRole("dialog")).toBeVisible({ timeout: 1500 });
   }).toPass({ timeout: 15000 });
-  await page.getByRole("dialog").getByRole("button", { name: /确认支付/ }).click();
-  await page.getByRole("button", { name: /查看全部 12/ }).click();
-  await expect(gallery.locator("button")).toHaveCount(12);
+  const dialog = page.getByRole("dialog", { name: "解锁作品" });
+  await expect(dialog.getByRole("link", { name: "登录后解锁" })).toHaveAttribute("href", "/sign-in?callbackUrl=%2Fpost%2Fpost-4");
+  await expect(dialog.locator('input[value="4242 4242 4242 4242"]')).toHaveCount(0);
 });
 
 test("free posts support expanded gallery and keyboard lightbox", async ({ page }) => {
@@ -105,6 +94,3 @@ test("free posts support expanded gallery and keyboard lightbox", async ({ page 
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0);
 });
-
-
-

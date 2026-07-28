@@ -8,7 +8,7 @@ import { creators } from "@/lib/data";
 import { getAllPosts, useDemoStore } from "@/lib/store";
 import { Avatar } from "@/components/app-shell";
 import { MediaGallery } from "@/components/media-gallery";
-import { PaymentModal } from "@/components/payment-modal";
+import { UnlockDialog } from "@/components/unlock-dialog";
 import { authClient } from "@/lib/auth-client";
 
 type ApiComment={id:string;content:string;createdAt:string;author:{name:string;avatar:string}};
@@ -18,7 +18,7 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
   const store=useDemoStore();
   const post=getAllPosts(store.customPosts).find(item=>item.id===id);
   const [comment,setComment]=useState("");
-  const [paying,setPaying]=useState(false);
+  const [unlockOpen,setUnlockOpen]=useState(false);
   const [serverAccess,setServerAccess]=useState(false);
   const [comments,setComments]=useState<ApiComment[]>([]);
   const {data:session}=authClient.useSession();
@@ -33,12 +33,8 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
   const creator=creators.find(item=>item.id===post.creatorId)!;
   const subscribed=store.subscriptions.some(item=>item.creatorId===creator.id);
   const unlocked=post.visibility==="free"||serverAccess||(demoMode&&(subscribed||store.unlocked.includes(post.id)));
-  const handleLocked=()=>{
-    if(post.visibility==="members")window.location.href=`/membership/${creator.handle}`;
-    else setPaying(true);
-  };
+  const handleLocked=()=>setUnlockOpen(true);
   const confirmPurchase=async()=>{
-    if(!session?.user&&demoMode){store.unlock(post.id,post.price||0);setPaying(false);return}
     if(!session?.user){window.location.assign(`/sign-in?callbackUrl=${encodeURIComponent(window.location.pathname)}`);return}
     try{
       const orderResponse=await fetch("/api/payments/orders",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({kind:"post_unlock",itemId:post.id})});
@@ -55,7 +51,7 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
       store.showToast("Server payment unavailable, using local demo unlock.");
     }
     if(demoMode)store.unlock(post.id,post.price||0);
-    setPaying(false);
+    setUnlockOpen(false);
   };
   const publishComment=async()=>{
     if(!comment.trim())return;
@@ -103,7 +99,7 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
               <span className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-full bg-ink text-white dark:bg-white dark:text-ink">{post.visibility==="members"?<LockKeyhole/>:<ShoppingBag/>}</span>
               <h2 className="text-2xl font-black">{post.visibility==="members"?"这是会员专属图集":"解锁完整 12 张图片"}</h2>
               <p className="mx-auto mt-2 max-w-md text-sm leading-6 muted">{post.visibility==="members"?`加入 ${creator.name} 的会员，查看完整作品与幕后过程。`:`一次购买，永久收藏。当前价格 ¥${post.price}。`}</p>
-              {post.visibility==="members"?<Link href={`/membership/${creator.handle}`} className="brand-gradient mt-6 inline-flex rounded-full px-6 py-3 font-bold text-white">查看会员方案</Link>:<button onClick={()=>setPaying(true)} className="brand-gradient mt-6 rounded-full px-6 py-3 font-bold text-white">模拟支付 ¥{post.price}</button>}
+              <button onClick={()=>setUnlockOpen(true)} className="brand-gradient mt-6 rounded-full px-6 py-3 font-bold text-white">{post.visibility==="members"?"查看解锁方式":`立即解锁 ¥${post.price}`}</button>
             </div>
           </div>}
 
@@ -118,6 +114,6 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
       </article>
     </div>
 
-    {paying&&<PaymentModal title={post.title} price={post.price||0} onClose={()=>setPaying(false)} onConfirm={confirmPurchase}/>}
+    <UnlockDialog open={unlockOpen} title={post.title} visibility={post.visibility === "members" ? "members" : "purchase"} price={post.price} creatorName={creator.name} authenticated={Boolean(session?.user)} callbackUrl={typeof window === "undefined" ? `/post/${post.id}` : `${window.location.pathname}${window.location.search}`} onClose={()=>setUnlockOpen(false)} onConfirmPurchase={confirmPurchase} membershipHref={`/membership/${creator.handle}`}/>
   </div>;
 }

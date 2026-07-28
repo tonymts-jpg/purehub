@@ -8,12 +8,12 @@ import { Post } from "@/lib/types";
 import { useDemoStore } from "@/lib/store";
 import { Avatar } from "./app-shell";
 import { MediaGallery } from "./media-gallery";
-import { PaymentModal } from "./payment-modal";
+import { UnlockDialog } from "./unlock-dialog";
 import { authClient } from "@/lib/auth-client";
 
 export function PostCard({post}:{post:Post}) {
   const creator=creators.find(c=>c.id===post.creatorId)!;
-  const [paying,setPaying]=useState(false);
+  const [unlockOpen,setUnlockOpen]=useState(false);
   const {liked,bookmarked,subscriptions,unlocked,unlock}=useDemoStore();
   const {data:session}=authClient.useSession();
   const [isLiked,setIsLiked]=useState(post.liked??liked.includes(post.id));
@@ -33,11 +33,9 @@ export function PostCard({post}:{post:Post}) {
     const response=await fetch(`/api/posts/${post.id}/bookmark`,{method:next?"POST":"DELETE"});
     if(!response.ok)setSaved(!next);
   };
-  const handleLocked=()=>{
-    if(post.visibility==="members")window.location.href=`/membership/${creator.handle}`;
-    else setPaying(true);
-  };
-  return <article className="glass overflow-hidden rounded-[28px] shadow-soft transition duration-300 hover:-translate-y-1">
+  const handleLocked=()=>setUnlockOpen(true);
+  const callbackUrl=typeof window === "undefined" ? "/" : `${window.location.pathname}${window.location.search}`;
+  return <article data-testid="post-card" data-post-id={post.id} className="glass overflow-hidden rounded-[28px] shadow-soft transition duration-300 hover:-translate-y-1">
     {post.media.length?<div className="relative bg-black/[.04] dark:bg-white/[.03]">
       <MediaGallery media={post.media} unlocked={hasAccess} compact onLockedClick={handleLocked}/>
       <div className="pointer-events-none absolute left-4 right-4 top-4 flex items-start justify-between text-white">
@@ -63,6 +61,6 @@ export function PostCard({post}:{post:Post}) {
         <button onClick={updateBookmark} aria-label="收藏" className={saved?"text-violet":"muted hover:text-violet"}><Bookmark size={19} fill={saved?"currentColor":"none"}/></button>
       </div>
     </div>
-    {paying&&<PaymentModal title={post.title} price={post.price||0} onClose={()=>setPaying(false)} onConfirm={()=>{unlock(post.id,post.price||0);setPaying(false)}}/>}
+    <UnlockDialog open={unlockOpen} title={post.title} visibility={post.visibility === "members" ? "members" : "purchase"} price={post.price} creatorName={creator.name} authenticated={Boolean(session?.user)} callbackUrl={callbackUrl} onClose={()=>setUnlockOpen(false)} onConfirmPurchase={()=>{unlock(post.id,post.price||0);setUnlockOpen(false)}} membershipHref={`/membership/${creator.handle}`}/>
   </article>
 }

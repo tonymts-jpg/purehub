@@ -44,3 +44,30 @@ test("admin uses an independent shell without frontend navigation", async ({ pag
   await expect(page.getByRole("link", { name: "首页" })).toHaveCount(0);
   await expect(page.getByText("Demo 模式")).toHaveCount(0);
 });
+
+test("homepage purchase unlock dialog covers the viewport outside the post card", async ({ page }) => {
+  await page.goto("/");
+  const card = page.getByTestId("post-card").filter({ has: page.getByRole("heading", { name: "雨后竹林写真日记", exact: true }) });
+  await card.getByRole("button", { name: "解锁图片 3" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "解锁作品" });
+  await expect(dialog).toBeVisible();
+  expect(await dialog.evaluate((node) => node.parentElement === document.body)).toBe(true);
+  const box = await dialog.boundingBox();
+  expect(box?.width).toBe(page.viewportSize()?.width);
+  expect(box?.height).toBe(page.viewportSize()?.height);
+  await expect(dialog.getByRole("link", { name: "登录后解锁" })).toBeVisible();
+  await expect(dialog.locator('input[value="4242 4242 4242 4242"]')).toHaveCount(0);
+});
+
+test("homepage purchase unlock dialog closes on Escape and restores locked-media focus", async ({ page }) => {
+  await page.goto("/");
+  const card = page.getByTestId("post-card").filter({ has: page.getByRole("heading", { name: "雨后竹林写真日记", exact: true }) });
+  const lockedMedia = card.getByRole("button", { name: "解锁图片 3" });
+  await lockedMedia.focus();
+  await lockedMedia.press("Enter");
+  await expect(page.getByRole("dialog", { name: "解锁作品" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "解锁作品" })).toHaveCount(0);
+  await expect(lockedMedia).toBeFocused();
+});
