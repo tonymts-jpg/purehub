@@ -4201,11 +4201,20 @@ test("phase 7 admin channel UI exposes operations only to channel admins", async
 
     activeRow = operations.getByRole("row").filter({ hasText: `UI Review ${suffix}` });
     await activeRow.getByRole("button", { name: `暂停 UI Review ${suffix}` }).click();
+    await expect(
+      operations.getByRole("status").filter({ hasText: "频道已暂停" })
+    ).toBeVisible();
     await operations.getByLabel("频道状态筛选").selectOption("suspended");
     const suspendedRow = operations.getByRole("row").filter({ hasText: `UI Review ${suffix}` });
     await expect(suspendedRow).toBeVisible();
     await suspendedRow.getByRole("button", { name: `恢复 UI Review ${suffix}` }).click();
+    await expect(
+      operations.getByRole("status").filter({ hasText: "频道已恢复" })
+    ).toBeVisible();
     await operations.getByLabel("频道状态筛选").selectOption("active");
+    await expect(
+      operations.getByRole("row").filter({ hasText: `UI Review ${suffix}` })
+    ).toBeVisible();
 
     await expect(operations.getByRole("button", { name: "重新索引搜索" })).toBeVisible();
     await expect(operations.getByRole("button", { name: "重新物化频道" }).first()).toBeVisible();
