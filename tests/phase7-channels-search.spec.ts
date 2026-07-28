@@ -3261,7 +3261,7 @@ test("phase 7 channel UI renders safe cards and a member-only private feed", asy
   });
   await page.getByRole("button", { name: "申请加入频道" }).click();
   await expect(page.getByRole("button", { name: "申请加入频道" })).toBeVisible();
-  await expect(page.getByRole("alert")).toContainText("Temporary membership failure.");
+  await expect(page.getByRole("alert").filter({ hasText: "Temporary membership failure." })).toBeVisible();
   await page.unroute("**/api/channels/private-curators/join-requests");
 
   await signInFan(page.request);
