@@ -10,27 +10,32 @@ import { acceptsUploadMediaType, normalizeByteRange, safeMediaContentType } from
 const configured = () => Boolean(process.env.OBJECT_STORAGE_ENDPOINT && process.env.OBJECT_STORAGE_ACCESS_KEY && process.env.OBJECT_STORAGE_SECRET_KEY);
 const bucket = () => process.env.OBJECT_STORAGE_BUCKET ?? "purehub-media";
 const MEDIA_CLAIM_STALE_AFTER_MS = 15 * 60 * 1000;
+const MEDIA_CLAIM_PREFIX = "processing_claimed:";
+const MEDIA_RECOVERY_PREFIX = "processing_recovering:";
 
 type MediaProcessingAsset = {
   id: string;
   storageKey: string | null;
   kind: string;
+  status: string;
   createdAt: Date;
   updatedAt: Date;
 };
 
+type MediaProcessingStatusFilter = string | { startsWith: string };
+
 type MediaProcessingDatabase = {
   mediaAsset: {
     findMany(input: {
-      where: { status: string };
+      where: { status: MediaProcessingStatusFilter; updatedAt?: { lt: Date } };
       take: number;
       orderBy: { createdAt: "asc" };
     }): Promise<MediaProcessingAsset[]>;
     updateMany(input: {
-      where: { id?: string; status?: string; updatedAt?: { lt: Date } };
+      where: { id?: string; status?: MediaProcessingStatusFilter; updatedAt?: { lt: Date } };
       data: Record<string, unknown>;
     }): Promise<{ count: number }>;
-    count(input: { where: { id?: string; status?: string } }): Promise<number>;
+    count(input: { where: { id?: string; status?: MediaProcessingStatusFilter } }): Promise<number>;
   };
 };
 
@@ -155,15 +160,71 @@ async function bodyToBuffer(body: AsyncIterable<Uint8Array> | undefined) {
   return Buffer.concat(chunks);
 }
 
+function claimIdFromStatus(status: string) {
+  const prefix = status.startsWith(MEDIA_CLAIM_PREFIX)
+    ? MEDIA_CLAIM_PREFIX
+    : status.startsWith(MEDIA_RECOVERY_PREFIX)
+      ? MEDIA_RECOVERY_PREFIX
+      : null;
+  if (!prefix) throw new Error("Media processing claim is invalid.");
+  const claimId = status.slice(prefix.length);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(claimId)) {
+    throw new Error("Media processing claim is invalid.");
+  }
+  return claimId;
+}
+
+export function mediaProcessingAttemptKey(assetId: string, claimStatus: string) {
+  return `derivatives/${assetId}/attempts/${claimIdFromStatus(claimStatus)}.jpg`;
+}
+
 export async function claimPendingMediaAsset(
   assetId: string,
-  database: MediaProcessingDatabase = prisma as unknown as MediaProcessingDatabase
+  database: MediaProcessingDatabase = prisma as unknown as MediaProcessingDatabase,
+  claimId = randomUUID()
 ) {
+  const claimStatus = `${MEDIA_CLAIM_PREFIX}${claimId}`;
   const claim = await database.mediaAsset.updateMany({
     where: { id: assetId, status: "processing" },
-    data: { status: "processing_claimed" }
+    data: { status: claimStatus }
   });
-  return claim.count === 1;
+  return claim.count === 1 ? claimStatus : null;
+}
+
+async function recoverStaleMediaClaims(input: {
+  database: MediaProcessingDatabase;
+  cutoff: Date;
+  deleteObject: (key: string) => Promise<void>;
+}) {
+  for (const prefix of [MEDIA_RECOVERY_PREFIX, MEDIA_CLAIM_PREFIX]) {
+    const staleClaims = await input.database.mediaAsset.findMany({
+      where: { status: { startsWith: prefix }, updatedAt: { lt: input.cutoff } },
+      take: 20,
+      orderBy: { createdAt: "asc" }
+    });
+    for (const asset of staleClaims) {
+      const claimId = claimIdFromStatus(asset.status);
+      const recoveryStatus = `${MEDIA_RECOVERY_PREFIX}${claimId}`;
+      if (prefix === MEDIA_CLAIM_PREFIX) {
+        const recoveryClaim = await input.database.mediaAsset.updateMany({
+          where: { id: asset.id, status: asset.status, updatedAt: { lt: input.cutoff } },
+          data: { status: recoveryStatus }
+        });
+        if (recoveryClaim.count !== 1) continue;
+      }
+      try {
+        if (asset.kind === "image") {
+          await input.deleteObject(mediaProcessingAttemptKey(asset.id, recoveryStatus));
+        }
+      } catch {
+        continue;
+      }
+      await input.database.mediaAsset.updateMany({
+        where: { id: asset.id, status: recoveryStatus },
+        data: { status: "processing" }
+      });
+    }
+  }
 }
 
 export async function processPendingMedia(options: MediaProcessingOptions = {}) {
@@ -191,12 +252,10 @@ export async function processPendingMedia(options: MediaProcessingOptions = {}) 
     return sharp(input).rotate().composite([{ input: watermark, gravity: "southeast" }]).jpeg({ quality: 88 }).toBuffer();
   });
 
-  await database.mediaAsset.updateMany({
-    where: {
-      status: "processing_claimed",
-      updatedAt: { lt: new Date(now().getTime() - MEDIA_CLAIM_STALE_AFTER_MS) }
-    },
-    data: { status: "processing" }
+  await recoverStaleMediaClaims({
+    database,
+    cutoff: new Date(now().getTime() - MEDIA_CLAIM_STALE_AFTER_MS),
+    deleteObject
   });
   const assets = await database.mediaAsset.findMany({
     where: { status: "processing" },
@@ -205,7 +264,8 @@ export async function processPendingMedia(options: MediaProcessingOptions = {}) 
   });
   let processed = 0;
   for (const asset of assets) {
-    if (!(await claimPendingMediaAsset(asset.id, database))) continue;
+    const claimStatus = await claimPendingMediaAsset(asset.id, database);
+    if (!claimStatus) continue;
     try {
       if (!asset.storageKey) throw new Error("Storage key is missing.");
       let derivativeKey = asset.storageKey;
@@ -213,16 +273,16 @@ export async function processPendingMedia(options: MediaProcessingOptions = {}) 
         const input = await getObject(asset.storageKey);
         const output = await transformImage(input);
         const stillClaimed = await database.mediaAsset.count({
-          where: { id: asset.id, status: "processing_claimed" }
+          where: { id: asset.id, status: claimStatus }
         });
         if (!stillClaimed) continue;
-        derivativeKey = `derivatives/${asset.id}/watermarked.jpg`;
+        derivativeKey = mediaProcessingAttemptKey(asset.id, claimStatus);
         const committed = await writeDerivativeWithConditionalCommit({
           write: async () => {
             await putObject({ key: derivativeKey, body: output, contentType: "image/jpeg" });
           },
           commit: async () => (await database.mediaAsset.updateMany({
-            where: { id: asset.id, status: "processing_claimed" },
+            where: { id: asset.id, status: claimStatus },
             data: { derivativeKey, status: "ready", processingError: null, src: `/api/media/${asset.id}/content` }
           })).count === 1,
           remove: async () => {
@@ -233,13 +293,13 @@ export async function processPendingMedia(options: MediaProcessingOptions = {}) 
         continue;
       }
       const completed = await database.mediaAsset.updateMany({
-        where: { id: asset.id, status: "processing_claimed" },
+        where: { id: asset.id, status: claimStatus },
         data: { derivativeKey, status: "ready", processingError: null, src: `/api/media/${asset.id}/content` }
       });
       processed += completed.count;
     } catch (error) {
       await database.mediaAsset.updateMany({
-        where: { id: asset.id, status: "processing_claimed" },
+        where: { id: asset.id, status: claimStatus },
         data: { status: "failed", processingError: error instanceof Error ? error.message : "Media processing failed." }
       });
     }

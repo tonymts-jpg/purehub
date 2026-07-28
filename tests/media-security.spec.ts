@@ -105,13 +105,17 @@ test("lifecycle cleanup refuses shared seeded identities", async () => {
 });
 
 test("lifecycle cleanup derives an image derivative key before the worker records it", () => {
+  const claimStatus = "processing_claimed:44444444-4444-4444-8444-444444444444";
   expect(lifecycleObjectKeysForAsset({
     id: "isolated-asset",
     kind: "image",
     storageKey: "original/isolated-user/source.png",
-    derivativeKey: null
+    derivativeKey: "derivatives/isolated-asset/attempts/committed.jpg",
+    status: claimStatus
   })).toEqual([
     "original/isolated-user/source.png",
+    "derivatives/isolated-asset/attempts/committed.jpg",
+    "derivatives/isolated-asset/attempts/44444444-4444-4444-8444-444444444444.jpg",
     "derivatives/isolated-asset/watermarked.jpg"
   ]);
 });
@@ -156,7 +160,9 @@ test("lifecycle cleanup accepts exact processing and claimed media assets", asyn
         kind: "video",
         mimeType: "video/mp4",
         sizeBytes: 1,
-        status: index === 0 ? "processing" : "processing_claimed",
+        status: index === 0
+          ? "processing"
+          : "processing_claimed:33333333-3333-4333-8333-333333333333",
         visibility: "public"
       }))
     });
@@ -256,6 +262,7 @@ test("isolated media lifecycle cleanup removes exact finance, identity, and obje
   const orderId = `cleanup-order-${nonce}`;
   const objectKey = `original/${creatorId}/${nonce}.png`;
   const derivativeKey = `derivatives/${assetId}/watermarked.jpg`;
+  const orphanAttemptKey = `derivatives/${assetId}/attempts/orphan-${nonce}.jpg`;
   const accountIds = [
     `cleanup-provider-${nonce}`,
     `cleanup-platform-${nonce}`,
@@ -389,6 +396,7 @@ test("isolated media lifecycle cleanup removes exact finance, identity, and obje
       });
     });
     await putPhase7LifecycleTestObject(objectKey, Buffer.from("cleanup"), "image/png");
+    await putPhase7LifecycleTestObject(orphanAttemptKey, Buffer.from("orphan"), "image/jpeg");
     delayedDerivativeWrite = new Promise<void>((resolveWrite, rejectWrite) => {
       setTimeout(() => {
         void putPhase7LifecycleTestObject(derivativeKey, Buffer.from("delayed"), "image/jpeg")
@@ -400,6 +408,7 @@ test("isolated media lifecycle cleanup removes exact finance, identity, and obje
     await cleanupPhase7MediaLifecycle(scope);
     await delayedDerivativeWrite;
     expect(scope.objectKeys.has(derivativeKey)).toBe(true);
+    expect(scope.objectKeys.has(orphanAttemptKey)).toBe(true);
     expect(await prisma.ledgerAccount.count({ where: { id: accountIds[2] } })).toBe(0);
     expect(await prisma.ledgerAccount.findMany({
       where: { id: { in: accountIds.slice(0, 2) } },

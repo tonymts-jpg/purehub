@@ -1,10 +1,12 @@
 import {
   DeleteObjectCommand,
   HeadObjectCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
   S3Client
 } from "@aws-sdk/client-s3";
 import { prisma } from "../lib/prisma";
+import { mediaProcessingAttemptKey } from "../lib/storage/media";
 
 type AcceptanceIdentity = {
   id: string;
@@ -163,12 +165,44 @@ export function lifecycleObjectKeysForAsset(asset: {
   kind: string;
   storageKey: string | null;
   derivativeKey: string | null;
+  status?: string;
 }) {
   const keys = new Set<string>();
   if (asset.storageKey) keys.add(asset.storageKey);
   if (asset.derivativeKey) keys.add(asset.derivativeKey);
-  if (asset.kind === "image") keys.add(`derivatives/${asset.id}/watermarked.jpg`);
+  if (asset.kind === "image") {
+    if (
+      asset.status?.startsWith("processing_claimed:")
+      || asset.status?.startsWith("processing_recovering:")
+    ) {
+      keys.add(mediaProcessingAttemptKey(asset.id, asset.status));
+    }
+    keys.add(`derivatives/${asset.id}/watermarked.jpg`);
+  }
   return [...keys];
+}
+
+async function discoverDerivativeObjects(scope: Phase7MediaLifecycleCleanupScope) {
+  if (!scope.assetIds.size || !objectStorageTestConfigAvailable()) return;
+  const client = storageClient();
+  try {
+    for (const assetId of scope.assetIds) {
+      let continuationToken: string | undefined;
+      do {
+        const listed = await client.send(new ListObjectsV2Command({
+          Bucket: storageBucket(),
+          Prefix: `derivatives/${assetId}/`,
+          ContinuationToken: continuationToken
+        }));
+        for (const object of listed.Contents ?? []) {
+          if (object.Key) scope.objectKeys.add(object.Key);
+        }
+        continuationToken = listed.IsTruncated ? listed.NextContinuationToken : undefined;
+      } while (continuationToken);
+    }
+  } finally {
+    client.destroy();
+  }
 }
 
 export async function putPhase7LifecycleTestObject(key: string, body: Buffer, contentType = "video/mp4") {
@@ -214,13 +248,14 @@ export async function cleanupPhase7MediaLifecycle(scope: Phase7MediaLifecycleCle
   const assetIds = [...scope.assetIds];
   const orderIds = [...scope.orderIds];
 
+  await discoverDerivativeObjects(scope);
   for (const [assetId, kind] of scope.assetKinds) {
     if (kind === "image") scope.objectKeys.add(`derivatives/${assetId}/watermarked.jpg`);
   }
   const storedAssets = assetIds.length
     ? await prisma.mediaAsset.findMany({
       where: { id: { in: assetIds } },
-      select: { id: true, uploaderUserId: true, kind: true, storageKey: true, derivativeKey: true }
+      select: { id: true, uploaderUserId: true, kind: true, storageKey: true, derivativeKey: true, status: true }
     })
     : [];
   for (const asset of storedAssets) {
@@ -266,6 +301,13 @@ export async function cleanupPhase7MediaLifecycle(scope: Phase7MediaLifecycleCle
     }
 
     if (assetIds.length) {
+      const claimingAssets = await tx.mediaAsset.findMany({
+        where: { id: { in: assetIds }, uploaderUserId: { in: identityIds } },
+        select: { id: true, kind: true, storageKey: true, derivativeKey: true, status: true }
+      });
+      claimingAssets.forEach((asset) => {
+        lifecycleObjectKeysForAsset(asset).forEach((key) => scope.objectKeys.add(key));
+      });
       await tx.mediaAsset.updateMany({
         where: { id: { in: assetIds }, uploaderUserId: { in: identityIds } },
         data: { status: "cleanup_pending" }
@@ -367,6 +409,7 @@ export async function cleanupPhase7MediaLifecycle(scope: Phase7MediaLifecycleCle
     }
   });
 
+  await discoverDerivativeObjects(scope);
   const objectKeys = [...scope.objectKeys];
   await deleteObjectsThroughRaceWindow(objectKeys);
   await assertPhase7MediaLifecycleAbsent(scope);
