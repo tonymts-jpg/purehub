@@ -3302,8 +3302,10 @@ test("phase 7 channel UI returns not-found for an anonymous hidden private chann
   });
 
   try {
-    const response = await page.goto(`/channels/${slug}`);
-    expect(response?.status()).toBe(404);
+    const apiResponse = await request.get(`/api/channels/${slug}`);
+    expect(apiResponse.status(), await apiResponse.text()).toBe(404);
+    await page.goto(`/channels/${slug}`);
+    await expect(page.getByText("404", { exact: true })).toBeVisible();
     await expect(page.getByText("Hidden UI Fixture")).toHaveCount(0);
   } finally {
     await prisma.channel.deleteMany({ where: { id: channelId } });
