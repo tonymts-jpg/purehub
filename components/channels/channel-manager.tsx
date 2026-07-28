@@ -238,7 +238,7 @@ export function ChannelManager() {
             />
           )}
 
-          {selected.access.canManageMembers && (
+          {isOwner && selected.access.canManageMembers && (
             <ChannelMembershipManager
               key={selected.id}
               channel={selected as ManagedChannel}

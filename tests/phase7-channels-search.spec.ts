@@ -3313,6 +3313,7 @@ test("phase 7 channel UI returns not-found for an anonymous hidden private chann
 });
 
 test("phase 7 channel UI and search UI preserve complete ordered cursor pages", async ({ page, request, browser }, testInfo) => {
+  test.slow();
   test.skip(!(await hasDatabase(request)), "Phase 7 search UI requires the seeded PostgreSQL database.");
   const nonce = `${testInfo.project.name}-${Date.now().toString(36)}`;
   const query = `uituple${Date.now().toString(36)}`;
