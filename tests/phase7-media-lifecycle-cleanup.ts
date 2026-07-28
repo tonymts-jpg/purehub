@@ -175,11 +175,11 @@ type CleanupMediaRecord = {
 
 type CleanupMediaDatabase = {
   findFirst(input: {
-    where: { id: string; uploaderUserId: { in: string[] } };
+    where: { id: string };
     select: Record<keyof CleanupMediaRecord, true>;
   }): Promise<CleanupMediaRecord | null>;
   updateMany(input: {
-    where: { id: string; uploaderUserId: { in: string[] }; status: string };
+    where: { id: string; uploaderUserId: string; status: string };
     data: { status: string };
   }): Promise<{ count: number }>;
 };
@@ -191,7 +191,7 @@ export async function quiescePhase7MediaAssetForCleanup(input: {
 }) {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const current = await input.database.findFirst({
-      where: { id: input.assetId, uploaderUserId: { in: input.identityIds } },
+      where: { id: input.assetId },
       select: {
         id: true,
         uploaderUserId: true,
@@ -202,10 +202,13 @@ export async function quiescePhase7MediaAssetForCleanup(input: {
       }
     });
     if (!current) return null;
+    if (!current.uploaderUserId || !input.identityIds.includes(current.uploaderUserId)) {
+      throw new Error(`Cleanup media asset ${input.assetId} no longer has an exact scoped owner.`);
+    }
     const claimed = await input.database.updateMany({
       where: {
         id: current.id,
-        uploaderUserId: { in: input.identityIds },
+        uploaderUserId: current.uploaderUserId,
         status: current.status
       },
       data: { status: "cleanup_pending" }
@@ -218,6 +221,7 @@ export async function quiescePhase7MediaAssetForCleanup(input: {
 type CleanupObjectStore = {
   listObjects(prefix: string, continuationToken?: string): Promise<{
     keys: string[];
+    isTruncated?: boolean;
     nextToken?: string;
   }>;
   deleteObject(key: string): Promise<void>;
@@ -236,6 +240,7 @@ function defaultCleanupObjectStore(): CleanupObjectStore {
       }));
       return {
         keys: (listed.Contents ?? []).flatMap((object) => object.Key ? [object.Key] : []),
+        isTruncated: Boolean(listed.IsTruncated),
         ...(listed.IsTruncated && listed.NextContinuationToken
           ? { nextToken: listed.NextContinuationToken }
           : {})
@@ -257,18 +262,42 @@ function defaultCleanupObjectStore(): CleanupObjectStore {
   };
 }
 
-async function listExactDerivativePrefixes(
+export async function listPhase7DerivativeObjects(
   scope: Phase7MediaLifecycleCleanupScope,
-  store: CleanupObjectStore
+  store: CleanupObjectStore,
+  maxPagesPerPrefix = 100
 ) {
+  if (!Number.isInteger(maxPagesPerPrefix) || maxPagesPerPrefix < 1) {
+    throw new Error("Derivative prefix page limit must be a positive integer.");
+  }
   const keys: string[] = [];
   for (const assetId of scope.assetIds) {
+    const prefix = `derivatives/${assetId}/`;
     let continuationToken: string | undefined;
-    do {
-      const listed = await store.listObjects(`derivatives/${assetId}/`, continuationToken);
+    const seenTokens = new Set<string>();
+    let complete = false;
+    for (let page = 0; page < maxPagesPerPrefix; page += 1) {
+      const listed = await store.listObjects(prefix, continuationToken);
+      if (listed.keys.some((key) => !key.startsWith(prefix))) {
+        throw new Error(`Derivative listing returned an object outside exact asset prefix ${prefix}.`);
+      }
       keys.push(...listed.keys);
+      if (!listed.isTruncated) {
+        complete = true;
+        break;
+      }
+      if (!listed.nextToken) {
+        throw new Error(`Derivative prefix ${prefix} was truncated without a continuation token.`);
+      }
+      if (seenTokens.has(listed.nextToken)) {
+        throw new Error(`Derivative prefix ${prefix} returned a repeated continuation token.`);
+      }
+      seenTokens.add(listed.nextToken);
       continuationToken = listed.nextToken;
-    } while (continuationToken);
+    }
+    if (!complete) {
+      throw new Error(`Derivative prefix ${prefix} exceeded the page limit.`);
+    }
   }
   return keys;
 }
@@ -294,6 +323,7 @@ export async function deletePhase7MediaObjectsThroughRaceWindow(
   options: {
     store?: CleanupObjectStore;
     delaysMs?: number[];
+    maxPagesPerPrefix?: number;
   } = {}
 ) {
   assertSafeScope(scope);
@@ -307,12 +337,20 @@ export async function deletePhase7MediaObjectsThroughRaceWindow(
   try {
     for (const delayMs of retryDelaysMs) {
       if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
-      const beforeDelete = await listExactDerivativePrefixes(scope, store);
+      const beforeDelete = await listPhase7DerivativeObjects(
+        scope,
+        store,
+        options.maxPagesPerPrefix
+      );
       beforeDelete.forEach((key) => scope.objectKeys.add(key));
       for (const key of scope.objectKeys) {
         await store.deleteObject(key);
       }
-      const afterDelete = await listExactDerivativePrefixes(scope, store);
+      const afterDelete = await listPhase7DerivativeObjects(
+        scope,
+        store,
+        options.maxPagesPerPrefix
+      );
       afterDelete.forEach((key) => scope.objectKeys.add(key));
       let knownObjectExists = false;
       for (const key of scope.objectKeys) {

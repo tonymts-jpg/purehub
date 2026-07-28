@@ -17,6 +17,7 @@ import {
   createPhase7MediaLifecycleCleanupScope,
   deletePhase7MediaObjectsThroughRaceWindow,
   lifecycleObjectKeysForAsset,
+  listPhase7DerivativeObjects,
   objectStorageTestConfigAvailable,
   putPhase7LifecycleTestObject,
   quiescePhase7MediaAssetForCleanup
@@ -150,7 +151,7 @@ test("lifecycle cleanup retries a lost status CAS and re-lists late exact-prefix
         }
         if (
           where.id === record.id
-          && where.uploaderUserId.in.includes(record.uploaderUserId)
+          && where.uploaderUserId === record.uploaderUserId
           && where.status === record.status
         ) {
           record.status = data.status;
@@ -195,6 +196,114 @@ test("lifecycle cleanup retries a lost status CAS and re-lists late exact-prefix
   expect(objects.has(lateAttemptKey)).toBe(false);
   expect(objects.get(otherAssetKey)?.toString()).toBe("other");
   expect(deletedKeys).not.toContain(otherAssetKey);
+});
+
+test("lifecycle cleanup retries when exact ownership changes between read and status CAS", async () => {
+  const assetId = "cleanup-owner-race-asset";
+  const firstOwnerId = "cleanup-owner-race-first";
+  const secondOwnerId = "cleanup-owner-race-second";
+  const record = {
+    id: assetId,
+    uploaderUserId: firstOwnerId,
+    kind: "video",
+    storageKey: null,
+    derivativeKey: null,
+    status: "processing"
+  };
+  let casAttempts = 0;
+
+  const claimed = await quiescePhase7MediaAssetForCleanup({
+    assetId,
+    identityIds: [firstOwnerId, secondOwnerId],
+    database: {
+      findFirst: async () => ({ ...record }),
+      updateMany: async ({ where, data }) => {
+        casAttempts += 1;
+        if (casAttempts === 1) record.uploaderUserId = secondOwnerId;
+        const ownerMatches = where.uploaderUserId === record.uploaderUserId;
+        if (where.id === record.id && ownerMatches && where.status === record.status) {
+          record.status = data.status;
+          return { count: 1 };
+        }
+        return { count: 0 };
+      }
+    }
+  });
+
+  expect(casAttempts).toBe(2);
+  expect(claimed?.uploaderUserId).toBe(secondOwnerId);
+  expect(record.status).toBe("cleanup_pending");
+});
+
+test("exact derivative prefix listing follows multiple pages without accepting cross-asset keys", async () => {
+  const scope = createPhase7MediaLifecycleCleanupScope();
+  scope.assetIds.add("pagination-asset");
+  const requestedTokens: Array<string | undefined> = [];
+  const keys = await listPhase7DerivativeObjects(scope, {
+    listObjects: async (prefix, continuationToken) => {
+      requestedTokens.push(continuationToken);
+      expect(prefix).toBe("derivatives/pagination-asset/");
+      if (!continuationToken) {
+        return {
+          keys: ["derivatives/pagination-asset/attempts/page-1.jpg"],
+          isTruncated: true,
+          nextToken: "page-2"
+        };
+      }
+      return {
+        keys: ["derivatives/pagination-asset/attempts/page-2.jpg"],
+        isTruncated: false
+      };
+    },
+    deleteObject: async () => undefined,
+    objectExists: async () => false
+  });
+
+  expect(requestedTokens).toEqual([undefined, "page-2"]);
+  expect(keys).toEqual([
+    "derivatives/pagination-asset/attempts/page-1.jpg",
+    "derivatives/pagination-asset/attempts/page-2.jpg"
+  ]);
+  expect(keys).not.toContain("derivatives/other-asset/attempts/page-2.jpg");
+});
+
+test("exact derivative prefix listing rejects truncated pages without a continuation token", async () => {
+  const scope = createPhase7MediaLifecycleCleanupScope();
+  scope.assetIds.add("pagination-missing-token");
+  await expect(listPhase7DerivativeObjects(scope, {
+    listObjects: async () => ({ keys: [], isTruncated: true }),
+    deleteObject: async () => undefined,
+    objectExists: async () => false
+  })).rejects.toThrow("without a continuation token");
+});
+
+test("exact derivative prefix listing rejects repeated continuation tokens", async () => {
+  const scope = createPhase7MediaLifecycleCleanupScope();
+  scope.assetIds.add("pagination-cycle");
+  await expect(listPhase7DerivativeObjects(scope, {
+    listObjects: async (_prefix, continuationToken) => ({
+      keys: [],
+      isTruncated: true,
+      nextToken: continuationToken ?? "cycle"
+    }),
+    deleteObject: async () => undefined,
+    objectExists: async () => false
+  })).rejects.toThrow("repeated continuation token");
+});
+
+test("exact derivative prefix listing rejects page-limit exhaustion", async () => {
+  const scope = createPhase7MediaLifecycleCleanupScope();
+  scope.assetIds.add("pagination-exhaustion");
+  let page = 0;
+  await expect(listPhase7DerivativeObjects(scope, {
+    listObjects: async () => ({
+      keys: [],
+      isTruncated: true,
+      nextToken: `page-${page += 1}`
+    }),
+    deleteObject: async () => undefined,
+    objectExists: async () => false
+  }, 2)).rejects.toThrow("page limit");
 });
 
 test("lifecycle cleanup accepts exact processing and claimed media assets", async ({ request }, testInfo: TestInfo) => {
