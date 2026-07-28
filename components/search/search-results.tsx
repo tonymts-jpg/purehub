@@ -175,15 +175,22 @@ export function SearchResults({
                   data-testid="search-result"
                   data-result-id={result.entityId}
                   data-result-type={result.entityType}
-                  className="glass flex min-w-0 items-start gap-4 rounded-lg p-4 transition hover:-translate-y-0.5 sm:p-5"
+                  className="glass min-w-0 rounded-lg p-4 transition hover:-translate-y-0.5 sm:p-5"
                 >
+                  <Link
+                    href={result.href}
+                    data-testid="search-result-title"
+                    className="block truncate text-base font-black sm:text-lg"
+                  >
+                    {result.title}
+                  </Link>
                   {result.preview ? (
                     <button
                       type="button"
                       data-testid="search-result-preview"
                       aria-label={`\u9884\u89c8 ${result.title}`}
                       onClick={() => setActivePreview(result.preview)}
-                      className="relative h-24 w-[4.8rem] shrink-0 overflow-hidden rounded-lg bg-black/5"
+                      className="relative mt-3 h-24 w-[4.8rem] overflow-hidden rounded-lg bg-black/5"
                     >
                       {result.preview.kind === "video" ? (
                         <video src={result.preview.src} aria-label={result.preview.alt} preload="metadata" className="h-full w-full object-cover" />
@@ -194,15 +201,12 @@ export function SearchResults({
                   ) : (
                   <span
                     title={result.entityType === "post" ? "作品" : result.entityType === "creator" ? "创作者" : "频道"}
-                    className="grid h-11 w-11 shrink-0 place-items-center rounded-lg bg-violet/10 text-violet"
+                    className="mt-3 grid h-11 w-11 place-items-center rounded-lg bg-violet/10 text-violet"
                   >
                     <Icon size={19} />
                   </span>
                   )}
-                  <Link href={result.href} className="min-w-0 flex-1">
-                    <span className="block truncate text-base font-black sm:text-lg">{result.title}</span>
-                    <span className="mt-1 line-clamp-2 block break-words text-sm leading-6 muted">{result.summary}</span>
-                  </Link>
+                  <span data-testid="search-result-summary" className="mt-3 line-clamp-2 block break-words text-sm leading-6 muted">{result.summary}</span>
                 </article>
               );
             })}

@@ -133,15 +133,21 @@ test("search thumbnail preview opens the shared viewer without navigating", asyn
     has: page.getByTestId("search-result-preview")
   }).first();
   const preview = result.getByTestId("search-result-preview");
-  const title = result.getByRole("link");
+  const title = result.getByTestId("search-result-title");
+  const summary = result.getByTestId("search-result-summary");
+  await expect(title).toBeVisible();
   await expect(preview).toBeVisible();
+  await expect(summary).toBeVisible();
   expect(await result.evaluate((node) => {
+    const titleLink = node.querySelector('[data-testid="search-result-title"]');
     const previewButton = node.querySelector('[data-testid="search-result-preview"]');
-    const contentLink = node.querySelector("a");
+    const summaryText = node.querySelector('[data-testid="search-result-summary"]');
     return Boolean(
-      previewButton
-      && contentLink
-      && (previewButton.compareDocumentPosition(contentLink) & Node.DOCUMENT_POSITION_FOLLOWING)
+      titleLink
+      && previewButton
+      && summaryText
+      && (titleLink.compareDocumentPosition(previewButton) & Node.DOCUMENT_POSITION_FOLLOWING)
+      && (previewButton.compareDocumentPosition(summaryText) & Node.DOCUMENT_POSITION_FOLLOWING)
     );
   })).toBeTruthy();
 
