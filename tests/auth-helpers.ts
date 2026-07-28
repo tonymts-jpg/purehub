@@ -6,6 +6,7 @@ export const authHeaders = {
 };
 
 type SignUpInput = { name: string; email: string; password: string; handle: string };
+export type PreparedFanRegistration = Pick<SignUpInput, "name" | "email" | "handle">;
 
 async function postAuthWithRetry(request: APIRequestContext, path: string, data: Record<string, string>) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -37,14 +38,22 @@ export const signInCreator = (request: APIRequestContext, handle = "yuki") => si
 export const signInAdmin = (request: APIRequestContext) => signIn(request, "admin@purehub.local");
 export const signInSupport = (request: APIRequestContext) => signIn(request, "support@purehub.local");
 
-export async function registerFan(request: APIRequestContext, label: string) {
+export function prepareFanRegistration(label: string): PreparedFanRegistration {
   const nonce = `${Date.now().toString(36)}${Math.floor(Math.random() * 1_000_000).toString(36)}`;
   const prefix = label.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "").slice(0, 12) || "fan";
   const handle = `${prefix}-${nonce}`.slice(0, 30);
   const email = `${handle}@e2e.purehub.local`;
-  const response = await postSignUp(request, { name: `E2E ${label} Fan`, email, password, handle });
+  return { name: `E2E ${label} Fan`, email, handle };
+}
+
+export async function registerPreparedFan(request: APIRequestContext, identity: PreparedFanRegistration) {
+  const response = await postSignUp(request, { ...identity, password });
   expect(response.ok(), await response.text()).toBeTruthy();
-  return { email, handle };
+  return { email: identity.email, handle: identity.handle };
+}
+
+export async function registerFan(request: APIRequestContext, label: string) {
+  return registerPreparedFan(request, prepareFanRegistration(label));
 }
 
 export async function hasDatabase(request: APIRequestContext) {

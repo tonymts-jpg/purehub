@@ -83,7 +83,9 @@ import {
 import {
   authHeaders,
   hasDatabase,
+  prepareFanRegistration,
   registerFan,
+  registerPreparedFan,
   signInAdmin,
   signInCreator,
   signInFan,
@@ -3414,7 +3416,9 @@ test("phase 7 uploaded free image and video assets publish into safe search prev
   try {
     await requirePhase7(anonymous, testInfo);
     databaseReady = true;
-    const creatorIdentity = await registerFan(creator, "phase7-media-creator");
+    const preparedCreatorIdentity = prepareFanRegistration("phase7-media-creator");
+    cleanupScope.identityEmails.add(preparedCreatorIdentity.email);
+    const creatorIdentity = await registerPreparedFan(creator, preparedCreatorIdentity);
     const creatorUser = await prisma.user.findUniqueOrThrow({
       where: { email: creatorIdentity.email },
       select: { id: true, email: true }
@@ -3434,7 +3438,9 @@ test("phase 7 uploaded free image and video assets publish into safe search prev
         levelId: "level-1"
       }
     });
-    const fanIdentity = await registerFan(fan, "phase7-media-buyer");
+    const preparedFanIdentity = prepareFanRegistration("phase7-media-buyer");
+    cleanupScope.identityEmails.add(preparedFanIdentity.email);
+    const fanIdentity = await registerPreparedFan(fan, preparedFanIdentity);
     const fanUser = await prisma.user.findUniqueOrThrow({
       where: { email: fanIdentity.email },
       select: { id: true, email: true }

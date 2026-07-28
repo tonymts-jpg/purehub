@@ -13,12 +13,12 @@ type AcceptanceIdentity = {
 
 export type Phase7MediaLifecycleCleanupScope = {
   identities: AcceptanceIdentity[];
+  identityEmails: Set<string>;
   postIds: Set<string>;
   assetIds: Set<string>;
   assetKinds: Map<string, string>;
   orderIds: Set<string>;
   objectKeys: Set<string>;
-  ledgerAccountIdsToDelete: Set<string>;
   ledgerAccountBalancesBefore: Map<string, number>;
   ledgerAccountIdsToVerify: Set<string>;
   webhookEventIds: Set<string>;
@@ -36,12 +36,12 @@ const SHARED_ACCEPTANCE_USER_IDS = new Set([
 export function createPhase7MediaLifecycleCleanupScope(): Phase7MediaLifecycleCleanupScope {
   return {
     identities: [],
+    identityEmails: new Set(),
     postIds: new Set(),
     assetIds: new Set(),
     assetKinds: new Map(),
     orderIds: new Set(),
     objectKeys: new Set(),
-    ledgerAccountIdsToDelete: new Set(),
     ledgerAccountBalancesBefore: new Map(),
     ledgerAccountIdsToVerify: new Set(),
     webhookEventIds: new Set()
@@ -74,7 +74,16 @@ export function objectStorageTestConfigAvailable() {
 
 function assertSafeScope(scope: Phase7MediaLifecycleCleanupScope) {
   const identityIds = new Set(scope.identities.map(({ id }) => id));
+  const identityEmails = new Set([
+    ...scope.identityEmails,
+    ...scope.identities.map(({ email }) => email)
+  ]);
   if (identityIds.size !== scope.identities.length) throw new Error("Cleanup identities must be unique.");
+  for (const email of identityEmails) {
+    if (!email.endsWith("@e2e.purehub.local")) {
+      throw new Error("Cleanup is restricted to exact E2E emails.");
+    }
+  }
   for (const identity of scope.identities) {
     if (
       !identity.id
@@ -92,9 +101,34 @@ function assertSafeScope(scope: Phase7MediaLifecycleCleanupScope) {
       throw new Error("Cleanup object keys must belong to an exact isolated identity or asset.");
     }
   }
-  if ([...scope.ledgerAccountIdsToDelete].some((id) => scope.ledgerAccountBalancesBefore.has(id))) {
-    throw new Error("Cleanup cannot delete a ledger account recorded as pre-existing.");
+}
+
+async function rediscoverExactIdentities(scope: Phase7MediaLifecycleCleanupScope) {
+  assertSafeScope(scope);
+  const emails = [...new Set([
+    ...scope.identityEmails,
+    ...scope.identities.map(({ email }) => email)
+  ])];
+  if (!emails.length) return;
+  const users = await prisma.user.findMany({
+    where: { email: { in: emails } },
+    select: { id: true, email: true }
+  });
+  for (const user of users) {
+    if (SHARED_ACCEPTANCE_USER_IDS.has(user.id) || !user.email.endsWith("@e2e.purehub.local")) {
+      throw new Error("Rediscovered cleanup identity is not an isolated E2E user.");
+    }
+    const recordedById = scope.identities.find(({ id }) => id === user.id);
+    const recordedByEmail = scope.identities.find(({ email }) => email === user.email);
+    if (
+      (recordedById && recordedById.email !== user.email)
+      || (recordedByEmail && recordedByEmail.id !== user.id)
+    ) {
+      throw new Error("Rediscovered cleanup identity does not match the exact recorded identity.");
+    }
+    if (!recordedById) scope.identities.push(user);
   }
+  assertSafeScope(scope);
 }
 
 function isMissingObject(error: unknown) {
@@ -172,6 +206,7 @@ async function deleteObjectsThroughRaceWindow(objectKeys: string[]) {
 }
 
 export async function cleanupPhase7MediaLifecycle(scope: Phase7MediaLifecycleCleanupScope) {
+  await rediscoverExactIdentities(scope);
   assertSafeScope(scope);
   const identityIds = scope.identities.map(({ id }) => id);
   const identityEmails = scope.identities.map(({ email }) => email);
@@ -249,7 +284,6 @@ export async function cleanupPhase7MediaLifecycle(scope: Phase7MediaLifecycleCle
       }
       scope.ledgerAccountBalancesBefore.delete(account.id);
       scope.ledgerAccountIdsToVerify.delete(account.id);
-      scope.ledgerAccountIdsToDelete.add(account.id);
     }
 
     const ledgerTransactions = orderIds.length
@@ -258,20 +292,27 @@ export async function cleanupPhase7MediaLifecycle(scope: Phase7MediaLifecycleCle
         include: { entries: true }
       })
       : [];
+    const ledgerEntryAccountIds = [...new Set(
+      ledgerTransactions.flatMap(({ entries }) => entries.map(({ accountId }) => accountId))
+    )];
+    const ledgerEntryAccounts = ledgerEntryAccountIds.length
+      ? await tx.ledgerAccount.findMany({
+        where: { id: { in: ledgerEntryAccountIds } },
+        select: { id: true, ownerUserId: true }
+      })
+      : [];
+    const ledgerEntryAccountById = new Map(ledgerEntryAccounts.map((account) => [account.id, account]));
+    for (const accountId of ledgerEntryAccountIds) {
+      const account = ledgerEntryAccountById.get(accountId);
+      if (!account) throw new Error("Cleanup ledger entry account is missing.");
+      const isolatedOwner = Boolean(account.ownerUserId && identityIds.includes(account.ownerUserId));
+      if (!isolatedOwner && !scope.ledgerAccountBalancesBefore.has(account.id)) {
+        throw new Error("Cleanup refuses an unexpected shared or unowned ledger account absent from the snapshot.");
+      }
+      if (!isolatedOwner) scope.ledgerAccountIdsToVerify.add(account.id);
+    }
     for (const ledger of ledgerTransactions) {
       for (const entry of ledger.entries) {
-        if (scope.ledgerAccountBalancesBefore.has(entry.accountId)) {
-          scope.ledgerAccountIdsToVerify.add(entry.accountId);
-        } else {
-          const account = await tx.ledgerAccount.findUnique({
-            where: { id: entry.accountId },
-            select: { ownerUserId: true }
-          });
-          if (account?.ownerUserId && !identityIds.includes(account.ownerUserId)) {
-            throw new Error("Cleanup refuses to delete a ledger account owned by a shared user.");
-          }
-          scope.ledgerAccountIdsToDelete.add(entry.accountId);
-        }
         await tx.ledgerAccount.update({
           where: { id: entry.accountId },
           data: { balance: { decrement: entry.amount } }
@@ -305,10 +346,14 @@ export async function cleanupPhase7MediaLifecycle(scope: Phase7MediaLifecycleCle
     if (postIds.length) {
       await tx.post.deleteMany({ where: { id: { in: postIds } } });
     }
-    const requestedLedgerAccountIds = [...scope.ledgerAccountIdsToDelete];
-    if (requestedLedgerAccountIds.length) {
+    const ownedLedgerAccountIds = ownedLedgerAccounts.map(({ id }) => id);
+    if (ownedLedgerAccountIds.length) {
       await tx.ledgerAccount.deleteMany({
-        where: { id: { in: requestedLedgerAccountIds }, entries: { none: {} } }
+        where: {
+          id: { in: ownedLedgerAccountIds },
+          ownerUserId: { in: identityIds },
+          entries: { none: {} }
+        }
       });
     }
     if (identityIds.length) {
@@ -346,7 +391,6 @@ export async function assertPhase7MediaLifecycleAbsent(scope: Phase7MediaLifecyc
     prisma.notification.count({ where: { orderId: { in: orderIds } } }),
     prisma.walletBalance.count({ where: { userId: { in: identityIds } } }),
     prisma.ledgerTransaction.count({ where: { referenceType: "order", referenceId: { in: orderIds } } }),
-    prisma.ledgerAccount.count({ where: { id: { in: [...scope.ledgerAccountIdsToDelete] } } }),
     prisma.ledgerAccount.count({ where: { ownerUserId: { in: identityIds } } }),
     prisma.searchDocument.count({ where: { entityType: "post", entityId: { in: postIds } } }),
     prisma.channelJob.count({ where: { entityType: "post", entityId: { in: postIds } } }),

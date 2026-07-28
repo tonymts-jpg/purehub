@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
-import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import sharp from "sharp";
 import { prisma } from "@/lib/prisma";
+import { writeDerivativeWithConditionalCommit } from "@/lib/storage/media-finalization";
 import { acceptsUploadMediaType, normalizeByteRange, safeMediaContentType } from "@/lib/storage/media-policy";
 
 const configured = () => Boolean(process.env.OBJECT_STORAGE_ENDPOINT && process.env.OBJECT_STORAGE_ACCESS_KEY && process.env.OBJECT_STORAGE_SECRET_KEY);
@@ -136,7 +137,25 @@ export async function processPendingMedia() {
         const stillProcessing = await prisma.mediaAsset.count({ where: { id: asset.id, status: "processing" } });
         if (!stillProcessing) continue;
         derivativeKey = `derivatives/${asset.id}/watermarked.jpg`;
-        await client().send(new PutObjectCommand({ Bucket: bucket(), Key: derivativeKey, Body: output, ContentType: "image/jpeg" }));
+        const committed = await writeDerivativeWithConditionalCommit({
+          write: async () => {
+            await client().send(new PutObjectCommand({
+              Bucket: bucket(),
+              Key: derivativeKey,
+              Body: output,
+              ContentType: "image/jpeg"
+            }));
+          },
+          commit: async () => (await prisma.mediaAsset.updateMany({
+            where: { id: asset.id, status: "processing" },
+            data: { derivativeKey, status: "ready", processingError: null, src: `/api/media/${asset.id}/content` }
+          })).count === 1,
+          remove: async () => {
+            await client().send(new DeleteObjectCommand({ Bucket: bucket(), Key: derivativeKey }));
+          }
+        });
+        processed += committed ? 1 : 0;
+        continue;
       }
       const completed = await prisma.mediaAsset.updateMany({
         where: { id: asset.id, status: "processing" },

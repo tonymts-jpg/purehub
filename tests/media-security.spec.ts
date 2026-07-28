@@ -9,6 +9,7 @@ import {
   uploadSizeBytesSchema
 } from "../lib/storage/media-policy";
 import { prisma } from "../lib/prisma";
+import { writeDerivativeWithConditionalCommit } from "../lib/storage/media-finalization";
 import { authHeaders, hasDatabase, signInCreator } from "./auth-helpers";
 import {
   assertPhase7MediaLifecycleAbsent,
@@ -115,6 +116,29 @@ test("lifecycle cleanup derives an image derivative key before the worker record
   ]);
 });
 
+test("worker compensates a derivative PUT when conditional status ownership is lost", async () => {
+  const events: string[] = [];
+  let objectExists = false;
+  const committed = await writeDerivativeWithConditionalCommit({
+    write: async () => {
+      events.push("put");
+      objectExists = true;
+    },
+    commit: async () => {
+      events.push("conditional-commit-lost");
+      return false;
+    },
+    remove: async () => {
+      events.push("compensating-delete");
+      objectExists = false;
+    }
+  });
+
+  expect(committed).toBe(false);
+  expect(objectExists).toBe(false);
+  expect(events).toEqual(["put", "conditional-commit-lost", "compensating-delete"]);
+});
+
 test("upload API rejects SVG and MIME-kind mismatch before creating an asset", async ({ request }, testInfo: TestInfo) => {
   test.skip(testInfo.project.name === "mobile", "The shared storage mutation runs once.");
   test.skip(!(await hasDatabase(request)), "Upload boundary integration requires PostgreSQL.");
@@ -190,12 +214,15 @@ test("isolated media lifecycle cleanup removes exact finance, identity, and obje
     { id: creatorId, email: creatorEmail },
     { id: buyerId, email: buyerEmail }
   );
+  scope.identityEmails.add(creatorEmail);
+  scope.identityEmails.add(buyerEmail);
   scope.postIds.add(postId);
   scope.assetIds.add(assetId);
   scope.assetKinds.set(assetId, "image");
   scope.orderIds.add(orderId);
   scope.objectKeys.add(objectKey);
-  accountIds.slice(0, 2).forEach((id) => scope.ledgerAccountIdsToDelete.add(id));
+  scope.ledgerAccountBalancesBefore.set(accountIds[0], 0);
+  scope.ledgerAccountBalancesBefore.set(accountIds[1], 0);
   let delayedDerivativeWrite: Promise<void> | null = null;
 
   try {
@@ -321,8 +348,12 @@ test("isolated media lifecycle cleanup removes exact finance, identity, and obje
     await cleanupPhase7MediaLifecycle(scope);
     await delayedDerivativeWrite;
     expect(scope.objectKeys.has(derivativeKey)).toBe(true);
-    expect(scope.ledgerAccountIdsToDelete.has(accountIds[2])).toBe(true);
     expect(await prisma.ledgerAccount.count({ where: { id: accountIds[2] } })).toBe(0);
+    expect(await prisma.ledgerAccount.findMany({
+      where: { id: { in: accountIds.slice(0, 2) } },
+      select: { balance: true },
+      orderBy: { id: "asc" }
+    })).toEqual([{ balance: 0 }, { balance: 0 }]);
     await cleanupPhase7MediaLifecycle(scope);
     await assertPhase7MediaLifecycleAbsent(scope);
   } finally {
@@ -336,6 +367,98 @@ test("isolated media lifecycle cleanup removes exact finance, identity, and obje
         finalCleanupError = error;
       }
     }
+    await prisma.ledgerAccount.deleteMany({
+      where: {
+        id: { in: accountIds.slice(0, 2) },
+        ownerUserId: null,
+        entries: { none: {} }
+      }
+    }).catch((error) => {
+      finalCleanupError ??= error;
+    });
     if (finalCleanupError) throw finalCleanupError;
+  }
+});
+
+test("lifecycle cleanup rejects an unsnapshotted shared-user ledger account without deleting it", async ({ request }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name === "mobile", "The shared-account provenance integration runs once.");
+  test.skip(!(await hasDatabase(request)), "Ledger provenance integration requires PostgreSQL.");
+  test.skip(!(await prisma.user.findUnique({ where: { id: "c1" }, select: { id: true } })), "Seeded shared creator c1 is required.");
+
+  const nonce = `${Date.now().toString(36)}${Math.floor(Math.random() * 1_000_000).toString(36)}`;
+  const creatorId = `provenance-creator-${nonce}`;
+  const buyerId = `provenance-buyer-${nonce}`;
+  const creatorEmail = `${creatorId}@e2e.purehub.local`;
+  const buyerEmail = `${buyerId}@e2e.purehub.local`;
+  const orderId = `provenance-order-${nonce}`;
+  const accountId = `provenance-shared-account-${nonce}`;
+  const ledgerId = `provenance-ledger-${nonce}`;
+  const scope = createPhase7MediaLifecycleCleanupScope();
+  scope.identityEmails.add(creatorEmail);
+  scope.identityEmails.add(buyerEmail);
+  scope.identities.push(
+    { id: creatorId, email: creatorEmail },
+    { id: buyerId, email: buyerEmail }
+  );
+  scope.orderIds.add(orderId);
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      await tx.user.createMany({
+        data: [
+          { id: creatorId, name: "Provenance Creator", handle: `pc-${nonce}`.slice(0, 30), avatar: "avatar-1", email: creatorEmail },
+          { id: buyerId, name: "Provenance Buyer", handle: `pb-${nonce}`.slice(0, 30), avatar: "avatar-1", email: buyerEmail }
+        ]
+      });
+      await tx.order.create({
+        data: {
+          id: orderId,
+          buyerUserId: buyerId,
+          creatorUserId: creatorId,
+          kind: "post_unlock",
+          itemId: `missing-post-${nonce}`,
+          amount: 10,
+          status: "fulfilled",
+          provider: "card",
+          platformFeeAmount: 0,
+          creatorNetAmount: 10
+        }
+      });
+      await tx.ledgerAccount.create({
+        data: {
+          id: accountId,
+          key: `provenance:shared:${nonce}`,
+          ownerUserId: "c1",
+          type: "creator_pending",
+          balance: 10
+        }
+      });
+      await tx.ledgerTransaction.create({
+        data: {
+          id: ledgerId,
+          idempotencyKey: `payment:${orderId}`,
+          type: "payment_capture",
+          referenceType: "order",
+          referenceId: orderId,
+          entries: { create: { accountId, amount: 10 } }
+        }
+      });
+    });
+
+    await expect(cleanupPhase7MediaLifecycle(scope)).rejects.toThrow(
+      "Cleanup refuses an unexpected shared or unowned ledger account absent from the snapshot."
+    );
+    expect(await prisma.ledgerAccount.findUnique({
+      where: { id: accountId },
+      select: { ownerUserId: true, balance: true }
+    })).toEqual({ ownerUserId: "c1", balance: 10 });
+    expect(await prisma.order.count({ where: { id: orderId } })).toBe(1);
+  } finally {
+    await prisma.ledgerTransaction.deleteMany({ where: { id: ledgerId } }).catch(() => undefined);
+    await prisma.ledgerAccount.deleteMany({ where: { id: accountId, ownerUserId: "c1" } }).catch(() => undefined);
+    await prisma.order.deleteMany({ where: { id: orderId } }).catch(() => undefined);
+    await prisma.user.deleteMany({
+      where: { id: { in: [creatorId, buyerId] }, email: { in: [creatorEmail, buyerEmail] } }
+    }).catch(() => undefined);
   }
 });
