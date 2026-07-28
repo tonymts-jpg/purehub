@@ -10,6 +10,15 @@ test("frontend navigation hides demo, admin, and creator tools for visitors", as
   await expect(page.getByRole("link", { name: "发布作品" })).toHaveCount(0);
 });
 
+test("frontend navigation keeps a direct demo route safe for visitors", async ({ page }) => {
+  await page.goto("/demo");
+  await expect(page).toHaveURL("/");
+  await expect(page.getByText("Demo 模式")).toHaveCount(0);
+  await expect(page.getByText("PureHub 产品演示")).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "博主工作台" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "发布作品" })).toHaveCount(0);
+});
+
 test("frontend navigation derives fan and approved creator states from the session", async ({ page }, testInfo: TestInfo) => {
   test.skip(testInfo.project.name === "mobile", "Desktop navigation acceptance covers the desktop-only creator controls.");
   test.skip(!(await hasDatabase(page.request)), "Authenticated navigation requires the seeded PostgreSQL database.");
