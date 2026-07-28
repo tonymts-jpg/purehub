@@ -19,6 +19,7 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
   const post=getAllPosts(store.customPosts).find(item=>item.id===id);
   const [comment,setComment]=useState("");
   const [unlockOpen,setUnlockOpen]=useState(false);
+  const [activeMediaIndex,setActiveMediaIndex]=useState<number|null>(null);
   const [serverAccess,setServerAccess]=useState(false);
   const [comments,setComments]=useState<ApiComment[]>([]);
   const {data:session}=authClient.useSession();
@@ -63,8 +64,10 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
 
   return <div className="mx-auto max-w-5xl px-4 py-8 sm:px-8">
     {post.media.length?<div className="relative aspect-[16/9] overflow-hidden rounded-[36px] bg-black">
-      <Image src={post.media[0].src} alt={post.media[0].alt} fill priority sizes="(max-width: 1024px) 100vw, 960px" className="object-cover"/>
-      <div className="absolute inset-0 bg-gradient-to-t from-black/55 via-transparent to-black/10"/>
+      <button type="button" data-testid="post-hero-media" aria-label="预览媒体" onClick={()=>setActiveMediaIndex(0)} className="absolute inset-0 block h-full w-full">
+        {post.media[0].kind==="video"?<video src={post.media[0].src} aria-label={post.media[0].alt} preload="metadata" className="h-full w-full object-cover"/>:<Image src={post.media[0].src} alt={post.media[0].alt} fill priority sizes="(max-width: 1024px) 100vw, 960px" className="object-cover"/>}
+        <span className="absolute inset-0 bg-gradient-to-t from-black/55 via-transparent to-black/10"/>
+      </button>
       <div className="absolute bottom-5 left-5 rounded-full bg-black/45 px-4 py-2 text-xs font-bold text-white backdrop-blur">12 张原创虚拟人物作品</div>
     </div>:<div className={`mesh relative aspect-[16/9] overflow-hidden rounded-[36px] ${post.cover}`}><div className="absolute inset-0 bg-[radial-gradient(circle_at_65%_35%,rgba(255,255,255,.4),transparent_18%),linear-gradient(135deg,transparent,rgba(0,0,0,.28))]"/></div>}
 
@@ -89,7 +92,7 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
 
         {post.media.length&&<section className="mb-8">
           <div className="mb-4 flex items-end justify-between gap-4"><div><h2 className="text-xl font-black">作品图集</h2><p className="mt-1 text-xs muted">{unlocked?"完整 12 张图片已解锁":"前 2 张免费预览，解锁后查看完整图集"}</p></div>{!unlocked&&<span className="flex items-center gap-1 rounded-full bg-coral/10 px-3 py-1.5 text-xs font-bold text-coral"><LockKeyhole size={13}/>尚未解锁</span>}</div>
-          <MediaGallery media={post.media} unlocked={unlocked} onLockedClick={handleLocked}/>
+          <MediaGallery media={post.media} unlocked={unlocked} onLockedClick={handleLocked} activeIndex={activeMediaIndex} onActiveIndexChange={setActiveMediaIndex}/>
         </section>}
 
         {unlocked?<div className="space-y-5 text-base leading-8"><p>{post.content}</p><p>这组作品包含人物主视觉、环境构图、造型细节和幕后记录。所有画面均为 PureHub Demo 使用的原创成年虚拟人物素材。</p></div>:

@@ -13,7 +13,8 @@ const createPostMedia = (postId:string, title:string) =>
     alt:`${title} — ${description}`,
     width:720,
     height:900,
-    order:index+1
+    order:index+1,
+    kind:"image" as const
   }));
 
 export const creators: CreatorProfile[] = [

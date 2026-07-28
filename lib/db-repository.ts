@@ -23,6 +23,7 @@ function mapMedia(asset: {
   width: number;
   height: number;
   order: number;
+  kind: string;
 }): MediaAsset {
   return {
     id: asset.id,
@@ -30,7 +31,8 @@ function mapMedia(asset: {
     alt: asset.alt,
     width: asset.width,
     height: asset.height,
-    order: asset.order
+    order: asset.order,
+    kind: asset.kind === "video" ? "video" : "image"
   };
 }
 

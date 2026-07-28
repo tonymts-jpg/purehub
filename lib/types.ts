@@ -29,6 +29,7 @@ export interface CreatorProfile extends User {
 export interface Comment { id: string; user: string; text: string; time: string; }
 export interface MediaAsset {
   id: string; src: string; alt: string; width: number; height: number; order: number;
+  kind: "image" | "video";
 }
 export interface Post {
   id: string; creatorId: string; title: string; excerpt: string; content: string;

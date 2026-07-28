@@ -1,4 +1,4 @@
-import { expect, test, type TestInfo } from "@playwright/test";
+import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { hasDatabase, signInAdmin, signInCreator, signInFan } from "./auth-helpers";
 
 test("frontend navigation hides demo, admin, and creator tools for visitors", async ({ page }) => {
@@ -93,4 +93,113 @@ test("homepage purchase unlock dialog moves focus inside and traps Tab navigatio
 
   await page.keyboard.press("Shift+Tab");
   await expect(signIn).toBeFocused();
+});
+
+async function openPostHeroViewer(page: Page) {
+  const viewer = page.getByRole("dialog", { name: "媒体预览" });
+  await expect(async () => {
+    await page.getByTestId("post-hero-media").click();
+    await expect(viewer).toBeVisible({ timeout: 1_500 });
+  }).toPass({ timeout: 15_000 });
+  return viewer;
+}
+
+test("post hero and gallery open the shared top-level image viewer", async ({ page }) => {
+  await page.goto("/post/post-1");
+
+  const viewer = await openPostHeroViewer(page);
+  await expect(viewer.getByRole("button", { name: "全屏预览" })).toBeVisible();
+
+  await viewer.getByRole("button", { name: "关闭媒体预览" }).click();
+  await page.getByRole("button", { name: "查看图片 2" }).click();
+  await expect(page.getByText("2 / 12", { exact: true })).toBeVisible();
+});
+
+test("homepage post cards open the shared top-level image viewer", async ({ page }) => {
+  await page.goto("/");
+  const viewer = page.getByRole("dialog", { name: "媒体预览" });
+  await expect(async () => {
+    await page.locator('[data-post-id="post-1"]').getByRole("button", { name: "查看图片 1" }).click();
+    await expect(viewer).toBeVisible({ timeout: 1_500 });
+  }).toPass({ timeout: 15_000 });
+  await expect(viewer.getByRole("button", { name: "全屏预览" })).toBeVisible();
+});
+
+async function seedVideoFixture(page: Page) {
+  await page.addInitScript(() => {
+    localStorage.setItem("purehub-demo-state", JSON.stringify({
+      state: {
+        role: "fan",
+        theme: "light",
+        liked: [],
+        bookmarked: [],
+        followed: [],
+        subscriptions: [],
+        unlocked: [],
+        customPosts: [{
+          id: "video-fixture",
+          creatorId: "c1",
+          title: "Video preview fixture",
+          excerpt: "A synthetic video media asset for viewer coverage.",
+          content: "Video fixture content.",
+          cover: "cover-1",
+          category: "Cosplay",
+          tags: ["Cosplay"],
+          visibility: "free",
+          likes: 0,
+          comments: [],
+          createdAt: "刚刚",
+          media: [{
+            id: "video-fixture-media-1",
+            src: "/generated/posts/post-1/01.webp",
+            alt: "Synthetic video preview",
+            width: 720,
+            height: 900,
+            order: 1,
+            kind: "video"
+          }]
+        }],
+        transactions: [],
+        balance: 0
+      },
+      version: 2
+    }));
+  });
+}
+
+test("video viewer renders controlled media without autoplay", async ({ page }) => {
+  await seedVideoFixture(page);
+  await page.goto("/post/video-fixture");
+  await openPostHeroViewer(page);
+
+  const video = page.getByRole("dialog", { name: "媒体预览" }).getByLabel("Synthetic video preview");
+  await expect(video).toBeVisible();
+  await expect(video).toHaveJSProperty("autoplay", false);
+  await expect(video).toHaveJSProperty("controls", true);
+  await expect(video).toHaveJSProperty("muted", false);
+});
+
+test("fullscreen preview invokes the API", async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name === "mobile", "Fullscreen API behavior is verified in the desktop browser; mobile emulation does not expose a stable API surface.");
+  await page.addInitScript(() => {
+    HTMLElement.prototype.requestFullscreen = function requestFullscreen() {
+      Reflect.set(window, "__purehubFullscreenRequests", Number(Reflect.get(window, "__purehubFullscreenRequests") ?? 0) + 1);
+      return Promise.resolve();
+    };
+  });
+  await page.goto("/post/post-1");
+  await openPostHeroViewer(page);
+  await page.getByRole("button", { name: "全屏预览" }).click();
+  await expect.poll(() => page.evaluate(() => Number(Reflect.get(window, "__purehubFullscreenRequests") ?? 0))).toBe(1);
+});
+
+test("fullscreen preview stays open when the API is unavailable", async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name === "mobile", "Fullscreen API behavior is verified in the desktop browser; mobile emulation does not expose a stable API surface.");
+  await page.goto("/post/post-1");
+  await openPostHeroViewer(page);
+  await page.evaluate(() => {
+    Object.defineProperty(HTMLElement.prototype, "requestFullscreen", { configurable: true, value: undefined });
+  });
+  await page.getByRole("button", { name: "全屏预览" }).click();
+  await expect(page.getByRole("dialog", { name: "媒体预览" })).toBeVisible();
 });
