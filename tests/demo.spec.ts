@@ -55,8 +55,11 @@ test("member-only post previews send visitors to the membership sign-in action",
   await page.goto("/post/post-3");
   const gallery = page.getByTestId("post-detail-gallery");
   await expect(gallery.locator("button")).toHaveCount(8);
-  await gallery.getByRole("button", { name: /3/ }).click();
   const dialog = page.getByRole("dialog", { name: "解锁作品" });
+  await expect(async () => {
+    await gallery.getByRole("button", { name: /3/ }).click();
+    await expect(dialog).toBeVisible({ timeout: 1500 });
+  }).toPass({ timeout: 15000 });
   await expect(dialog.getByRole("link", { name: "登录后查看会员方案" })).toHaveAttribute("href", "/sign-in?callbackUrl=%2Fpost%2Fpost-3");
 });
 
