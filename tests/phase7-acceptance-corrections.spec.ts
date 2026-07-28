@@ -125,6 +125,38 @@ test("homepage post cards open the shared top-level image viewer", async ({ page
   await expect(viewer.getByRole("button", { name: "全屏预览" })).toBeVisible();
 });
 
+test("search thumbnail preview opens the shared viewer without navigating", async ({ page }) => {
+  test.skip(!(await hasDatabase(page.request)), "Search preview requires the seeded PostgreSQL database.");
+  await page.goto("/search?q=Cosplay&type=post");
+
+  const result = page.getByTestId("search-result").filter({
+    has: page.getByTestId("search-result-preview")
+  }).first();
+  const preview = result.getByTestId("search-result-preview");
+  const title = result.getByRole("link");
+  await expect(preview).toBeVisible();
+  expect(await result.evaluate((node) => {
+    const previewButton = node.querySelector('[data-testid="search-result-preview"]');
+    const contentLink = node.querySelector("a");
+    return Boolean(
+      previewButton
+      && contentLink
+      && (previewButton.compareDocumentPosition(contentLink) & Node.DOCUMENT_POSITION_FOLLOWING)
+    );
+  })).toBeTruthy();
+
+  const urlBeforePreview = page.url();
+  await preview.click();
+  await expect(page.getByRole("dialog", { name: "\u5a92\u4f53\u9884\u89c8" })).toBeVisible();
+  await expect(page).toHaveURL(urlBeforePreview);
+
+  const href = await title.getAttribute("href");
+  expect(href).toMatch(/^\/post\//);
+  await page.getByRole("dialog", { name: "\u5a92\u4f53\u9884\u89c8" }).getByRole("button", { name: "\u5173\u95ed\u5a92\u4f53\u9884\u89c8" }).click();
+  await title.click();
+  await expect(page).toHaveURL(new RegExp(`${href}$`));
+});
+
 test("post detail uses the authoritative repository media payload", async ({ page }) => {
   await page.route("**/api/posts/post-1", async (route) => {
     await route.fulfill({ json: {

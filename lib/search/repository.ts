@@ -601,13 +601,27 @@ export async function searchEntities(
   `);
 
   const pageRows = rows.slice(0, normalized.limit);
+  const postIds = pageRows
+    .filter(({ entityType }) => entityType === "post")
+    .map(({ entityId }) => entityId);
   const channelIds = pageRows
     .filter(({ entityType }) => entityType === "channel")
     .map(({ entityId }) => entityId);
   const creatorIds = pageRows
     .filter(({ entityType }) => entityType === "creator")
     .map(({ entityId }) => entityId);
-  const [channels, creators] = await Promise.all([
+  const [media, channels, creators] = await Promise.all([
+    postIds.length
+      ? prisma.mediaAsset.findMany({
+          where: {
+            postId: { in: postIds },
+            status: "ready",
+            visibility: "public"
+          },
+          select: { postId: true, src: true, alt: true, kind: true, order: true, id: true },
+          orderBy: [{ postId: "asc" }, { order: "asc" }, { id: "asc" }]
+        })
+      : [],
     channelIds.length
       ? prisma.channel.findMany({
           where: { id: { in: channelIds } },
@@ -621,6 +635,15 @@ export async function searchEntities(
         })
       : []
   ]);
+  const previewsByPostId = new Map<string, SearchResult["preview"]>();
+  for (const asset of media) {
+    if (!asset.postId || previewsByPostId.has(asset.postId)) continue;
+    previewsByPostId.set(asset.postId, {
+      src: asset.src,
+      alt: asset.alt,
+      kind: asset.kind === "video" ? "video" : "image"
+    });
+  }
   const channelSlugs = new Map(channels.map(({ id, slug }) => [id, slug]));
   const creatorHandles = new Map(creators.map(({ id, handle }) => [id, handle]));
   const results: SearchResult[] = pageRows.map((row) => ({
@@ -634,7 +657,8 @@ export async function searchEntities(
       ? `/post/${row.entityId}`
       : row.entityType === "creator"
         ? `/creator/${creatorHandles.get(row.entityId) ?? row.entityId}`
-        : `/channels/${channelSlugs.get(row.entityId) ?? row.entityId}`
+        : `/channels/${channelSlugs.get(row.entityId) ?? row.entityId}`,
+    preview: row.entityType === "post" ? previewsByPostId.get(row.entityId) ?? null : null
   }));
   const last = pageRows.at(-1);
   const nextCursor = rows.length > normalized.limit && last

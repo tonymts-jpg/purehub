@@ -147,6 +147,12 @@ export type SearchInput = {
   limit?: number;
 };
 
+export type SearchMediaPreview = {
+  src: string;
+  alt: string;
+  kind: "image" | "video";
+};
+
 export type SearchResult = {
   entityType: "post" | "creator" | "channel";
   entityId: string;
@@ -155,6 +161,7 @@ export type SearchResult = {
   rank: number;
   publishedAt: string;
   href: string;
+  preview: SearchMediaPreview | null;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {

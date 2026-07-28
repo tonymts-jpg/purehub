@@ -1,10 +1,12 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { FileText, Plus, Radio, Search, UserRound } from "lucide-react";
 import { KeyboardEvent, useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type { SearchResult } from "@/lib/channels/types";
+import { MediaViewer } from "@/components/media-viewer";
 
 type ResultType = "post" | "creator" | "channel";
 export type SearchPage = { results: SearchResult[]; nextCursor: string | null };
@@ -37,6 +39,7 @@ export function SearchResults({
   const [data, setData] = useState(initialPage);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState(initialError);
+  const [activePreview, setActivePreview] = useState<SearchResult["preview"]>(null);
   const [isPending, startTransition] = useTransition();
   const requestGeneration = useRef(0);
   const activeRequest = useRef<AbortController | null>(null);
@@ -167,25 +170,40 @@ export function SearchResults({
             {data.results.map((result) => {
               const Icon = icons[result.entityType];
               return (
-                <Link
+                <article
                   key={`${result.entityType}:${result.entityId}`}
-                  href={result.href}
                   data-testid="search-result"
                   data-result-id={result.entityId}
                   data-result-type={result.entityType}
                   className="glass flex min-w-0 items-start gap-4 rounded-lg p-4 transition hover:-translate-y-0.5 sm:p-5"
                 >
+                  {result.preview ? (
+                    <button
+                      type="button"
+                      data-testid="search-result-preview"
+                      aria-label={`\u9884\u89c8 ${result.title}`}
+                      onClick={() => setActivePreview(result.preview)}
+                      className="relative h-24 w-[4.8rem] shrink-0 overflow-hidden rounded-lg bg-black/5"
+                    >
+                      {result.preview.kind === "video" ? (
+                        <video src={result.preview.src} aria-label={result.preview.alt} preload="metadata" className="h-full w-full object-cover" />
+                      ) : (
+                        <Image src={result.preview.src} alt={result.preview.alt} fill sizes="77px" className="object-cover" />
+                      )}
+                    </button>
+                  ) : (
                   <span
                     title={result.entityType === "post" ? "作品" : result.entityType === "creator" ? "创作者" : "频道"}
                     className="grid h-11 w-11 shrink-0 place-items-center rounded-lg bg-violet/10 text-violet"
                   >
                     <Icon size={19} />
                   </span>
-                  <span className="min-w-0 flex-1">
+                  )}
+                  <Link href={result.href} className="min-w-0 flex-1">
                     <span className="block truncate text-base font-black sm:text-lg">{result.title}</span>
                     <span className="mt-1 line-clamp-2 block break-words text-sm leading-6 muted">{result.summary}</span>
-                  </span>
-                </Link>
+                  </Link>
+                </article>
               );
             })}
           </div>
@@ -205,6 +223,21 @@ export function SearchResults({
           {loadingMore ? "加载中…" : "加载更多"}
         </button>
       )}
+      <MediaViewer
+        media={activePreview ? [{
+          id: "search-result-preview",
+          src: activePreview.src,
+          alt: activePreview.alt,
+          width: 720,
+          height: 900,
+          order: 0,
+          kind: activePreview.kind
+        }] : []}
+        activeIndex={activePreview ? 0 : null}
+        onActiveIndexChange={(index) => {
+          if (index === null) setActivePreview(null);
+        }}
+      />
     </section>
   );
 }

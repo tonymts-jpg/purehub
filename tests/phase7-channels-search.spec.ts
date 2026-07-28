@@ -3135,6 +3135,183 @@ test("phase 7 search producers, leases, retries, and interleavings converge dura
   }
 });
 
+test("phase 7 search preview projects only ready public media for free posts", async ({}, testInfo) => {
+  test.setTimeout(120_000);
+  const anonymous = await playwrightRequest.newContext({ baseURL: testInfo.project.use.baseURL });
+  const nonce = `${Date.now().toString(36)}${Math.floor(Math.random() * 1_000_000).toString(36)}`;
+  const query = `phase7preview${nonce}`;
+  const freePostId = `phase7-search-preview-free-${nonce}`;
+  const noPreviewPostId = `phase7-search-preview-none-${nonce}`;
+  const privatePostId = `phase7-search-preview-private-${nonce}`;
+  const publicAsset = {
+    id: `phase7-search-preview-public-${nonce}`,
+    src: `/generated/phase7/${nonce}-public.webp`,
+    alt: "Public search preview asset",
+    kind: "image" as const
+  };
+  const secretAsset = {
+    id: `phase7-search-preview-secret-${nonce}`,
+    src: `/generated/phase7/${nonce}-purchase-secret.webp`,
+    alt: "Purchase-only secret asset"
+  };
+
+  try {
+    await requirePhase7(anonymous, testInfo);
+    const createdAt = new Date();
+    await prisma.$transaction([
+      prisma.post.createMany({
+        data: [
+          {
+            id: freePostId,
+            creatorId: "c1",
+            title: `${query} free media`,
+            excerpt: "A free post with a public search preview.",
+            content: "Free preview fixture.",
+            cover: "cover-1",
+            category: "Cosplay",
+            tags: ["Cosplay"],
+            visibility: "free",
+            comments: [],
+            createdLabel: "just now",
+            createdAt
+          },
+          {
+            id: noPreviewPostId,
+            creatorId: "c1",
+            title: `${query} no media`,
+            excerpt: "A free post whose asset is not ready for public search.",
+            content: "No preview fixture.",
+            cover: "cover-1",
+            category: "Cosplay",
+            tags: ["Cosplay"],
+            visibility: "free",
+            comments: [],
+            createdLabel: "just now",
+            createdAt
+          },
+          {
+            id: privatePostId,
+            creatorId: "c1",
+            title: `${query} purchase media`,
+            excerpt: "A purchase post that must never enter global search.",
+            content: "Private preview fixture.",
+            cover: "cover-1",
+            category: "Cosplay",
+            tags: ["Cosplay"],
+            visibility: "purchase",
+            price: 28,
+            comments: [],
+            createdLabel: "just now",
+            createdAt
+          }
+        ]
+      }),
+      prisma.mediaAsset.createMany({
+        data: [
+          {
+            ...publicAsset,
+            postId: freePostId,
+            width: 720,
+            height: 900,
+            order: 0,
+            status: "ready",
+            visibility: "public"
+          },
+          {
+            id: `phase7-search-preview-unready-${nonce}`,
+            postId: noPreviewPostId,
+            src: `/generated/phase7/${nonce}-unready.webp`,
+            alt: "Unready media must not preview",
+            width: 720,
+            height: 900,
+            order: 0,
+            kind: "image",
+            status: "processing",
+            visibility: "public"
+          },
+          {
+            ...secretAsset,
+            postId: privatePostId,
+            width: 720,
+            height: 900,
+            order: 0,
+            kind: "image",
+            status: "ready",
+            visibility: "public"
+          }
+        ]
+      }),
+      prisma.searchDocument.createMany({
+        data: [
+          {
+            entityType: "post",
+            entityId: freePostId,
+            title: `${query} free media`,
+            body: "Public preview fixture.",
+            keywords: query,
+            publishedAt: createdAt
+          },
+          {
+            entityType: "post",
+            entityId: noPreviewPostId,
+            title: `${query} no media`,
+            body: "Unready preview fixture.",
+            keywords: query,
+            publishedAt: createdAt
+          },
+          {
+            entityType: "post",
+            entityId: privatePostId,
+            title: `${query} purchase media`,
+            body: "Purchase preview fixture.",
+            keywords: query,
+            publishedAt: createdAt
+          }
+        ]
+      })
+    ]);
+
+    const response = await anonymous.get(`/api/search?q=${query}&type=post`);
+    expect(response.ok(), await response.text()).toBeTruthy();
+    const { results } = await response.json() as {
+      results: Array<{ entityId: string; preview?: unknown }>;
+    };
+    const freeResult = results.find(({ entityId }) => entityId === freePostId);
+    const noPreviewResult = results.find(({ entityId }) => entityId === noPreviewPostId);
+    expect(freeResult).toMatchObject({ entityId: freePostId });
+    expect(noPreviewResult).toMatchObject({ entityId: noPreviewPostId });
+    expect(freeResult?.preview).toEqual({
+      src: publicAsset.src,
+      alt: publicAsset.alt,
+      kind: "image"
+    });
+    expect(noPreviewResult?.preview).toBeNull();
+    expect(JSON.stringify(results)).not.toContain(secretAsset.src);
+
+    const creatorResponse = await anonymous.get("/api/search?q=yuki&type=creator");
+    expect(creatorResponse.ok(), await creatorResponse.text()).toBeTruthy();
+    const creatorResult = (await creatorResponse.json()).results.find(
+      ({ entityId }: { entityId: string }) => entityId === "c1"
+    );
+    expect(creatorResult).toMatchObject({ entityId: "c1", preview: null });
+
+    const channelResponse = await anonymous.get("/api/search?q=Yuki%20Studio&type=channel");
+    expect(channelResponse.ok(), await channelResponse.text()).toBeTruthy();
+    const channelResult = (await channelResponse.json()).results.find(
+      ({ entityId }: { entityId: string }) => entityId === "channel-yuki-studio"
+    );
+    expect(channelResult).toMatchObject({ entityId: "channel-yuki-studio", preview: null });
+  } finally {
+    await prisma.searchDocument.deleteMany({
+      where: { entityId: { in: [freePostId, noPreviewPostId, privatePostId] } }
+    }).catch(() => undefined);
+    await prisma.post.deleteMany({
+      where: { id: { in: [freePostId, noPreviewPostId, privatePostId] } }
+    }).catch(() => undefined);
+    await anonymous.dispose();
+  }
+});
+
 test("phase 7 channel UI and search UI expose responsive public routes", async ({ page }) => {
   await page.goto("/channels");
   await expect(page.getByRole("heading", { name: "探索频道" })).toBeVisible();
