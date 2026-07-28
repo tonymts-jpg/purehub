@@ -10,16 +10,31 @@ import { Avatar } from "./app-shell";
 import { MediaGallery } from "./media-gallery";
 import { UnlockDialog } from "./unlock-dialog";
 import { authClient } from "@/lib/auth-client";
+import { usePostPurchase } from "./use-post-purchase";
 
 export function PostCard({post}:{post:Post}) {
   const creator=creators.find(c=>c.id===post.creatorId)!;
   const [unlockOpen,setUnlockOpen]=useState(false);
-  const {liked,bookmarked,subscriptions,unlocked,unlock}=useDemoStore();
+  const {liked,bookmarked,subscriptions,unlocked}=useDemoStore();
   const {data:session}=authClient.useSession();
   const [isLiked,setIsLiked]=useState(post.liked??liked.includes(post.id));
   const [saved,setSaved]=useState(post.bookmarked??bookmarked.includes(post.id));
   const [likeCount,setLikeCount]=useState(post.likes);
-  const hasAccess=post.hasAccess??(post.visibility==="free"||subscriptions.some(item=>item.creatorId===creator.id)||unlocked.includes(post.id));
+  const callbackUrl=typeof window === "undefined" ? "/" : `${window.location.pathname}${window.location.search}`;
+  const purchase=usePostPurchase({
+    postId:post.id,
+    price:post.price||0,
+    authenticated:Boolean(session?.user),
+    callbackUrl,
+    source:"homepage_modal",
+    onPurchased:()=>setUnlockOpen(false)
+  });
+  const demoMode=process.env.NEXT_PUBLIC_DEMO_MODE==="true";
+  const hasAccess=purchase.accessOverride??post.hasAccess??(
+    post.visibility==="free"
+    || (demoMode&&subscriptions.some(item=>item.creatorId===creator.id))
+    || (demoMode&&unlocked.includes(post.id))
+  );
   const signIn=()=>{window.location.href=`/sign-in?callbackUrl=${encodeURIComponent(window.location.pathname)}`};
   const updateLike=async()=>{
     if(!session?.user)return signIn();
@@ -34,7 +49,6 @@ export function PostCard({post}:{post:Post}) {
     if(!response.ok)setSaved(!next);
   };
   const handleLocked=()=>setUnlockOpen(true);
-  const callbackUrl=typeof window === "undefined" ? "/" : `${window.location.pathname}${window.location.search}`;
   return <article data-testid="post-card" data-post-id={post.id} className="glass overflow-hidden rounded-[28px] shadow-soft transition duration-300 hover:-translate-y-1">
     {post.media.length?<div className="relative bg-black/[.04] dark:bg-white/[.03]">
       <MediaGallery media={post.media} unlocked={hasAccess} compact onLockedClick={handleLocked}/>
@@ -61,6 +75,6 @@ export function PostCard({post}:{post:Post}) {
         <button onClick={updateBookmark} aria-label="收藏" className={saved?"text-violet":"muted hover:text-violet"}><Bookmark size={19} fill={saved?"currentColor":"none"}/></button>
       </div>
     </div>
-    <UnlockDialog open={unlockOpen} title={post.title} visibility={post.visibility === "members" ? "members" : "purchase"} price={post.price} creatorName={creator.name} authenticated={Boolean(session?.user)} callbackUrl={callbackUrl} onClose={()=>setUnlockOpen(false)} onConfirmPurchase={()=>{unlock(post.id,post.price||0);setUnlockOpen(false)}} membershipHref={`/membership/${creator.handle}`}/>
+    <UnlockDialog open={unlockOpen} title={post.title} visibility={post.visibility === "members" ? "members" : "purchase"} price={post.price} creatorName={creator.name} authenticated={Boolean(session?.user)} callbackUrl={callbackUrl} onClose={()=>setUnlockOpen(false)} onConfirmPurchase={async()=>{if(await purchase.confirmPurchase())setUnlockOpen(false)}} purchaseProcessing={purchase.processing} purchaseError={purchase.error} membershipHref={`/membership/${creator.handle}`}/>
   </article>
 }

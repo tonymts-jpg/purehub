@@ -616,9 +616,10 @@ export async function searchEntities(
           where: {
             postId: { in: postIds },
             status: "ready",
-            visibility: "public"
+            visibility: { in: ["public", "free"] },
+            post: { is: { visibility: "free" } }
           },
-          select: { postId: true, src: true, alt: true, kind: true, order: true, id: true },
+          select: { postId: true, alt: true, kind: true, order: true, id: true },
           orderBy: [{ postId: "asc" }, { order: "asc" }, { id: "asc" }]
         })
       : [],
@@ -639,7 +640,7 @@ export async function searchEntities(
   for (const asset of media) {
     if (!asset.postId || previewsByPostId.has(asset.postId)) continue;
     previewsByPostId.set(asset.postId, {
-      src: asset.src,
+      src: `/api/media/${asset.id}/content`,
       alt: asset.alt,
       kind: asset.kind === "video" ? "video" : "image"
     });

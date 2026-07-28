@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { Readable } from "node:stream";
 import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import sharp from "sharp";
@@ -74,7 +75,7 @@ export async function completeUpload(input: { assetId: string; userId: string; c
       height: input.height ?? asset.height,
       durationSeconds: input.durationSeconds,
       status: configured() && !simulated ? "processing" : "ready",
-      src: configured() && !simulated ? asset.src : `/api/media/${asset.id}/access`
+      src: configured() && !simulated ? asset.src : `/api/media/${asset.id}/content`
     }
   });
 }
@@ -102,7 +103,7 @@ export async function processPendingMedia() {
         derivativeKey = `derivatives/${asset.id}/watermarked.jpg`;
         await client().send(new PutObjectCommand({ Bucket: bucket(), Key: derivativeKey, Body: output, ContentType: "image/jpeg" }));
       }
-      await prisma.mediaAsset.update({ where: { id: asset.id }, data: { derivativeKey, status: "ready", processingError: null, src: `/api/media/${asset.id}/access` } });
+      await prisma.mediaAsset.update({ where: { id: asset.id }, data: { derivativeKey, status: "ready", processingError: null, src: `/api/media/${asset.id}/content` } });
       processed += 1;
     } catch (error) {
       await prisma.mediaAsset.update({ where: { id: asset.id }, data: { status: "failed", processingError: error instanceof Error ? error.message : "Media processing failed." } });
@@ -111,12 +112,11 @@ export async function processPendingMedia() {
   return { processed, skipped: false };
 }
 
-export async function mediaAccess(assetId: string, userId?: string) {
+async function authorizeReadyMedia(assetId: string, userId?: string) {
   const asset = await prisma.mediaAsset.findUnique({ where: { id: assetId }, include: { post: true } });
   if (!asset || asset.status !== "ready") throw new Error("Media is not ready.");
-  if (!asset.storageKey) return { assetId: asset.id, url: asset.src, expiresIn: null };
 
-  const isPublic = asset.visibility === "public" || asset.post?.visibility === "free";
+  const isPublic = (asset.visibility === "public" || asset.visibility === "free") && asset.post?.visibility === "free";
   let authorized = isPublic;
   if (!authorized && userId && asset.post) {
     const [entitlement, subscription] = await Promise.all([
@@ -126,7 +126,55 @@ export async function mediaAccess(assetId: string, userId?: string) {
     authorized = Boolean(entitlement || subscription || userId === asset.post.creatorId);
   }
   if (!authorized) throw new Error("Media access is not authorized.");
+  return { asset, isPublic };
+}
+
+export async function mediaAccess(assetId: string, userId?: string) {
+  const { asset } = await authorizeReadyMedia(assetId, userId);
+  if (!asset.storageKey) return { assetId: asset.id, url: asset.src, expiresIn: null };
   const key = asset.derivativeKey ?? asset.storageKey;
   if (!configured()) return { assetId: asset.id, url: `mock://download/${key}`, expiresIn: 300 };
   return { assetId: asset.id, url: await getSignedUrl(client(), new GetObjectCommand({ Bucket: bucket(), Key: key }), { expiresIn: 300 }), expiresIn: 300 };
+}
+
+function webStream(body: unknown): ReadableStream<Uint8Array> {
+  if (body && typeof body === "object" && "transformToWebStream" in body) {
+    return (body as { transformToWebStream(): ReadableStream<Uint8Array> }).transformToWebStream();
+  }
+  if (body instanceof Readable) {
+    return Readable.toWeb(body) as ReadableStream<Uint8Array>;
+  }
+  throw new Error("Storage object body is unavailable.");
+}
+
+export async function mediaContent(assetId: string, userId?: string, range?: string | null) {
+  const { asset, isPublic } = await authorizeReadyMedia(assetId, userId);
+  if (!asset.storageKey) {
+    if (!asset.src.startsWith("/") || asset.src.startsWith("//") || asset.src === `/api/media/${asset.id}/content`) {
+      throw new Error("Media content is unavailable.");
+    }
+    return { kind: "redirect" as const, url: asset.src, isPublic };
+  }
+  if (!configured()) throw new Error("Media content is unavailable.");
+
+  const key = asset.derivativeKey ?? asset.storageKey;
+  const object = await client().send(new GetObjectCommand({
+    Bucket: bucket(),
+    Key: key,
+    ...(range ? { Range: range } : {})
+  }));
+  const contentType = asset.kind === "image" && asset.derivativeKey ? "image/jpeg" : asset.mimeType;
+  return {
+    kind: "stream" as const,
+    body: webStream(object.Body),
+    status: object.ContentRange ? 206 : 200,
+    isPublic,
+    headers: {
+      "accept-ranges": object.AcceptRanges ?? "bytes",
+      "content-type": object.ContentType ?? contentType,
+      ...(object.ContentLength === undefined ? {} : { "content-length": String(object.ContentLength) }),
+      ...(object.ContentRange ? { "content-range": object.ContentRange } : {}),
+      ...(object.ETag ? { etag: object.ETag } : {})
+    }
+  };
 }

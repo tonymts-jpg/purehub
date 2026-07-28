@@ -152,6 +152,7 @@ test("phase 5 KYC, private media access, and reconciliation enforce finance boun
   const post = await createPost(request, [upload.assetId]);
   await registerFan(request, "phase5-media");
   expect((await request.get(`/api/media/${upload.assetId}/access`)).status()).toBe(403);
+  expect((await request.get(`/api/media/${upload.assetId}/content`)).status()).toBe(403);
   await activateSettlement(request, 7);
   await pay(request, post.id);
   expect((await request.get(`/api/media/${upload.assetId}/access`)).ok()).toBeTruthy();

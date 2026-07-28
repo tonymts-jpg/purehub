@@ -1,6 +1,6 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { prisma } from "../lib/prisma";
-import { hasDatabase, signInAdmin, signInCreator, signInFan } from "./auth-helpers";
+import { authHeaders, hasDatabase, signInAdmin, signInCreator, signInFan } from "./auth-helpers";
 
 test("staging does not retain Phase 6 ownership test posts", async ({ request }, testInfo: TestInfo) => {
   test.skip(testInfo.project.name === "mobile", "Database cleanup acceptance runs once against the shared staging database.");
@@ -125,6 +125,189 @@ test("homepage purchase unlock dialog moves focus inside and traps Tab navigatio
 
   await page.keyboard.press("Shift+Tab");
   await expect(signIn).toBeFocused();
+});
+
+test("authenticated homepage purchase uses the payment APIs and reloads authoritative access", async ({ page }) => {
+  let purchased = false;
+  const paymentCalls: string[] = [];
+  let releaseConfirmation: (() => void) | undefined;
+  const confirmationGate = new Promise<void>((resolve) => {
+    releaseConfirmation = resolve;
+  });
+  const post = {
+    id: "homepage-payment-contract",
+    creatorId: "c1",
+    title: "Homepage payment contract",
+    excerpt: "The homepage must persist a real entitlement after payment.",
+    content: "This fixture verifies the authenticated homepage purchase contract.",
+    cover: "cover-1",
+    category: "Cosplay",
+    tags: ["Cosplay"],
+    visibility: "purchase",
+    price: 28,
+    likes: 0,
+    comments: [],
+    createdAt: "刚刚",
+    hasAccess: false,
+    media: Array.from({ length: 3 }, (_, index) => ({
+      id: `homepage-payment-media-${index + 1}`,
+      src: "/generated/posts/post-1/01.webp",
+      alt: `Homepage payment media ${index + 1}`,
+      width: 720,
+      height: 900,
+      order: index,
+      kind: "image"
+    }))
+  };
+
+  await page.route("**/api/auth/get-session", async (route) => {
+    await route.fulfill({
+      json: {
+        session: {
+          id: "homepage-payment-session",
+          userId: "homepage-payment-fan",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          token: "homepage-payment-token",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        },
+        user: {
+          id: "homepage-payment-fan",
+          name: "Homepage Payment Fan",
+          email: "homepage-payment@example.com",
+          emailVerified: true,
+          image: null,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          role: "fan",
+          creatorStatus: "none"
+        }
+      }
+    });
+  });
+  await page.route("**/api/feed", async (route) => {
+    await route.fulfill({ json: { posts: [{ ...post, hasAccess: purchased }], nextCursor: null } });
+  });
+  await page.route("**/api/payments/orders", async (route) => {
+    paymentCalls.push(new URL(route.request().url()).pathname);
+    await route.fulfill({ json: { order: { id: "homepage-payment-order" } } });
+  });
+  await page.route("**/api/payments/intents", async (route) => {
+    paymentCalls.push(new URL(route.request().url()).pathname);
+    await route.fulfill({ json: { intent: { id: "homepage-payment-intent" } } });
+  });
+  await page.route("**/api/payments/intents/homepage-payment-intent/confirm", async (route) => {
+    paymentCalls.push(new URL(route.request().url()).pathname);
+    await confirmationGate;
+    purchased = true;
+    await route.fulfill({ json: { intent: { id: "homepage-payment-intent", status: "succeeded" } } });
+  });
+  await page.route("**/api/posts/homepage-payment-contract", async (route) => {
+    await route.fulfill({ json: { post: { ...post, hasAccess: purchased } } });
+  });
+
+  await page.goto("/");
+  const card = page.getByTestId("post-card").filter({ has: page.getByRole("heading", { name: post.title }) });
+  await card.getByRole("button", { name: "解锁图片 3" }).click();
+  const dialog = page.getByRole("dialog", { name: "解锁作品" });
+  await dialog.getByRole("button", { name: "确认支付 ¥28" }).click();
+  await expect(dialog.getByRole("button", { name: "处理中…" })).toBeDisabled();
+  releaseConfirmation?.();
+
+  await expect(card.getByRole("button", { name: "查看图片 3" })).toBeVisible();
+  expect(paymentCalls).toEqual([
+    "/api/payments/orders",
+    "/api/payments/intents",
+    "/api/payments/intents/homepage-payment-intent/confirm"
+  ]);
+
+  await page.reload();
+  await expect(page.getByTestId("post-card").filter({ has: page.getByRole("heading", { name: post.title }) }).getByRole("button", { name: "查看图片 3" })).toBeVisible();
+});
+
+test("authenticated homepage purchase creates a persistent entitlement", async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name === "mobile", "The shared staging payment mutation runs once.");
+  test.skip(!(await hasDatabase(page.request)), "Persistent homepage purchase requires PostgreSQL.");
+  const nonce = Date.now().toString(36);
+  let postId: string | null = null;
+  let priorCard: Record<string, unknown> | null = null;
+
+  try {
+    await signInAdmin(page.request);
+    const channels = await page.request.get("/api/admin/payment-channels");
+    expect(channels.ok(), await channels.text()).toBeTruthy();
+    priorCard = (await channels.json()).channels.find(({ provider }: { provider: string }) => provider === "card");
+    const enabled = await page.request.patch("/api/admin/payment-channels/card", {
+      headers: authHeaders,
+      data: { enabled: true, mode: "test", statusNote: "acceptance_homepage_purchase", config: { adapter: "manual_confirm" } }
+    });
+    expect(enabled.ok(), await enabled.text()).toBeTruthy();
+
+    await signInCreator(page.request);
+    const created = await page.request.post("/api/posts", {
+      data: {
+        title: `Homepage purchase ${nonce}`,
+        excerpt: "Authenticated homepage purchase acceptance fixture.",
+        content: "This purchase fixture proves the entitlement survives a full homepage reload.",
+        category: "Cosplay",
+        contentType: "photo_short",
+        saleMode: "single_plus_subscription",
+        visibility: "purchase",
+        price: 28
+      }
+    });
+    expect(created.ok(), await created.text()).toBeTruthy();
+    postId = (await created.json()).post.id;
+    await prisma.mediaAsset.createMany({
+      data: Array.from({ length: 3 }, (_, index) => ({
+        id: `homepage-purchase-${nonce}-${index + 1}`,
+        postId,
+        src: "/generated/posts/post-1/01.webp",
+        alt: `Homepage purchase fixture ${index + 1}`,
+        width: 720,
+        height: 900,
+        order: index,
+        kind: "image",
+        status: "ready",
+        visibility: "purchase"
+      }))
+    });
+
+    await signInFan(page.request);
+    await page.goto("/");
+    const card = page.locator(`[data-post-id="${postId}"]`);
+    await expect(card).toBeVisible();
+    await card.getByRole("button", { name: "解锁图片 3" }).click();
+    await page.getByRole("dialog", { name: "解锁作品" }).getByRole("button", { name: "确认支付 ¥28" }).click();
+    await expect(card.getByRole("button", { name: "查看图片 3" })).toBeVisible();
+
+    const entitlement = await prisma.entitlement.findFirst({ where: { userId: "fan-demo", postId: postId! } });
+    expect(entitlement).not.toBeNull();
+    expect((await page.request.get(`/api/posts/${postId}`)).ok()).toBeTruthy();
+
+    await page.reload();
+    await expect(page.locator(`[data-post-id="${postId}"]`).getByRole("button", { name: "查看图片 3" })).toBeVisible();
+  } finally {
+    if (postId) {
+      await prisma.searchDocument.deleteMany({ where: { entityType: "post", entityId: postId } }).catch(() => undefined);
+      await prisma.post.deleteMany({ where: { id: postId } }).catch(() => undefined);
+    }
+    if (priorCard) {
+      await signInAdmin(page.request).catch(() => undefined);
+      await page.request.patch("/api/admin/payment-channels/card", {
+        headers: authHeaders,
+        data: {
+          enabled: priorCard.enabled,
+          mode: priorCard.mode,
+          currencies: priorCard.currencies,
+          regions: priorCard.regions,
+          feeNote: priorCard.feeNote,
+          statusNote: priorCard.statusNote,
+          config: priorCard.config
+        }
+      }).catch(() => undefined);
+    }
+  }
 });
 
 async function openPostHeroViewer(page: Page) {
@@ -335,18 +518,47 @@ test("video viewer renders controlled media without autoplay", async ({ page }) 
   await expect(video).toHaveJSProperty("muted", false);
 });
 
-test("fullscreen preview invokes the API", async ({ page }, testInfo: TestInfo) => {
+test("fullscreen preview keeps every viewer control on the fullscreen surface and exits", async ({ page }, testInfo: TestInfo) => {
   test.skip(testInfo.project.name === "mobile", "Fullscreen API behavior is verified in the desktop browser; mobile emulation does not expose a stable API surface.");
   await page.addInitScript(() => {
+    let fullscreenElement: Element | null = null;
+    Object.defineProperty(document, "fullscreenElement", {
+      configurable: true,
+      get: () => fullscreenElement
+    });
     HTMLElement.prototype.requestFullscreen = function requestFullscreen() {
       Reflect.set(window, "__purehubFullscreenRequests", Number(Reflect.get(window, "__purehubFullscreenRequests") ?? 0) + 1);
+      Reflect.set(window, "__purehubFullscreenTarget", this);
+      fullscreenElement = Reflect.get(window, "__purehubFullscreenTarget") as Element;
+      document.dispatchEvent(new Event("fullscreenchange"));
+      return Promise.resolve();
+    };
+    Document.prototype.exitFullscreen = function exitFullscreen() {
+      Reflect.set(window, "__purehubFullscreenExits", Number(Reflect.get(window, "__purehubFullscreenExits") ?? 0) + 1);
+      fullscreenElement = null;
+      document.dispatchEvent(new Event("fullscreenchange"));
       return Promise.resolve();
     };
   });
   await page.goto("/post/post-1");
-  await openPostHeroViewer(page);
+  const viewer = await openPostHeroViewer(page);
   await page.getByRole("button", { name: "全屏预览" }).click();
   await expect.poll(() => page.evaluate(() => Number(Reflect.get(window, "__purehubFullscreenRequests") ?? 0))).toBe(1);
+  await expect(viewer.getByRole("button", { name: "退出全屏" })).toBeVisible();
+  expect(await page.evaluate(() => {
+    const target = Reflect.get(window, "__purehubFullscreenTarget") as HTMLElement | undefined;
+    return Boolean(
+      target
+      && target.contains(document.querySelector('[aria-label="关闭媒体预览"]'))
+      && target.contains(document.querySelector('[aria-label="退出全屏"]'))
+      && target.contains(document.querySelector('[aria-label="上一张"]'))
+      && target.contains(document.querySelector('[aria-label="下一张"]'))
+      && target.textContent?.includes("1 / 12")
+    );
+  })).toBe(true);
+  await viewer.getByRole("button", { name: "退出全屏" }).click();
+  await expect.poll(() => page.evaluate(() => Number(Reflect.get(window, "__purehubFullscreenExits") ?? 0))).toBe(1);
+  await expect(viewer.getByRole("button", { name: "全屏预览" })).toBeVisible();
 });
 
 test("fullscreen preview stays open when the API is unavailable", async ({ page }, testInfo: TestInfo) => {

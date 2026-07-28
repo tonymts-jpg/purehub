@@ -11,6 +11,7 @@ import { MediaGallery } from "@/components/media-gallery";
 import { UnlockDialog } from "@/components/unlock-dialog";
 import { authClient } from "@/lib/auth-client";
 import type { Post } from "@/lib/types";
+import { usePostPurchase } from "@/components/use-post-purchase";
 
 type ApiComment={id:string;content:string;createdAt:string;author:{name:string;avatar:string}};
 
@@ -27,6 +28,19 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
   const [comments,setComments]=useState<ApiComment[]>([]);
   const {data:session}=authClient.useSession();
   const demoMode=process.env.NEXT_PUBLIC_DEMO_MODE==="true";
+  const callbackUrl=typeof window === "undefined" ? `/post/${id}` : `${window.location.pathname}${window.location.search}`;
+  const purchase=usePostPurchase({
+    postId:id,
+    price:post?.price||0,
+    authenticated:Boolean(session?.user),
+    callbackUrl,
+    source:"post_modal",
+    onPurchased:(purchasedPost)=>{
+      setServerPost(purchasedPost);
+      setServerAccess(Boolean(purchasedPost.hasAccess));
+      setUnlockOpen(false);
+    }
+  });
   useEffect(()=>{
     let active=true;
     setServerPost(null);
@@ -44,27 +58,8 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
 
   const creator=creators.find(item=>item.id===post.creatorId)??{id:post.creatorId,name:"创作者",handle:`creator-${post.creatorId}`,avatar:"创",category:post.category};
   const subscribed=store.subscriptions.some(item=>item.creatorId===creator.id);
-  const unlocked=post.visibility==="free"||post.hasAccess===true||serverAccess||(demoMode&&(subscribed||store.unlocked.includes(post.id)));
+  const unlocked=post.visibility==="free"||purchase.accessOverride===true||post.hasAccess===true||serverAccess||(demoMode&&(subscribed||store.unlocked.includes(post.id)));
   const handleLocked=()=>setUnlockOpen(true);
-  const confirmPurchase=async()=>{
-    if(!session?.user){window.location.assign(`/sign-in?callbackUrl=${encodeURIComponent(window.location.pathname)}`);return}
-    try{
-      const orderResponse=await fetch("/api/payments/orders",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({kind:"post_unlock",itemId:post.id})});
-      if(!orderResponse.ok)throw new Error("order failed");
-      const {order}=await orderResponse.json();
-      const intentResponse=await fetch("/api/payments/intents",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({orderId:order.id,provider:"card"})});
-      if(!intentResponse.ok)throw new Error("intent failed");
-      const {intent}=await intentResponse.json();
-      const confirmResponse=await fetch(`/api/payments/intents/${intent.id}/confirm`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({source:"post_modal"})});
-      if(!confirmResponse.ok)throw new Error("confirm failed");
-      setServerAccess(true);
-    }catch{
-      if(!demoMode){store.showToast("支付暂时不可用，请稍后重试。");return}
-      store.showToast("Server payment unavailable, using local demo unlock.");
-    }
-    if(demoMode)store.unlock(post.id,post.price||0);
-    setUnlockOpen(false);
-  };
   const publishComment=async()=>{
     if(!comment.trim())return;
     if(!session?.user){window.location.assign(`/sign-in?callbackUrl=${encodeURIComponent(window.location.pathname)}`);return}
@@ -128,6 +123,6 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
       </article>
     </div>
 
-    <UnlockDialog open={unlockOpen} title={post.title} visibility={post.visibility === "members" ? "members" : "purchase"} price={post.price} creatorName={creator.name} authenticated={Boolean(session?.user)} callbackUrl={typeof window === "undefined" ? `/post/${post.id}` : `${window.location.pathname}${window.location.search}`} onClose={()=>setUnlockOpen(false)} onConfirmPurchase={confirmPurchase} membershipHref={`/membership/${creator.handle}`}/>
+    <UnlockDialog open={unlockOpen} title={post.title} visibility={post.visibility === "members" ? "members" : "purchase"} price={post.price} creatorName={creator.name} authenticated={Boolean(session?.user)} callbackUrl={callbackUrl} onClose={()=>setUnlockOpen(false)} onConfirmPurchase={async()=>{if(await purchase.confirmPurchase())setUnlockOpen(false)}} purchaseProcessing={purchase.processing} purchaseError={purchase.error} membershipHref={`/membership/${creator.handle}`}/>
   </div>;
 }

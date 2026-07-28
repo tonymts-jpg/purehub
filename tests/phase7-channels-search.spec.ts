@@ -1609,6 +1609,7 @@ test("phase 7 invitation acceptance binds session email and does not unlock paid
     });
     expect(completed.ok(), await completed.text()).toBeTruthy();
     expect((await inviteeRequest.get(`/api/media/${upload.assetId}/access`)).status()).toBe(403);
+    expect((await inviteeRequest.get(`/api/media/${upload.assetId}/content`)).status()).toBe(403);
   } finally {
     if (cleanupEmails.length || cleanupAssetIds.length) {
       await cleanupPhase7MembershipArtifacts(cleanupEmails, cleanupAssetIds);
@@ -3145,7 +3146,7 @@ test("phase 7 search preview projects only ready public media for free posts", a
   const privatePostId = `phase7-search-preview-private-${nonce}`;
   const publicAsset = {
     id: `phase7-search-preview-public-${nonce}`,
-    src: `/generated/phase7/${nonce}-public.webp`,
+    src: "/generated/posts/post-1/01.webp",
     alt: "Public search preview asset",
     kind: "image" as const
   };
@@ -3281,12 +3282,18 @@ test("phase 7 search preview projects only ready public media for free posts", a
     expect(freeResult).toMatchObject({ entityId: freePostId });
     expect(noPreviewResult).toMatchObject({ entityId: noPreviewPostId });
     expect(freeResult?.preview).toEqual({
-      src: publicAsset.src,
+      src: `/api/media/${publicAsset.id}/content`,
       alt: publicAsset.alt,
       kind: "image"
     });
     expect(noPreviewResult?.preview).toBeNull();
     expect(JSON.stringify(results)).not.toContain(secretAsset.src);
+    expect(JSON.stringify(results)).not.toContain(`/api/media/${secretAsset.id}/content`);
+
+    const renderedPreview = await anonymous.get(`/api/media/${publicAsset.id}/content`);
+    expect(renderedPreview.ok(), await renderedPreview.text()).toBeTruthy();
+    expect(renderedPreview.headers()["content-type"]).toMatch(/^image\//);
+    expect((await anonymous.get(`/api/media/${secretAsset.id}/content`)).status()).toBe(403);
 
     const creatorResponse = await anonymous.get("/api/search?q=yuki&type=creator");
     expect(creatorResponse.ok(), await creatorResponse.text()).toBeTruthy();
@@ -3308,6 +3315,105 @@ test("phase 7 search preview projects only ready public media for free posts", a
     await prisma.post.deleteMany({
       where: { id: { in: [freePostId, noPreviewPostId, privatePostId] } }
     }).catch(() => undefined);
+    await anonymous.dispose();
+  }
+});
+
+test("phase 7 uploaded free image and video assets publish into safe search previews", async ({}, testInfo) => {
+  test.setTimeout(120_000);
+  const baseURL = testInfo.project.use.baseURL;
+  const creator = await playwrightRequest.newContext({ baseURL });
+  const anonymous = await playwrightRequest.newContext({ baseURL });
+  const nonce = `${Date.now().toString(36)}${Math.floor(Math.random() * 1_000_000).toString(36)}`;
+  const query = `phase7uploadpreview${nonce}`;
+  const postIds: string[] = [];
+  const assetIds: string[] = [];
+
+  try {
+    await requirePhase7(anonymous, testInfo);
+    await signInCreator(creator);
+
+    for (const kind of ["image", "video"] as const) {
+      const prepared = await creator.post("/api/uploads/presign", {
+        headers: authHeaders,
+        data: {
+          fileName: `${query}.${kind === "image" ? "png" : "mp4"}`,
+          mimeType: kind === "image" ? "image/png" : "video/mp4",
+          sizeBytes: 100,
+          kind,
+          visibility: "public"
+        }
+      });
+      expect(prepared.ok(), await prepared.text()).toBeTruthy();
+      const { assetId } = await prepared.json();
+      assetIds.push(assetId);
+
+      const completed = await creator.post("/api/uploads/complete", {
+        headers: authHeaders,
+        data: {
+          assetId,
+          simulate: true,
+          width: 720,
+          height: 900,
+          ...(kind === "video" ? { durationSeconds: 30 } : {})
+        }
+      });
+      expect(completed.ok(), await completed.text()).toBeTruthy();
+
+      const created = await creator.post("/api/posts", {
+        headers: authHeaders,
+        data: {
+          title: `${query} ${kind}`,
+          excerpt: `Uploaded ${kind} search preview lifecycle fixture.`,
+          content: `This normal upload, completion, publish, index, and search lifecycle covers ${kind} media.`,
+          category: "Cosplay",
+          visibility: "free",
+          contentType: "photo_short",
+          saleMode: "subscription_only",
+          mediaAssetIds: [assetId]
+        }
+      });
+      expect(created.ok(), await created.text()).toBeTruthy();
+      const postId = (await created.json()).post.id as string;
+      postIds.push(postId);
+      await synchronizeSearchEntity("post", postId);
+    }
+
+    const publishedAssets = await prisma.mediaAsset.findMany({
+      where: { id: { in: assetIds } },
+      select: { id: true, kind: true, status: true, visibility: true, postId: true, src: true }
+    });
+    expect(publishedAssets).toHaveLength(2);
+    expect(publishedAssets).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "image", status: "ready", visibility: "public" }),
+      expect.objectContaining({ kind: "video", status: "ready", visibility: "public" })
+    ]));
+    for (const asset of publishedAssets) {
+      expect(asset.src).toBe(`/api/media/${asset.id}/content`);
+    }
+
+    const response = await anonymous.get(`/api/search?q=${query}&type=post`);
+    expect(response.ok(), await response.text()).toBeTruthy();
+    const results = (await response.json()).results as Array<{
+      entityId: string;
+      preview: { src: string; alt: string; kind: "image" | "video" } | null;
+    }>;
+    for (const result of results.filter(({ entityId }) => postIds.includes(entityId))) {
+      const asset = publishedAssets.find(({ postId }) => postId === result.entityId);
+      expect(asset).toBeTruthy();
+      expect(result.preview).toMatchObject({
+        src: `/api/media/${asset?.id}/content`,
+        kind: asset?.kind
+      });
+    }
+    expect(results.filter(({ entityId }) => postIds.includes(entityId))).toHaveLength(2);
+    expect(JSON.stringify(results)).not.toContain("original/");
+    expect(JSON.stringify(results)).not.toContain("X-Amz-Signature");
+  } finally {
+    await prisma.searchDocument.deleteMany({ where: { entityId: { in: postIds } } }).catch(() => undefined);
+    await prisma.post.deleteMany({ where: { id: { in: postIds } } }).catch(() => undefined);
+    await prisma.mediaAsset.deleteMany({ where: { id: { in: assetIds } } }).catch(() => undefined);
+    await creator.dispose();
     await anonymous.dispose();
   }
 });

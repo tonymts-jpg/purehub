@@ -27,7 +27,7 @@ function mapMedia(asset: {
 }): MediaAsset {
   return {
     id: asset.id,
-    src: asset.src,
+    src: asset.src === `/api/media/${asset.id}/access` ? `/api/media/${asset.id}/content` : asset.src,
     alt: asset.alt,
     width: asset.width,
     height: asset.height,
@@ -318,7 +318,8 @@ export async function createPost(input: {
       eligible: created.visibility === "free"
     });
     if (input.mediaAssetIds?.length) {
-      await Promise.all(input.mediaAssetIds.map((id, order) => tx.mediaAsset.update({ where: { id }, data: { postId, order, visibility: input.visibility } })));
+      const mediaVisibility = input.visibility === "free" ? "public" : input.visibility;
+      await Promise.all(input.mediaAssetIds.map((id, order) => tx.mediaAsset.update({ where: { id }, data: { postId, order, visibility: mediaVisibility } })));
     }
     return tx.post.findUniqueOrThrow({ where: { id: postId }, include: postInclude });
   });

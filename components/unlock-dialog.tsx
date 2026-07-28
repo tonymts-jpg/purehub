@@ -14,7 +14,9 @@ type UnlockDialogProps = {
   authenticated: boolean;
   callbackUrl: string;
   onClose(): void;
-  onConfirmPurchase(): void;
+  onConfirmPurchase(): void | Promise<void>;
+  purchaseProcessing?: boolean;
+  purchaseError?: string | null;
   membershipHref: string;
 };
 
@@ -28,6 +30,8 @@ export function UnlockDialog({
   callbackUrl,
   onClose,
   onConfirmPurchase,
+  purchaseProcessing = false,
+  purchaseError = null,
   membershipHref
 }: UnlockDialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -90,9 +94,16 @@ export function UnlockDialog({
           ) : isMembership ? (
             <Link href={membershipHref} className="brand-gradient flex-1 rounded-full py-3 text-center font-bold text-white">查看会员方案</Link>
           ) : (
-            <button onClick={onConfirmPurchase} className="brand-gradient flex-1 rounded-full py-3 font-bold text-white">确认支付 ¥{price}</button>
+            <button
+              onClick={() => void onConfirmPurchase()}
+              disabled={purchaseProcessing}
+              className="brand-gradient flex-1 rounded-full py-3 font-bold text-white disabled:cursor-wait disabled:opacity-60"
+            >
+              {purchaseProcessing ? "处理中…" : `确认支付 ¥${price}`}
+            </button>
           )}
         </div>
+        {purchaseError && <p role="alert" className="mt-4 text-sm font-semibold text-red-500">{purchaseError}</p>}
       </div>
     </div>
   </OverlayPortal>;

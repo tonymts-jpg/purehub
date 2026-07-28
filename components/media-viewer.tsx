@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { ChevronLeft, ChevronRight, Expand, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Expand, Minimize, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { OverlayPortal } from "./overlay-portal";
 import type { MediaAsset } from "@/lib/types";
@@ -15,13 +15,12 @@ type MediaViewerProps = {
 export function MediaViewer({ media, activeIndex, onActiveIndexChange }: MediaViewerProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
-  const viewerRef = useRef<HTMLDivElement>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const asset = activeIndex === null ? null : media[activeIndex];
   const currentIndex = activeIndex ?? 0;
 
   useEffect(() => {
-    const updateFullscreenState = () => setIsFullscreen(document.fullscreenElement === viewerRef.current);
+    const updateFullscreenState = () => setIsFullscreen(document.fullscreenElement === dialogRef.current);
     document.addEventListener("fullscreenchange", updateFullscreenState);
     return () => document.removeEventListener("fullscreenchange", updateFullscreenState);
   }, []);
@@ -63,13 +62,13 @@ export function MediaViewer({ media, activeIndex, onActiveIndexChange }: MediaVi
   };
 
   const toggleFullscreen = async () => {
-    const viewer = viewerRef.current;
-    if (!viewer) return;
+    const surface = dialogRef.current;
+    if (!surface) return;
     try {
-      if (document.fullscreenElement === viewer) {
+      if (document.fullscreenElement === surface) {
         await document.exitFullscreen?.();
       } else {
-        await viewer.requestFullscreen?.();
+        await surface.requestFullscreen?.();
       }
     } catch {
       // A rejected Fullscreen API request must not close the preview.
@@ -77,11 +76,11 @@ export function MediaViewer({ media, activeIndex, onActiveIndexChange }: MediaVi
   };
 
   return <OverlayPortal open={asset !== null} onClose={() => onActiveIndexChange(null)} initialFocusRef={closeButtonRef}>
-    {asset && <div ref={dialogRef} onKeyDown={trapFocus} className="fixed inset-0 z-[90] flex items-center justify-center bg-black/92 p-3 sm:p-8" role="dialog" aria-modal="true" aria-label="媒体预览">
+    {asset && <div ref={dialogRef} data-testid="media-viewer-fullscreen-surface" onKeyDown={trapFocus} className="fixed inset-0 z-[90] flex items-center justify-center bg-black/92 p-3 sm:p-8" role="dialog" aria-modal="true" aria-label="媒体预览">
       <button ref={closeButtonRef} type="button" onClick={() => onActiveIndexChange(null)} aria-label="关闭媒体预览" className="absolute right-4 top-4 z-10 rounded-full bg-white/10 p-3 text-white backdrop-blur"><X /></button>
-      <button type="button" onClick={toggleFullscreen} aria-label="全屏预览" className="absolute right-16 top-4 z-10 rounded-full bg-white/10 p-3 text-white backdrop-blur"><Expand /></button>
+      <button type="button" onClick={toggleFullscreen} aria-label={isFullscreen ? "退出全屏" : "全屏预览"} aria-pressed={isFullscreen} className="absolute right-16 top-4 z-10 rounded-full bg-white/10 p-3 text-white backdrop-blur">{isFullscreen ? <Minimize /> : <Expand />}</button>
       {media.length > 1 && <button type="button" onClick={() => move(-1)} aria-label="上一张" className="absolute left-3 z-10 rounded-full bg-white/10 p-3 text-white backdrop-blur sm:left-6"><ChevronLeft /></button>}
-      <div ref={viewerRef} className="relative flex h-[88vh] w-[92vw] max-w-5xl items-center justify-center">
+      <div className="relative flex h-[88vh] w-[92vw] max-w-5xl items-center justify-center">
         {asset.kind === "video" ? <video src={asset.src} aria-label={asset.alt} controls autoPlay={false} preload="metadata" className="max-h-[88vh] max-w-[92vw]" /> : <Image src={asset.src} alt={asset.alt} fill priority className="object-contain" sizes="92vw" />}
       </div>
       {media.length > 1 && <button type="button" onClick={() => move(1)} aria-label="下一张" className="absolute right-3 z-10 rounded-full bg-white/10 p-3 text-white backdrop-blur sm:right-6"><ChevronRight /></button>}
