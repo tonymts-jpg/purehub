@@ -175,14 +175,23 @@ directly on the deployed staging site:
 
 ```bash
 npm ci --registry=https://registry.npmmirror.com/
+npm run db:generate
 npx playwright install --with-deps chromium
 export PLAYWRIGHT_BASE_URL=http://127.0.0.1
 export ADMIN_ACCESS_TOKEN="$(grep '^ADMIN_ACCESS_TOKEN=' .env.staging | tail -1 | cut -d= -f2-)"
 export DEMO_ACCOUNT_PASSWORD="$(grep '^DEMO_ACCOUNT_PASSWORD=' .env.staging | tail -1 | cut -d= -f2-)"
+runtime_database_url="$(docker compose --env-file .env.staging exec -T web printenv DATABASE_URL)"
+postgres_container_id="$(docker compose --env-file .env.staging ps -q postgres)"
+postgres_container_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${postgres_container_id}")"
+test -n "${postgres_container_ip}"
+export DATABASE_URL="${runtime_database_url/@postgres:/@${postgres_container_ip}:}"
 npm run test:e2e:deployed
+unset ADMIN_ACCESS_TOKEN DEMO_ACCOUNT_PASSWORD DATABASE_URL runtime_database_url
 ```
 
 `PLAYWRIGHT_BASE_URL` tells Playwright to use the already deployed Docker service instead of starting a local Next.js dev server.
+The host-side `DATABASE_URL` uses PostgreSQL's private Docker bridge address so
+database-gated tests can run without publishing the database port.
 The deployed Playwright configuration uses one worker. Every Phase 7
 database-gated lifecycle, ACL, membership, curation/concurrency,
 search/reindex, UI, cleanup, and entitlement-isolation test must execute with

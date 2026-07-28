@@ -1458,9 +1458,13 @@ test("phase 7 invitation acceptance binds session email and does not unlock paid
       { data: { email: expiredAcceptUser.email } }
     );
     const expiredAcceptBody = await expiredAcceptInvite.json();
+    const expiredAcceptNow = Date.now();
     await prisma.channelInvitation.update({
       where: { id: expiredAcceptBody.invitation.id },
-      data: { expiresAt: new Date(Date.now() - 60_000) }
+      data: {
+        createdAt: new Date(expiredAcceptNow - 120_000),
+        expiresAt: new Date(expiredAcceptNow - 60_000)
+      }
     });
     const expiredAccept = await expiredAcceptRequest.post(
       `/api/channels/invitations/${encodeURIComponent(expiredAcceptBody.token)}`
@@ -1476,9 +1480,13 @@ test("phase 7 invitation acceptance binds session email and does not unlock paid
       { data: { email: expiredRejectUser.email } }
     );
     const expiredRejectBody = await expiredRejectInvite.json();
+    const expiredRejectNow = Date.now();
     await prisma.channelInvitation.update({
       where: { id: expiredRejectBody.invitation.id },
-      data: { expiresAt: new Date(Date.now() - 60_000) }
+      data: {
+        createdAt: new Date(expiredRejectNow - 120_000),
+        expiresAt: new Date(expiredRejectNow - 60_000)
+      }
     });
     const expiredReject = await expiredRejectRequest.delete(
       `/api/channels/invitations/${encodeURIComponent(expiredRejectBody.token)}`
