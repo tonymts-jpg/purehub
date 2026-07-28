@@ -1,15 +1,16 @@
 "use client";
 
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, type RefObject, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
 type OverlayPortalProps = {
   open: boolean;
   onClose: () => void;
   children: ReactNode;
+  initialFocusRef?: RefObject<HTMLElement | null>;
 };
 
-export function OverlayPortal({ open, onClose, children }: OverlayPortalProps) {
+export function OverlayPortal({ open, onClose, children, initialFocusRef }: OverlayPortalProps) {
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
@@ -27,12 +28,13 @@ export function OverlayPortal({ open, onClose, children }: OverlayPortalProps) {
 
     document.body.style.overflow = "hidden";
     window.addEventListener("keydown", onKeyDown);
+    initialFocusRef?.current?.focus();
     return () => {
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", onKeyDown);
       invoker?.focus();
     };
-  }, [onClose, open]);
+  }, [initialFocusRef, onClose, open]);
 
   if (!mounted || !open) return null;
   return createPortal(children, document.body);

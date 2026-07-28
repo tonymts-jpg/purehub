@@ -71,3 +71,26 @@ test("homepage purchase unlock dialog closes on Escape and restores locked-media
   await expect(page.getByRole("dialog", { name: "解锁作品" })).toHaveCount(0);
   await expect(lockedMedia).toBeFocused();
 });
+
+test("homepage purchase unlock dialog moves focus inside and traps Tab navigation", async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name === "mobile", "Mobile emulation does not advance focus with a virtual Tab key; desktop verifies keyboard focus containment.");
+  await page.goto("/");
+  const card = page.getByTestId("post-card").filter({ has: page.getByRole("heading", { name: "雨后竹林写真日记", exact: true }) });
+  await card.getByRole("button", { name: "解锁图片 3" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "解锁作品" });
+  const close = dialog.getByRole("button", { name: "关闭解锁窗口" });
+  const back = dialog.getByRole("button", { name: "返回" });
+  const signIn = dialog.getByRole("link", { name: "登录后解锁" });
+  await expect(close).toBeFocused();
+
+  await page.keyboard.press("Tab");
+  await expect(back).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(signIn).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(close).toBeFocused();
+
+  await page.keyboard.press("Shift+Tab");
+  await expect(signIn).toBeFocused();
+});

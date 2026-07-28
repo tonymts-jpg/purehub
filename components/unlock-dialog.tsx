@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { CreditCard, LockKeyhole, X } from "lucide-react";
+import { useRef } from "react";
 import { OverlayPortal } from "./overlay-portal";
 
 type UnlockDialogProps = {
@@ -29,15 +30,35 @@ export function UnlockDialog({
   onConfirmPurchase,
   membershipHref
 }: UnlockDialogProps) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
   const signInHref = `/sign-in?callbackUrl=${encodeURIComponent(callbackUrl)}`;
   const isMembership = visibility === "members";
+  const trapFocus = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Tab") return;
 
-  return <OverlayPortal open={open} onClose={onClose}>
+    const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>("a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])") ?? []);
+    if (!focusable.length) return;
+
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
+  return <OverlayPortal open={open} onClose={onClose} initialFocusRef={closeButtonRef}>
     <div
       className="fixed inset-0 z-[90] grid place-items-center bg-black/60 p-4 backdrop-blur-sm"
       role="dialog"
       aria-modal="true"
       aria-label="解锁作品"
+      ref={dialogRef}
+      onKeyDown={trapFocus}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -47,7 +68,7 @@ export function UnlockDialog({
           <span className="brand-gradient grid h-12 w-12 place-items-center rounded-2xl text-white">
             {isMembership ? <LockKeyhole /> : <CreditCard />}
           </span>
-          <button onClick={onClose} aria-label="关闭解锁窗口" className="rounded-full border border-[var(--line)] p-2 muted"><X size={18}/></button>
+          <button ref={closeButtonRef} onClick={onClose} aria-label="关闭解锁窗口" className="rounded-full border border-[var(--line)] p-2 muted"><X size={18}/></button>
         </div>
         <h2 className="mt-5 text-2xl font-black">{isMembership ? "查看会员专属作品" : "解锁完整作品"}</h2>
         <p className="mt-2 text-sm leading-6 muted">
