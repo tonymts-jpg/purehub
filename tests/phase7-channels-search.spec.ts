@@ -4192,7 +4192,7 @@ test("phase 7 admin channel UI exposes operations only to channel admins", async
       });
       createdReindexAuditIds.push(...newAudits.map(({ id }) => id));
     }
-    await operations.getByLabel("频道配额").fill("9");
+    await operations.getByLabel("频道配额", { exact: true }).fill("9");
     await operations.getByLabel("配额原因").fill("Task 9 live UI quota");
     await operations.getByRole("button", { name: "保存频道配额" }).click();
     await operations.getByLabel("接管新所有者 ID").fill("c2");
