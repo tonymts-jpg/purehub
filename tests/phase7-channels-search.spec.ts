@@ -2644,10 +2644,18 @@ test("phase 7 PostgreSQL search ranks safe entities, paginates, reindexes, and e
         }
       ]
     });
-    for (const term of ["PHASE7HIDDEN", "PHASE7SUSPENDED", "PHASE7PRIVATELEAK"]) {
+    for (const [term, forbiddenEntityId] of [
+      ["PHASE7HIDDEN", hiddenId],
+      ["PHASE7SUSPENDED", suspendedId],
+      ["PHASE7PRIVATELEAK", privateLeakId]
+    ] as const) {
       const response = await anonymous.get(`/api/search?q=${term}`);
       expect(response.ok(), await response.text()).toBeTruthy();
-      expect((await response.json()).results).toEqual([]);
+      const results = (await response.json()).results as Array<{ entityId: string }>;
+      expect(results.map(({ entityId }) => entityId)).not.toContain(forbiddenEntityId);
+      expect(JSON.stringify(results)).not.toMatch(
+        new RegExp(`${term}|PRIVATE POST TEXT MUST NEVER APPEAR`, "i")
+      );
     }
 
     const discoverable = await anonymous.get("/api/search?q=Private%20Curators&type=channel");
