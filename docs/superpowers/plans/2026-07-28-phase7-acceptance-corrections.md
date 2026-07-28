@@ -790,7 +790,7 @@ Wrap the command with the environment's explicit bounded command timeout. Expect
 
 - [ ] **Step 4: Run broad final code review and address findings**
 
-Use `superpowers:requesting-code-review` against the branch range starting at `349a3f7`. Any Critical or Important finding gets one focused fix wave, covering tests, and a scoped re-review before push.
+Use `superpowers:requesting-code-review` against the implementation merge base recorded immediately before Task 1. Any Critical or Important finding gets one focused fix wave, covering tests, and a scoped re-review before push.
 
 - [ ] **Step 5: Push the exact reviewed commit**
 
