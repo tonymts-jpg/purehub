@@ -1,5 +1,17 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import { prisma } from "../lib/prisma";
 import { hasDatabase, signInAdmin, signInCreator, signInFan } from "./auth-helpers";
+
+test("staging does not retain Phase 6 ownership test posts", async ({ request }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name === "mobile", "Database cleanup acceptance runs once against the shared staging database.");
+  test.skip(!(await hasDatabase(request)), "Phase 6 cleanup verification requires the seeded PostgreSQL database.");
+
+  const leaked = await prisma.post.findMany({
+    where: { title: { startsWith: "Phase 6 ownership" } },
+    select: { id: true }
+  });
+  expect(leaked).toEqual([]);
+});
 
 test("frontend navigation hides demo, admin, and creator tools for visitors", async ({ page }) => {
   await page.goto("/");
