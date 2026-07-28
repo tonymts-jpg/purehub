@@ -84,6 +84,37 @@ test("phase 6 server authorization rejects spoofed identities and role headers",
   expect(elevated.status()).toBe(403);
 });
 
+test("phase 6 comments require a session and keep the session author", async ({ request }, testInfo) => {
+  await requirePhase6(request, testInfo);
+  expect((await request.post("/api/posts/post-1/comments", { data: { content: "Anonymous comment" } })).status()).toBe(401);
+
+  await signInCreator(request);
+  const created = await request.post("/api/posts", {
+    data: {
+      title: `Phase 6 comment identity ${Date.now()}`,
+      excerpt: "Comment authorship must stay with the signed-in user.",
+      content: "Body and query user IDs must not replace the session identity.",
+      category: "Cosplay",
+      contentType: "long_video",
+      saleMode: "long_video_single",
+      visibility: "free",
+      price: 0
+    }
+  });
+  expect(created.ok(), await created.text()).toBeTruthy();
+  const postId = (await created.json()).post.id as string;
+
+  await registerFan(request, "phase6-comment-author");
+  const me = await request.get("/api/me");
+  expect(me.ok(), await me.text()).toBeTruthy();
+  const authorId = (await me.json()).user.id as string;
+  const commentResponse = await request.post(`/api/posts/${postId}/comments?userId=c1`, {
+    data: { content: "Session-owned comment", userId: "c1" }
+  });
+  expect(commentResponse.status()).toBe(201);
+  expect((await commentResponse.json()).comment.author.id).toBe(authorId);
+});
+
 test("phase 6 social interactions are idempotent and notifications are owned", async ({ request }, testInfo) => {
   await requirePhase6(request, testInfo);
   const fan = await registerFan(request, "phase6-social");

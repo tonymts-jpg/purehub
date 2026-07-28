@@ -357,6 +357,17 @@ async function main() {
     });
   }
 
+  await prisma.postComment.createMany({
+    data: posts.map((post, index) => ({
+      id: `seed-comment-${post.id}`,
+      postId: post.id,
+      authorId: "fan-demo",
+      content: post.comments[0]?.text ?? "期待看到更多创作。",
+      status: "visible",
+      createdAt: new Date(Date.UTC(2026, 6, 1, 0, index))
+    }))
+  });
+
   const phase7SeededAt = new Date("2026-07-24T00:00:00.000Z");
   await prisma.channel.createMany({
     data: [

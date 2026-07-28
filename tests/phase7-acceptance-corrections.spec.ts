@@ -45,6 +45,26 @@ test("admin uses an independent shell without frontend navigation", async ({ pag
   await expect(page.getByText("Demo 模式")).toHaveCount(0);
 });
 
+test("visitors read visible comments and see a sign-in action instead of an editor", async ({ page }) => {
+  test.skip(!(await hasDatabase(page.request)), "Public seeded comments require the seeded PostgreSQL database.");
+  const response = await page.request.get("/api/posts/post-1/comments");
+  expect(response.ok()).toBeTruthy();
+  expect((await response.json()).comments.length).toBeGreaterThan(0);
+
+  await page.goto("/post/post-1");
+  await expect(page.getByTestId("comment-list").getByText("Pure 粉丝")).toBeVisible();
+  await expect(page.getByRole("link", { name: "登录后参与评论" })).toBeVisible();
+  await expect(page.getByPlaceholder("说说你的感受…")).toHaveCount(0);
+});
+
+test("authenticated users see the comment editor", async ({ page }) => {
+  test.skip(!(await hasDatabase(page.request)), "Comment participation requires the seeded PostgreSQL database.");
+  await signInFan(page.request);
+  await page.goto("/post/post-1");
+  await expect(page.getByPlaceholder("说说你的感受…")).toBeVisible();
+  await expect(page.getByRole("button", { name: "发布" })).toBeVisible();
+});
+
 test("homepage purchase unlock dialog covers the viewport outside the post card", async ({ page }) => {
   await page.goto("/");
   const card = page.getByTestId("post-card").filter({ has: page.getByRole("heading", { name: "雨后竹林写真日记", exact: true }) });

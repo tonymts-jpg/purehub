@@ -119,11 +119,11 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
 
         <section className="mt-10">
           <h2 className="text-xl font-black">评论</h2>
-          <div className="mt-4 flex gap-3">
+          {session?.user?<div className="mt-4 flex gap-3">
             <input value={comment} onChange={event=>setComment(event.target.value)} placeholder="说说你的感受…" className="glass min-w-0 flex-1 rounded-full px-5 py-3 outline-none"/>
             <button onClick={publishComment} className="rounded-full bg-ink px-5 text-sm font-bold text-white dark:bg-white dark:text-ink">发布</button>
-          </div>
-          <div className="mt-5 space-y-4">{comments.map(item=><div key={item.id} className="flex gap-3"><Avatar text={item.author.avatar||item.author.name[0]} small/><div className="rounded-2xl bg-black/[.035] px-4 py-3 dark:bg-white/[.05]"><p className="text-sm font-bold">{item.author.name}<span className="ml-2 text-xs font-normal muted">{new Date(item.createdAt).toLocaleString()}</span></p><p className="mt-1 text-sm muted">{item.content}</p></div></div>)}</div>
+          </div>:<Link href={`/sign-in?callbackUrl=${encodeURIComponent(`/post/${post.id}`)}`} className="mt-4 inline-flex rounded-full bg-ink px-5 py-3 text-sm font-bold text-white dark:bg-white dark:text-ink">登录后参与评论</Link>}
+          <div data-testid="comment-list" className="mt-5 space-y-4">{comments.map(item=><div key={item.id} className="flex gap-3"><Avatar text={item.author.avatar||item.author.name[0]} small/><div className="rounded-2xl bg-black/[.035] px-4 py-3 dark:bg-white/[.05]"><p className="text-sm font-bold">{item.author.name}<span className="ml-2 text-xs font-normal muted">{new Date(item.createdAt).toLocaleString()}</span></p><p className="mt-1 text-sm muted">{item.content}</p></div></div>)}</div>
         </section>
       </article>
     </div>
