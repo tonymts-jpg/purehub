@@ -1,4 +1,5 @@
 import http from "node:http";
+import { createInFlightGuard } from "./worker-in-flight.mjs";
 
 const port = Number(process.env.WORKER_HEALTH_PORT || 4001);
 const appEnv = process.env.APP_ENV || process.env.NODE_ENV || "development";
@@ -160,6 +161,8 @@ async function tick() {
   taskState.lastError = taskState.phase5.lastError ?? taskState.phase7.lastError;
 }
 
+const guardedTick = createInFlightGuard(tick);
+
 const server = http.createServer((request, response) => {
   if (request.url === "/health") {
     response.writeHead(200, { "content-type": "application/json" });
@@ -190,6 +193,6 @@ const server = http.createServer((request, response) => {
 
 server.listen(port, "0.0.0.0", () => {
   console.log(`PureHub worker health server listening on ${port}`);
-  setTimeout(() => void tick(), 5000);
-  setInterval(() => void tick(), 15000);
+  setTimeout(() => void guardedTick(), 5000);
+  setInterval(() => void guardedTick(), 15000);
 });

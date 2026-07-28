@@ -9,6 +9,40 @@ import { acceptsUploadMediaType, normalizeByteRange, safeMediaContentType } from
 
 const configured = () => Boolean(process.env.OBJECT_STORAGE_ENDPOINT && process.env.OBJECT_STORAGE_ACCESS_KEY && process.env.OBJECT_STORAGE_SECRET_KEY);
 const bucket = () => process.env.OBJECT_STORAGE_BUCKET ?? "purehub-media";
+const MEDIA_CLAIM_STALE_AFTER_MS = 15 * 60 * 1000;
+
+type MediaProcessingAsset = {
+  id: string;
+  storageKey: string | null;
+  kind: string;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+type MediaProcessingDatabase = {
+  mediaAsset: {
+    findMany(input: {
+      where: { status: string };
+      take: number;
+      orderBy: { createdAt: "asc" };
+    }): Promise<MediaProcessingAsset[]>;
+    updateMany(input: {
+      where: { id?: string; status?: string; updatedAt?: { lt: Date } };
+      data: Record<string, unknown>;
+    }): Promise<{ count: number }>;
+    count(input: { where: { id?: string; status?: string } }): Promise<number>;
+  };
+};
+
+type MediaProcessingOptions = {
+  database?: MediaProcessingDatabase;
+  storageConfigured?: boolean;
+  now?: () => Date;
+  getObject?: (key: string) => Promise<Buffer>;
+  putObject?: (input: { key: string; body: Buffer; contentType: string }) => Promise<void>;
+  deleteObject?: (key: string) => Promise<void>;
+  transformImage?: (input: Buffer) => Promise<Buffer>;
+};
 
 function client() {
   return new S3Client({
@@ -121,50 +155,91 @@ async function bodyToBuffer(body: AsyncIterable<Uint8Array> | undefined) {
   return Buffer.concat(chunks);
 }
 
-export async function processPendingMedia() {
-  if (!configured()) return { processed: 0, skipped: true };
-  const assets = await prisma.mediaAsset.findMany({ where: { status: "processing" }, take: 20, orderBy: { createdAt: "asc" } });
+export async function claimPendingMediaAsset(
+  assetId: string,
+  database: MediaProcessingDatabase = prisma as unknown as MediaProcessingDatabase
+) {
+  const claim = await database.mediaAsset.updateMany({
+    where: { id: assetId, status: "processing" },
+    data: { status: "processing_claimed" }
+  });
+  return claim.count === 1;
+}
+
+export async function processPendingMedia(options: MediaProcessingOptions = {}) {
+  const database = options.database ?? (prisma as unknown as MediaProcessingDatabase);
+  const storageConfigured = options.storageConfigured ?? configured();
+  if (!storageConfigured) return { processed: 0, skipped: true };
+  const now = options.now ?? (() => new Date());
+  const getObject = options.getObject ?? (async (key: string) => {
+    const object = await client().send(new GetObjectCommand({ Bucket: bucket(), Key: key }));
+    return bodyToBuffer(object.Body as AsyncIterable<Uint8Array> | undefined);
+  });
+  const putObject = options.putObject ?? (async (input: { key: string; body: Buffer; contentType: string }) => {
+    await client().send(new PutObjectCommand({
+      Bucket: bucket(),
+      Key: input.key,
+      Body: input.body,
+      ContentType: input.contentType
+    }));
+  });
+  const deleteObject = options.deleteObject ?? (async (key: string) => {
+    await client().send(new DeleteObjectCommand({ Bucket: bucket(), Key: key }));
+  });
+  const transformImage = options.transformImage ?? (async (input: Buffer) => {
+    const watermark = Buffer.from(`<svg width="600" height="100"><text x="20" y="65" font-size="42" fill="white" fill-opacity="0.55">PureHub</text></svg>`);
+    return sharp(input).rotate().composite([{ input: watermark, gravity: "southeast" }]).jpeg({ quality: 88 }).toBuffer();
+  });
+
+  await database.mediaAsset.updateMany({
+    where: {
+      status: "processing_claimed",
+      updatedAt: { lt: new Date(now().getTime() - MEDIA_CLAIM_STALE_AFTER_MS) }
+    },
+    data: { status: "processing" }
+  });
+  const assets = await database.mediaAsset.findMany({
+    where: { status: "processing" },
+    take: 20,
+    orderBy: { createdAt: "asc" }
+  });
   let processed = 0;
   for (const asset of assets) {
+    if (!(await claimPendingMediaAsset(asset.id, database))) continue;
     try {
       if (!asset.storageKey) throw new Error("Storage key is missing.");
       let derivativeKey = asset.storageKey;
       if (asset.kind === "image") {
-        const object = await client().send(new GetObjectCommand({ Bucket: bucket(), Key: asset.storageKey }));
-        const input = await bodyToBuffer(object.Body as AsyncIterable<Uint8Array> | undefined);
-        const watermark = Buffer.from(`<svg width="600" height="100"><text x="20" y="65" font-size="42" fill="white" fill-opacity="0.55">PureHub</text></svg>`);
-        const output = await sharp(input).rotate().composite([{ input: watermark, gravity: "southeast" }]).jpeg({ quality: 88 }).toBuffer();
-        const stillProcessing = await prisma.mediaAsset.count({ where: { id: asset.id, status: "processing" } });
-        if (!stillProcessing) continue;
+        const input = await getObject(asset.storageKey);
+        const output = await transformImage(input);
+        const stillClaimed = await database.mediaAsset.count({
+          where: { id: asset.id, status: "processing_claimed" }
+        });
+        if (!stillClaimed) continue;
         derivativeKey = `derivatives/${asset.id}/watermarked.jpg`;
         const committed = await writeDerivativeWithConditionalCommit({
           write: async () => {
-            await client().send(new PutObjectCommand({
-              Bucket: bucket(),
-              Key: derivativeKey,
-              Body: output,
-              ContentType: "image/jpeg"
-            }));
+            await putObject({ key: derivativeKey, body: output, contentType: "image/jpeg" });
           },
-          commit: async () => (await prisma.mediaAsset.updateMany({
-            where: { id: asset.id, status: "processing" },
+          commit: async () => (await database.mediaAsset.updateMany({
+            where: { id: asset.id, status: "processing_claimed" },
             data: { derivativeKey, status: "ready", processingError: null, src: `/api/media/${asset.id}/content` }
           })).count === 1,
           remove: async () => {
-            await client().send(new DeleteObjectCommand({ Bucket: bucket(), Key: derivativeKey }));
+            await deleteObject(derivativeKey);
           }
         });
         processed += committed ? 1 : 0;
         continue;
       }
-      const completed = await prisma.mediaAsset.updateMany({
-        where: { id: asset.id, status: "processing" },
+      const completed = await database.mediaAsset.updateMany({
+        where: { id: asset.id, status: "processing_claimed" },
         data: { derivativeKey, status: "ready", processingError: null, src: `/api/media/${asset.id}/content` }
       });
       processed += completed.count;
     } catch (error) {
-      await prisma.mediaAsset.updateMany({
-        where: { id: asset.id, status: "processing" },
+      await database.mediaAsset.updateMany({
+        where: { id: asset.id, status: "processing_claimed" },
         data: { status: "failed", processingError: error instanceof Error ? error.message : "Media processing failed." }
       });
     }

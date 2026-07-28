@@ -116,6 +116,58 @@ test("lifecycle cleanup derives an image derivative key before the worker record
   ]);
 });
 
+test("lifecycle cleanup accepts exact processing and claimed media assets", async ({ request }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name === "mobile", "The shared cleanup mutation runs once.");
+  test.skip(!(await hasDatabase(request)), "Claimed media cleanup integration requires PostgreSQL.");
+
+  const nonce = `${Date.now().toString(36)}${Math.floor(Math.random() * 1_000_000).toString(36)}`;
+  const userId = `claim-cleanup-user-${nonce}`;
+  const email = `${userId}@e2e.purehub.local`;
+  const assetIds = [
+    `claim-cleanup-processing-${nonce}`,
+    `claim-cleanup-claimed-${nonce}`
+  ];
+  const scope = createPhase7MediaLifecycleCleanupScope();
+  scope.identities.push({ id: userId, email });
+  scope.identityEmails.add(email);
+  assetIds.forEach((id) => {
+    scope.assetIds.add(id);
+    scope.assetKinds.set(id, "video");
+  });
+
+  try {
+    await prisma.user.create({
+      data: {
+        id: userId,
+        name: "Claim cleanup user",
+        handle: `claim-cleanup-${nonce}`.slice(0, 30),
+        avatar: "avatar-1",
+        email
+      }
+    });
+    await prisma.mediaAsset.createMany({
+      data: assetIds.map((id, index) => ({
+        id,
+        uploaderUserId: userId,
+        alt: "Claim cleanup media",
+        width: 1,
+        height: 1,
+        order: index,
+        kind: "video",
+        mimeType: "video/mp4",
+        sizeBytes: 1,
+        status: index === 0 ? "processing" : "processing_claimed",
+        visibility: "public"
+      }))
+    });
+
+    await cleanupPhase7MediaLifecycle(scope);
+    await assertPhase7MediaLifecycleAbsent(scope);
+  } finally {
+    await cleanupPhase7MediaLifecycle(scope);
+  }
+});
+
 test("worker compensates a derivative PUT when conditional status ownership is lost", async () => {
   const events: string[] = [];
   let objectExists = false;
