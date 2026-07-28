@@ -125,6 +125,92 @@ test("homepage post cards open the shared top-level image viewer", async ({ page
   await expect(viewer.getByRole("button", { name: "全屏预览" })).toBeVisible();
 });
 
+test("post detail uses the authoritative repository media payload", async ({ page }) => {
+  await page.route("**/api/posts/post-1", async (route) => {
+    await route.fulfill({ json: {
+      post: {
+        id: "post-1",
+        creatorId: "c1",
+        title: "Repository video post",
+        excerpt: "The repository response supplies the playable media.",
+        content: "Repository content.",
+        cover: "cover-1",
+        category: "Cosplay",
+        tags: ["Cosplay"],
+        visibility: "free",
+        likes: 0,
+        comments: [],
+        createdAt: "刚刚",
+        hasAccess: true,
+        media: [{
+          id: "repository-video-1",
+          src: "/generated/posts/post-1/01.webp",
+          alt: "Repository video media",
+          width: 720,
+          height: 900,
+          order: 1,
+          kind: "video"
+        }]
+      }
+    } });
+  });
+
+  await page.goto("/post/post-1");
+  await expect(page.getByRole("heading", { name: "Repository video post" })).toBeVisible();
+  await expect(page.getByTestId("post-hero-media").getByLabel("Repository video media")).toBeVisible();
+  await openPostHeroViewer(page);
+  await expect(page.getByRole("dialog", { name: "媒体预览" }).getByLabel("Repository video media")).toHaveJSProperty("controls", true);
+});
+
+test("media viewer traps Tab focus", async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name === "mobile", "Mobile emulation does not advance focus with a virtual Tab key; desktop verifies focus containment.");
+  await page.goto("/post/post-1");
+  const viewer = await openPostHeroViewer(page);
+  const close = viewer.getByRole("button", { name: "关闭媒体预览" });
+  const fullscreen = viewer.getByRole("button", { name: "全屏预览" });
+  const previous = viewer.getByRole("button", { name: "上一张" });
+  const next = viewer.getByRole("button", { name: "下一张" });
+
+  await expect(close).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(fullscreen).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(previous).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(next).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(close).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(next).toBeFocused();
+});
+
+test("locked purchase and membership media open unlock UI without exposing the viewer", async ({ page }) => {
+  await Promise.all([
+    page.waitForResponse((response) => new URL(response.url()).pathname === "/api/posts/post-4"),
+    page.goto("/post/post-4")
+  ]);
+  const purchaseGallery = page.getByTestId("post-detail-gallery");
+  await purchaseGallery.getByRole("button", { name: "查看图片 2" }).click();
+  await expect(page.getByText("2 / 2", { exact: true })).toBeVisible();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByText("1 / 2", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "关闭媒体预览" }).click();
+  await purchaseGallery.getByRole("button", { name: "解锁图片 3" }).click();
+  await expect(page.getByRole("dialog", { name: "解锁作品" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "媒体预览" })).toHaveCount(0);
+
+  await Promise.all([
+    page.waitForResponse((response) => new URL(response.url()).pathname === "/api/posts/post-3"),
+    page.goto("/post/post-3")
+  ]);
+  const membershipGallery = page.getByTestId("post-detail-gallery");
+  await membershipGallery.getByRole("button", { name: "解锁图片 3" }).click();
+  const unlockDialog = page.getByRole("dialog", { name: "解锁作品" });
+  await expect(unlockDialog).toBeVisible();
+  await expect(unlockDialog.getByRole("link", { name: "登录后查看会员方案" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "媒体预览" })).toHaveCount(0);
+});
+
 async function seedVideoFixture(page: Page) {
   await page.addInitScript(() => {
     localStorage.setItem("purehub-demo-state", JSON.stringify({

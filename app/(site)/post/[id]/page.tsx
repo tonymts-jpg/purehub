@@ -10,13 +10,16 @@ import { Avatar } from "@/components/app-shell";
 import { MediaGallery } from "@/components/media-gallery";
 import { UnlockDialog } from "@/components/unlock-dialog";
 import { authClient } from "@/lib/auth-client";
+import type { Post } from "@/lib/types";
 
 type ApiComment={id:string;content:string;createdAt:string;author:{name:string;avatar:string}};
 
 export default function PostPage({params}:{params:Promise<{id:string}>}) {
   const {id}=use(params);
   const store=useDemoStore();
-  const post=getAllPosts(store.customPosts).find(item=>item.id===id);
+  const fallbackPost=getAllPosts(store.customPosts).find(item=>item.id===id);
+  const [serverPost,setServerPost]=useState<Post|null>(null);
+  const post=serverPost??fallbackPost;
   const [comment,setComment]=useState("");
   const [unlockOpen,setUnlockOpen]=useState(false);
   const [activeMediaIndex,setActiveMediaIndex]=useState<number|null>(null);
@@ -25,15 +28,23 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
   const {data:session}=authClient.useSession();
   const demoMode=process.env.NEXT_PUBLIC_DEMO_MODE==="true";
   useEffect(()=>{
-    fetch(`/api/posts/${id}`).then(response=>response.ok?response.json():null).then(body=>body?.post&&setServerAccess(Boolean(body.post.hasAccess))).catch(()=>undefined);
+    let active=true;
+    setServerPost(null);
+    setServerAccess(false);
+    fetch(`/api/posts/${id}`).then(response=>response.ok?response.json():null).then(body=>{
+      if(!active||body?.post?.id!==id)return;
+      setServerPost(body.post);
+      setServerAccess(Boolean(body.post.hasAccess));
+    }).catch(()=>undefined);
     fetch(`/api/posts/${id}/comments`).then(response=>response.ok?response.json():null).then(body=>body?.comments&&setComments(body.comments)).catch(()=>undefined);
+    return()=>{active=false};
   },[id]);
 
   if(!post)return <div className="p-20 text-center">作品不存在</div>;
 
-  const creator=creators.find(item=>item.id===post.creatorId)!;
+  const creator=creators.find(item=>item.id===post.creatorId)??{id:post.creatorId,name:"创作者",handle:`creator-${post.creatorId}`,avatar:"创",category:post.category};
   const subscribed=store.subscriptions.some(item=>item.creatorId===creator.id);
-  const unlocked=post.visibility==="free"||serverAccess||(demoMode&&(subscribed||store.unlocked.includes(post.id)));
+  const unlocked=post.visibility==="free"||post.hasAccess===true||serverAccess||(demoMode&&(subscribed||store.unlocked.includes(post.id)));
   const handleLocked=()=>setUnlockOpen(true);
   const confirmPurchase=async()=>{
     if(!session?.user){window.location.assign(`/sign-in?callbackUrl=${encodeURIComponent(window.location.pathname)}`);return}
@@ -68,7 +79,7 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
         {post.media[0].kind==="video"?<video src={post.media[0].src} aria-label={post.media[0].alt} preload="metadata" className="h-full w-full object-cover"/>:<Image src={post.media[0].src} alt={post.media[0].alt} fill priority sizes="(max-width: 1024px) 100vw, 960px" className="object-cover"/>}
         <span className="absolute inset-0 bg-gradient-to-t from-black/55 via-transparent to-black/10"/>
       </button>
-      <div className="absolute bottom-5 left-5 rounded-full bg-black/45 px-4 py-2 text-xs font-bold text-white backdrop-blur">12 张原创虚拟人物作品</div>
+      <div className="absolute bottom-5 left-5 rounded-full bg-black/45 px-4 py-2 text-xs font-bold text-white backdrop-blur">{post.media.length} 张原创虚拟人物作品</div>
     </div>:<div className={`mesh relative aspect-[16/9] overflow-hidden rounded-[36px] ${post.cover}`}><div className="absolute inset-0 bg-[radial-gradient(circle_at_65%_35%,rgba(255,255,255,.4),transparent_18%),linear-gradient(135deg,transparent,rgba(0,0,0,.28))]"/></div>}
 
     <div className="mx-auto -mt-12 max-w-3xl">
@@ -91,7 +102,7 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
         </div>
 
         {post.media.length&&<section className="mb-8">
-          <div className="mb-4 flex items-end justify-between gap-4"><div><h2 className="text-xl font-black">作品图集</h2><p className="mt-1 text-xs muted">{unlocked?"完整 12 张图片已解锁":"前 2 张免费预览，解锁后查看完整图集"}</p></div>{!unlocked&&<span className="flex items-center gap-1 rounded-full bg-coral/10 px-3 py-1.5 text-xs font-bold text-coral"><LockKeyhole size={13}/>尚未解锁</span>}</div>
+          <div className="mb-4 flex items-end justify-between gap-4"><div><h2 className="text-xl font-black">作品图集</h2><p className="mt-1 text-xs muted">{unlocked?`完整 ${post.media.length} 张媒体已解锁`:"前 2 张免费预览，解锁后查看完整图集"}</p></div>{!unlocked&&<span className="flex items-center gap-1 rounded-full bg-coral/10 px-3 py-1.5 text-xs font-bold text-coral"><LockKeyhole size={13}/>尚未解锁</span>}</div>
           <MediaGallery media={post.media} unlocked={unlocked} onLockedClick={handleLocked} activeIndex={activeMediaIndex} onActiveIndexChange={setActiveMediaIndex}/>
         </section>}
 

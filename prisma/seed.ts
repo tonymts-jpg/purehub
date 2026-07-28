@@ -350,7 +350,7 @@ async function main() {
             width: asset.width,
             height: asset.height,
             order: asset.order,
-            kind: "image"
+            kind: asset.kind === "video" ? "video" : "image"
           }))
         }
       }
@@ -558,4 +558,3 @@ main()
     await prisma.$disconnect();
     process.exit(1);
   });
-

@@ -13,6 +13,7 @@ type MediaViewerProps = {
 };
 
 export function MediaViewer({ media, activeIndex, onActiveIndexChange }: MediaViewerProps) {
+  const dialogRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const viewerRef = useRef<HTMLDivElement>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -46,6 +47,21 @@ export function MediaViewer({ media, activeIndex, onActiveIndexChange }: MediaVi
     onActiveIndexChange((activeIndex + direction + media.length) % media.length);
   };
 
+  const trapFocus = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>("a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])") ?? []);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
   const toggleFullscreen = async () => {
     const viewer = viewerRef.current;
     if (!viewer) return;
@@ -61,7 +77,7 @@ export function MediaViewer({ media, activeIndex, onActiveIndexChange }: MediaVi
   };
 
   return <OverlayPortal open={asset !== null} onClose={() => onActiveIndexChange(null)} initialFocusRef={closeButtonRef}>
-    {asset && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/92 p-3 sm:p-8" role="dialog" aria-modal="true" aria-label="媒体预览">
+    {asset && <div ref={dialogRef} onKeyDown={trapFocus} className="fixed inset-0 z-[90] flex items-center justify-center bg-black/92 p-3 sm:p-8" role="dialog" aria-modal="true" aria-label="媒体预览">
       <button ref={closeButtonRef} type="button" onClick={() => onActiveIndexChange(null)} aria-label="关闭媒体预览" className="absolute right-4 top-4 z-10 rounded-full bg-white/10 p-3 text-white backdrop-blur"><X /></button>
       <button type="button" onClick={toggleFullscreen} aria-label="全屏预览" className="absolute right-16 top-4 z-10 rounded-full bg-white/10 p-3 text-white backdrop-blur"><Expand /></button>
       {media.length > 1 && <button type="button" onClick={() => move(-1)} aria-label="上一张" className="absolute left-3 z-10 rounded-full bg-white/10 p-3 text-white backdrop-blur sm:left-6"><ChevronLeft /></button>}
