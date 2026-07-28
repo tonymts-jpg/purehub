@@ -90,6 +90,10 @@ import {
   signInFan,
   signInSupport
 } from "./auth-helpers";
+import {
+  cleanupPhase7MediaLifecycle,
+  createPhase7MediaLifecycleCleanupScope
+} from "./phase7-media-lifecycle-cleanup";
 
 async function requirePhase7(request: APIRequestContext, testInfo: TestInfo) {
   test.skip(testInfo.project.name === "mobile", "Phase 7 channel mutations run once against the shared staging database.");
@@ -3345,6 +3349,8 @@ test("phase 7 uploaded free image and video assets publish into safe search prev
   const query = `phase7uploadpreview${nonce}`;
   const postIds: string[] = [];
   const assetIds: string[] = [];
+  const cleanupScope = createPhase7MediaLifecycleCleanupScope();
+  let databaseReady = false;
   const imageBytes = await sharp({
     create: { width: 720, height: 900, channels: 3, background: { r: 91, g: 65, b: 170 } }
   }).png().toBuffer();
@@ -3376,6 +3382,7 @@ test("phase 7 uploaded free image and video assets publish into safe search prev
       headers: Record<string, string>;
     };
     assetIds.push(body.assetId);
+    cleanupScope.assetIds.add(body.assetId);
     expect(body.uploadUrl).toBe(`/api/uploads/${body.assetId}/content`);
     const stored = await creator.put(body.uploadUrl, {
       headers: {
@@ -3407,7 +3414,33 @@ test("phase 7 uploaded free image and video assets publish into safe search prev
 
   try {
     await requirePhase7(anonymous, testInfo);
-    await signInCreator(creator);
+    databaseReady = true;
+    const creatorIdentity = await registerFan(creator, "phase7-media-creator");
+    const creatorUser = await prisma.user.findUniqueOrThrow({
+      where: { email: creatorIdentity.email },
+      select: { id: true, email: true }
+    });
+    cleanupScope.identities.push(creatorUser);
+    await prisma.user.update({
+      where: { id: creatorUser.id },
+      data: { role: "creator", creatorStatus: "approved" }
+    });
+    await prisma.creatorProfile.create({
+      data: {
+        id: `phase7-media-profile-${nonce}`,
+        userId: creatorUser.id,
+        bio: "Isolated Phase 7 media lifecycle creator.",
+        category: "Cosplay",
+        cover: "cover-1",
+        levelId: "level-1"
+      }
+    });
+    const fanIdentity = await registerFan(fan, "phase7-media-buyer");
+    const fanUser = await prisma.user.findUniqueOrThrow({
+      where: { email: fanIdentity.email },
+      select: { id: true, email: true }
+    });
+    cleanupScope.identities.push(fanUser);
 
     const freeMedia = [
       { kind: "image" as const, mimeType: "image/png" as const, bytes: imageBytes, visibility: "public" as const, label: "free-image" },
@@ -3431,6 +3464,7 @@ test("phase 7 uploaded free image and video assets publish into safe search prev
       expect(created.ok(), await created.text()).toBeTruthy();
       const postId = (await created.json()).post.id as string;
       postIds.push(postId);
+      cleanupScope.postIds.add(postId);
       await synchronizeSearchEntity("post", postId);
     }
     const paidAssetId = await uploadActualMedia({
@@ -3457,6 +3491,7 @@ test("phase 7 uploaded free image and video assets publish into safe search prev
     expect(paidPostResponse.ok(), await paidPostResponse.text()).toBeTruthy();
     const paidPostId = (await paidPostResponse.json()).post.id as string;
     postIds.push(paidPostId);
+    cleanupScope.postIds.add(paidPostId);
 
     const publishedAssets = await prisma.mediaAsset.findMany({
       where: { id: { in: assetIds } },
@@ -3523,13 +3558,16 @@ test("phase 7 uploaded free image and video assets publish into safe search prev
       where: { provider: "card" },
       data: { enabled: true, mode: "test", statusNote: "phase7_real_media_entitlement", config: { adapter: "manual_confirm" } }
     });
-    await signInFan(fan);
+    const ledgerAccountsBefore = await prisma.ledgerAccount.findMany({ select: { id: true, balance: true } });
+    const ledgerAccountIdsBefore = new Set(ledgerAccountsBefore.map(({ id }) => id));
+    const ledgerAccountBalancesBefore = new Map(ledgerAccountsBefore.map(({ id, balance }) => [id, balance]));
     const orderResponse = await fan.post("/api/payments/orders", {
       headers: authHeaders,
       data: { kind: "post_unlock", itemId: paidPostId }
     });
     expect(orderResponse.ok(), await orderResponse.text()).toBeTruthy();
     const order = (await orderResponse.json()).order;
+    cleanupScope.orderIds.add(order.id);
     const intentResponse = await fan.post("/api/payments/intents", {
       headers: authHeaders,
       data: { orderId: order.id, provider: "card" }
@@ -3541,6 +3579,20 @@ test("phase 7 uploaded free image and video assets publish into safe search prev
       data: { source: "phase7_real_media_entitlement" }
     });
     expect(confirmed.ok(), await confirmed.text()).toBeTruthy();
+    const paymentLedger = await prisma.ledgerTransaction.findFirstOrThrow({
+      where: { referenceType: "order", referenceId: order.id },
+      include: { entries: true }
+    });
+    for (const entry of paymentLedger.entries) {
+      if (ledgerAccountIdsBefore.has(entry.accountId)) {
+        cleanupScope.ledgerAccountBalancesBefore.set(
+          entry.accountId,
+          ledgerAccountBalancesBefore.get(entry.accountId)!
+        );
+      } else {
+        cleanupScope.ledgerAccountIdsToDelete.add(entry.accountId);
+      }
+    }
     const entitledRange = await fan.get(`/api/media/${paidAssetId}/content`, {
       headers: { range: "bytes=0-3" }
     });
@@ -3548,26 +3600,46 @@ test("phase 7 uploaded free image and video assets publish into safe search prev
     expect(entitledRange.status(), entitledRangeBody.toString()).toBe(206);
     expect(entitledRangeBody.toString()).toBe("paid");
   } finally {
+    let cleanupError: unknown;
     if (priorCard) {
-      await prisma.paymentChannelConfig.update({
-        where: { provider: "card" },
-        data: {
-          enabled: priorCard.enabled,
-          mode: priorCard.mode,
-          currencies: priorCard.currencies as Prisma.InputJsonValue,
-          regions: priorCard.regions as Prisma.InputJsonValue,
-          feeNote: priorCard.feeNote,
-          statusNote: priorCard.statusNote,
-          config: priorCard.config as Prisma.InputJsonValue
-        }
-      }).catch(() => undefined);
+      try {
+        await prisma.paymentChannelConfig.update({
+          where: { provider: "card" },
+          data: {
+            enabled: priorCard.enabled,
+            mode: priorCard.mode,
+            currencies: priorCard.currencies as Prisma.InputJsonValue,
+            regions: priorCard.regions as Prisma.InputJsonValue,
+            feeNote: priorCard.feeNote,
+            statusNote: priorCard.statusNote,
+            config: priorCard.config as Prisma.InputJsonValue
+          }
+        });
+      } catch (error) {
+        cleanupError = error;
+      }
     }
-    await prisma.searchDocument.deleteMany({ where: { entityId: { in: postIds } } }).catch(() => undefined);
-    await prisma.post.deleteMany({ where: { id: { in: postIds } } }).catch(() => undefined);
-    await prisma.mediaAsset.deleteMany({ where: { id: { in: assetIds } } }).catch(() => undefined);
-    await creator.dispose();
-    await anonymous.dispose();
-    await fan.dispose();
+    try {
+      if (databaseReady) {
+        let lifecycleCleanupError: unknown;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            await cleanupPhase7MediaLifecycle(cleanupScope);
+            lifecycleCleanupError = undefined;
+          } catch (error) {
+            lifecycleCleanupError = error;
+          }
+        }
+        if (lifecycleCleanupError) throw lifecycleCleanupError;
+      }
+    } catch (error) {
+      cleanupError ??= error;
+    } finally {
+      await creator.dispose();
+      await anonymous.dispose();
+      await fan.dispose();
+    }
+    if (cleanupError) throw cleanupError;
   }
 });
 

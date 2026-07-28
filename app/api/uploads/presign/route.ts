@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { createUpload } from "@/lib/storage/media";
-import { acceptsUploadMediaType } from "@/lib/storage/media-policy";
+import { acceptsUploadMediaType, uploadSizeBytesSchema } from "@/lib/storage/media-policy";
 import { enforceSameOrigin, requireCreator } from "@/lib/session";
 
 export const runtime = "nodejs";
 const schema = z.object({
   fileName: z.string().min(1),
-  mimeType: z.string(), sizeBytes: z.number().int().positive().max(500_000_000),
+  mimeType: z.string(), sizeBytes: uploadSizeBytesSchema,
   kind: z.enum(["image", "video"]), visibility: z.enum(["public", "members", "purchase"])
 }).superRefine((input, context) => {
   if (!acceptsUploadMediaType(input)) {

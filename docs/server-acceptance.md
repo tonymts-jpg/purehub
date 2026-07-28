@@ -184,15 +184,30 @@ export WORKER_ACCESS_TOKEN="$(grep '^WORKER_ACCESS_TOKEN=' .env.staging | tail -
 runtime_database_url="$(docker compose --env-file .env.staging exec -T web printenv DATABASE_URL)"
 postgres_container_id="$(docker compose --env-file .env.staging ps -q postgres)"
 postgres_container_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${postgres_container_id}")"
+runtime_object_storage_endpoint="$(docker compose --env-file .env.staging exec -T web printenv OBJECT_STORAGE_ENDPOINT)"
+minio_container_id="$(docker compose --env-file .env.staging ps -q minio)"
+minio_container_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${minio_container_id}")"
 test -n "${postgres_container_ip}"
+test -n "${minio_container_ip}"
 export DATABASE_URL="${runtime_database_url/@postgres:/@${postgres_container_ip}:}"
+export OBJECT_STORAGE_ENDPOINT="http://${minio_container_ip}:${runtime_object_storage_endpoint##*:}"
+export OBJECT_STORAGE_ACCESS_KEY="$(docker compose --env-file .env.staging exec -T web printenv OBJECT_STORAGE_ACCESS_KEY)"
+export OBJECT_STORAGE_SECRET_KEY="$(docker compose --env-file .env.staging exec -T web printenv OBJECT_STORAGE_SECRET_KEY)"
+export OBJECT_STORAGE_BUCKET="$(docker compose --env-file .env.staging exec -T web printenv OBJECT_STORAGE_BUCKET)"
+export OBJECT_STORAGE_REGION="$(docker compose --env-file .env.staging exec -T web printenv OBJECT_STORAGE_REGION)"
+export OBJECT_STORAGE_FORCE_PATH_STYLE="$(docker compose --env-file .env.staging exec -T web printenv OBJECT_STORAGE_FORCE_PATH_STYLE)"
 npm run test:e2e:deployed
 unset ADMIN_ACCESS_TOKEN DEMO_ACCOUNT_PASSWORD WORKER_ACCESS_TOKEN DATABASE_URL runtime_database_url
+unset OBJECT_STORAGE_ENDPOINT OBJECT_STORAGE_ACCESS_KEY OBJECT_STORAGE_SECRET_KEY
+unset OBJECT_STORAGE_BUCKET OBJECT_STORAGE_REGION OBJECT_STORAGE_FORCE_PATH_STYLE runtime_object_storage_endpoint
 ```
 
 `PLAYWRIGHT_BASE_URL` tells Playwright to use the already deployed Docker service instead of starting a local Next.js dev server.
 The host-side `DATABASE_URL` uses PostgreSQL's private Docker bridge address so
 database-gated tests can run without publishing the database port.
+The object-storage variables use MinIO's private Docker bridge address so the
+acceptance cleanup can remove and verify its exact original and derivative
+object keys without publishing MinIO or persisting credentials.
 The deployed Playwright configuration uses one worker. Every Phase 7
 database-gated lifecycle, ACL, membership, curation/concurrency,
 search/reindex, UI, cleanup, and entitlement-isolation test must execute with

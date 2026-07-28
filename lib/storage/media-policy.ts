@@ -1,4 +1,9 @@
+import { z } from "zod";
+
 export type UploadMediaKind = "image" | "video";
+
+export const UPLOAD_MAX_SIZE_BYTES = 500_000_000;
+export const uploadSizeBytesSchema = z.number().int().positive().max(UPLOAD_MAX_SIZE_BYTES);
 
 export const SAFE_IMAGE_MIME_TYPES = [
   "image/jpeg",
