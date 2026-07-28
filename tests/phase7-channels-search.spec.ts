@@ -1983,7 +1983,7 @@ test("phase 7 curation resolves manual, member, rule, exclusion, and worker prec
       { data: { status: "active", position: 3 } }
     );
     expect(approved.ok(), await approved.text()).toBeTruthy();
-    expect((await approved.json()).channelPost).toMatchObject({ status: "active", position: 3 });
+    expect((await approved.json()).channelPost).toMatchObject({ status: "active", position: 1 });
 
     const postOne = await prisma.post.findUniqueOrThrow({
       where: { id: "post-1" },

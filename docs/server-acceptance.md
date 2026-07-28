@@ -180,13 +180,14 @@ npx playwright install --with-deps chromium
 export PLAYWRIGHT_BASE_URL=http://127.0.0.1
 export ADMIN_ACCESS_TOKEN="$(grep '^ADMIN_ACCESS_TOKEN=' .env.staging | tail -1 | cut -d= -f2-)"
 export DEMO_ACCOUNT_PASSWORD="$(grep '^DEMO_ACCOUNT_PASSWORD=' .env.staging | tail -1 | cut -d= -f2-)"
+export WORKER_ACCESS_TOKEN="$(grep '^WORKER_ACCESS_TOKEN=' .env.staging | tail -1 | cut -d= -f2-)"
 runtime_database_url="$(docker compose --env-file .env.staging exec -T web printenv DATABASE_URL)"
 postgres_container_id="$(docker compose --env-file .env.staging ps -q postgres)"
 postgres_container_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${postgres_container_id}")"
 test -n "${postgres_container_ip}"
 export DATABASE_URL="${runtime_database_url/@postgres:/@${postgres_container_ip}:}"
 npm run test:e2e:deployed
-unset ADMIN_ACCESS_TOKEN DEMO_ACCOUNT_PASSWORD DATABASE_URL runtime_database_url
+unset ADMIN_ACCESS_TOKEN DEMO_ACCOUNT_PASSWORD WORKER_ACCESS_TOKEN DATABASE_URL runtime_database_url
 ```
 
 `PLAYWRIGHT_BASE_URL` tells Playwright to use the already deployed Docker service instead of starting a local Next.js dev server.
