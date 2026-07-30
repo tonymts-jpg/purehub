@@ -155,8 +155,7 @@ async function runSubsystem(name, operation) {
 async function tick() {
   const [phase5Succeeded] = await Promise.all([
     runSubsystem("phase5", () => runPhase5("all")),
-    runPhase7Subsystem(),
-    runSubsystem("accountMaintenance", runAccountMaintenance)
+    runPhase7Subsystem()
   ]);
   const lastReconciliation = taskState.lastReconciliationAt ? new Date(taskState.lastReconciliationAt).getTime() : 0;
   if (Date.now() - lastReconciliation >= 24 * 60 * 60 * 1000) {
@@ -176,6 +175,9 @@ async function tick() {
 }
 
 const guardedTick = createInFlightGuard(tick);
+const guardedAccountMaintenance = createInFlightGuard(
+  () => runSubsystem("accountMaintenance", runAccountMaintenance)
+);
 
 const server = http.createServer((request, response) => {
   if (request.url === "/health") {
@@ -207,6 +209,12 @@ const server = http.createServer((request, response) => {
 
 server.listen(port, "0.0.0.0", () => {
   console.log(`PureHub worker health server listening on ${port}`);
-  setTimeout(() => void guardedTick(), 5000);
-  setInterval(() => void guardedTick(), 15000);
+  setTimeout(() => {
+    void guardedTick();
+    void guardedAccountMaintenance();
+  }, 5000);
+  setInterval(() => {
+    void guardedTick();
+    void guardedAccountMaintenance();
+  }, 15000);
 });

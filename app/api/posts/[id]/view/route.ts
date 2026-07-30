@@ -1,5 +1,5 @@
 import { accountRouteError, requireEmptyAccountMutation, requireEmptyAccountQuery } from "@/lib/account/http";
-import { recordPostView } from "@/lib/account/repository";
+import { assertNoAccountIdentityOverrideHeaders, recordPostView } from "@/lib/account/repository";
 import { enforceSameOrigin, requireUser } from "@/lib/session";
 
 export const runtime = "nodejs";
@@ -10,6 +10,11 @@ export async function POST(
 ) {
   const originError = enforceSameOrigin(request);
   if (originError) return originError;
+  try {
+    assertNoAccountIdentityOverrideHeaders(request);
+  } catch (error) {
+    return accountRouteError(error);
+  }
   const session = await requireUser(request);
   if (!session.ok) return session.response;
 

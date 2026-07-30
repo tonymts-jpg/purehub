@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useEffect, useState } from "react";
+import { use, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { BadgeCheck, Bookmark, Heart, LockKeyhole, MessageCircle, ShoppingBag } from "lucide-react";
@@ -27,6 +27,8 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
   const [serverAccess,setServerAccess]=useState(false);
   const [comments,setComments]=useState<ApiComment[]>([]);
   const {data:session}=authClient.useSession();
+  const sessionUserId=session?.user?.id;
+  const recordedViewKey=useRef<string|null>(null);
   const demoMode=process.env.NEXT_PUBLIC_DEMO_MODE==="true";
   const callbackUrl=typeof window === "undefined" ? `/post/${id}` : `${window.location.pathname}${window.location.search}`;
   const purchase=usePostPurchase({
@@ -54,9 +56,12 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
     return()=>{active=false};
   },[id]);
   useEffect(() => {
-    if (!session?.user || !post?.id) return;
+    if (!sessionUserId || !post?.id) return;
+    const viewKey=`${sessionUserId}:${post.id}`;
+    if(recordedViewKey.current===viewKey)return;
+    recordedViewKey.current=viewKey;
     void fetch(`/api/posts/${post.id}/view`, { method: "POST" }).catch(() => undefined);
-  }, [post?.id, session?.user]);
+  }, [post?.id, sessionUserId]);
 
   if(!post)return <div className="p-20 text-center">作品不存在</div>;
 

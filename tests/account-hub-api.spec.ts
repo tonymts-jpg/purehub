@@ -6,6 +6,7 @@ import {
   type TestInfo
 } from "@playwright/test";
 import {
+  assertNoAccountIdentityOverrideHeaders,
   deleteExpiredPostViews,
   listPostHistory,
   recordPostView
@@ -244,6 +245,32 @@ test("view history requires authentication", async () => {
   }
 });
 
+test("view history rejects known identity and role override headers", () => {
+  for (const header of ["x-user-id", "x-user-role", "x-admin-role"]) {
+    expect(() => assertNoAccountIdentityOverrideHeaders(new Request(
+      "http://localhost/api/me/history",
+      { headers: { [header]: "attacker-controlled" } }
+    ))).toThrow(`This request does not accept the ${header} header.`);
+  }
+});
+
+test("view history rejects identity headers before authentication lookup", async () => {
+  const anonymous = await playwrightRequest.newContext({
+    baseURL: process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3001"
+  });
+
+  try {
+    expect((await anonymous.post("/api/posts/post-1/view", {
+      headers: { "x-user-id": "c1" }
+    })).status()).toBe(400);
+    expect((await anonymous.get("/api/me/history", {
+      headers: { "x-admin-role": "super_admin" }
+    })).status()).toBe(400);
+  } finally {
+    await anonymous.dispose();
+  }
+});
+
 test("view history preserves the first timestamp and advances the last timestamp", async ({ request }, testInfo) => {
   await requireAccountDatabase(request, testInfo);
   const fan = await registerFan(request, "account-view-upsert");
@@ -334,9 +361,17 @@ test("view history routes use only the session identity and reject missing posts
       where: { userId: { in: [fanId, "c1"] }, postId: "post-1" }
     })).toBe(0);
 
-    const recorded = await request.post("/api/posts/post-1/view", {
-      headers: { "x-user-id": "c1" }
-    });
+    for (const header of ["x-user-id", "x-user-role", "x-admin-role"]) {
+      const rejected = await request.post("/api/posts/post-1/view", {
+        headers: { [header]: "c1" }
+      });
+      expect(rejected.status(), await rejected.text()).toBe(400);
+    }
+    expect(await prisma.postViewHistory.count({
+      where: { userId: { in: [fanId, "c1"] }, postId: "post-1" }
+    })).toBe(0);
+
+    const recorded = await request.post("/api/posts/post-1/view");
     expect(recorded.status(), await recorded.text()).toBe(204);
     expect(await prisma.postViewHistory.findUnique({
       where: { userId_postId: { userId: fanId, postId: "post-1" } }
@@ -346,9 +381,13 @@ test("view history routes use only the session identity and reject missing posts
     })).toBeNull();
 
     expect((await request.get("/api/me/history?userId=c1")).status()).toBe(400);
-    const history = await request.get("/api/me/history", {
-      headers: { "x-user-id": "c1" }
-    });
+    for (const header of ["x-user-id", "x-user-role", "x-admin-role"]) {
+      expect((await request.get("/api/me/history", {
+        headers: { [header]: "c1" }
+      })).status()).toBe(400);
+    }
+
+    const history = await request.get("/api/me/history");
     expect(history.ok(), await history.text()).toBeTruthy();
     expect((await history.json()).items.map((post: { id: string }) => post.id)).toEqual(["post-1"]);
 
@@ -356,6 +395,56 @@ test("view history routes use only the session identity and reject missing posts
   } finally {
     await prisma.postViewHistory.deleteMany({ where: { userId: fanId } });
   }
+});
+
+test("view history records one request for one open post detail while the session refreshes", async ({ page }) => {
+  const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3001";
+  await page.context().addCookies([{
+    name: "purehub.session_token",
+    value: "account-view-effect",
+    url: baseURL
+  }]);
+  let sessionRequests = 0;
+  let viewRequests = 0;
+  await page.route("**/api/auth/get-session", (route) => {
+    sessionRequests += 1;
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        session: {
+          id: `account-view-session-${sessionRequests}`,
+          userId: "account-view-user",
+          expiresAt: "2027-07-30T00:00:00.000Z"
+        },
+        user: {
+          id: "account-view-user",
+          name: "Account View User",
+          email: "account-view-user@purehub.local"
+        }
+      })
+    });
+  });
+  await page.route("**/api/posts/post-1/view", (route) => {
+    viewRequests += 1;
+    return route.fulfill({ status: 204, body: "" });
+  });
+
+  await page.goto("/post/post-1");
+  await expect.poll(() => viewRequests).toBe(1);
+
+  await page.evaluate(() => window.dispatchEvent(new StorageEvent("storage", {
+    key: "better-auth.message",
+    newValue: JSON.stringify({
+      event: "session",
+      data: { trigger: "test-session-refresh" },
+      clientId: "account-view-test",
+      timestamp: Math.floor(Date.now() / 1000)
+    })
+  })));
+  await expect.poll(() => sessionRequests).toBeGreaterThan(1);
+  await page.waitForTimeout(250);
+  expect(viewRequests).toBe(1);
 });
 
 test("account maintenance accepts only its worker token and deletes expired view history", async ({ request }, testInfo) => {

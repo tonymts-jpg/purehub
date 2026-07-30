@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { accountRouteError } from "@/lib/account/http";
-import { listPostHistory, type AccountListInput } from "@/lib/account/repository";
+import {
+  assertNoAccountIdentityOverrideHeaders,
+  listPostHistory,
+  type AccountListInput
+} from "@/lib/account/repository";
 import { requireUser } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
@@ -34,6 +38,11 @@ function historyListInput(request: Request): AccountListInput {
 }
 
 export async function GET(request: Request) {
+  try {
+    assertNoAccountIdentityOverrideHeaders(request);
+  } catch (error) {
+    return accountRouteError(error);
+  }
   const session = await requireUser(request);
   if (!session.ok) return session.response;
 

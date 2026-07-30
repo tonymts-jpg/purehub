@@ -22,6 +22,11 @@ const postHistoryInclude = {
 } satisfies Prisma.PostViewHistoryInclude;
 
 const HISTORY_RETENTION_DAYS = 90;
+const ACCOUNT_IDENTITY_OVERRIDE_HEADERS = [
+  "x-user-id",
+  "x-user-role",
+  "x-admin-role"
+] as const;
 
 export class AccountRepositoryError extends Error {
   constructor(
@@ -42,6 +47,14 @@ export type AccountListResponse<T> = {
   items: T[];
   nextCursor: string | null;
 };
+
+export function assertNoAccountIdentityOverrideHeaders(request: Request): void {
+  for (const header of ACCOUNT_IDENTITY_OVERRIDE_HEADERS) {
+    if (request.headers.has(header)) {
+      throw new TypeError(`This request does not accept the ${header} header.`);
+    }
+  }
+}
 
 function normalizeLimit(value: number | undefined): number {
   if (value === undefined) return 20;
