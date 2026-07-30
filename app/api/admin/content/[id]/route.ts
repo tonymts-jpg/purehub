@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/admin-auth";
 import {
+  AdminContentConflictError,
   AdminContentInputError,
   moderateAdminContent,
   parseAdminContentAction
@@ -34,6 +35,9 @@ export async function PATCH(
     );
     return NextResponse.json({ post });
   } catch (error) {
+    if (error instanceof AdminContentConflictError) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
+    }
     if (error instanceof AdminContentInputError) {
       return NextResponse.json({ error: error.message }, { status: 400 });
     }

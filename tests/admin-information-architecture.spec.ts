@@ -3,7 +3,7 @@ import { adminNavigationForPermissions } from "../components/admin/admin-nav";
 import { canAdminAccess, canAdminManageSettings } from "../lib/admin-auth";
 import { getAdminOverview } from "../lib/admin-repository";
 import { prisma } from "../lib/prisma";
-import { authHeaders, hasDatabase, registerFan, signInAdmin, signInSupport } from "./auth-helpers";
+import { authHeaders, hasDatabase, registerFan, signIn, signInAdmin, signInSupport } from "./auth-helpers";
 
 test("admin authorization distinguishes domain read and write access", () => {
   expect(canAdminAccess("support_admin", "members", "read")).toBe(true);
@@ -205,7 +205,9 @@ test("admin content moderation accepts only canonical list filters and actions",
   ) => string;
   expect(resolveFromHistory("publish", "unpublished", ["hidden", "purchase"])).toBe("purchase");
   expect(resolveFromHistory("publish", "unpublished", ["hidden", "members", "hidden", "members"])).toBe("members");
-  expect(resolveFromHistory("publish", "hidden", [])).toBe("free");
+  expect(resolveModeratedVisibility("publish", "free")).toBe("free");
+  expect(() => resolveFromHistory("publish", "hidden", []))
+    .toThrow("Published visibility history is unavailable.");
 });
 
 test("admin members accepts only active or suspended account-state patches", async () => {
@@ -218,6 +220,34 @@ test("admin members accepts only active or suspended account-state patches", asy
     .toThrow("Invalid admin member state.");
   expect(() => parseAdminUserStatePatch({ status: "suspended", role: "admin" }))
     .toThrow("Invalid admin member state.");
+});
+
+test("admin members DTO and controls identify administrator accounts without trusting role labels", async () => {
+  const { listAdminUsers } = await import("../lib/admin-repository");
+  const { memberStatusControlAllowed } = await import("../components/admin/members-page");
+  const users = await listAdminUsers();
+  const administrator = users.find((user) => user.id === "admin-demo");
+
+  expect(administrator).toMatchObject({
+    isAdministrator: true,
+    manageable: false
+  });
+  expect(administrator).not.toHaveProperty("adminAccounts");
+  expect(memberStatusControlAllowed(true, {
+    role: "fan",
+    isAdministrator: true,
+    manageable: false
+  })).toBe(false);
+  expect(memberStatusControlAllowed(true, {
+    role: "admin",
+    isAdministrator: false,
+    manageable: true
+  })).toBe(true);
+  expect(memberStatusControlAllowed(false, {
+    role: "fan",
+    isAdministrator: false,
+    manageable: true
+  })).toBe(false);
 });
 
 test("admin members updates state only after a successful server response", async () => {
@@ -349,6 +379,52 @@ test("admin content repository preserves paid visibility through repeated modera
   }
 });
 
+test("admin content publish rejects missing canonical visibility history without mutation", async ({ request }) => {
+  test.skip(!(await hasDatabase(request)), "Moderation transaction coverage requires the seeded database.");
+  const { moderateAdminContent } = await import("../lib/admin-content-repository");
+  const id = `task10-historyless-${Date.now().toString(36)}`;
+  const admin = { actorUserId: "admin-demo", role: "super_admin" as const };
+
+  await prisma.post.create({
+    data: {
+      id,
+      creatorId: "c1",
+      title: "Task 10 historyless moderation",
+      excerpt: "Visibility history rejection fixture",
+      content: "Content whose former entitlement is unknown",
+      cover: "cover-1",
+      category: "Test",
+      tags: [],
+      visibility: "hidden",
+      comments: []
+    }
+  });
+  try {
+    await expect(moderateAdminContent(admin, id, { action: "publish" }))
+      .rejects.toThrow("Published visibility history is unavailable.");
+    expect((await prisma.post.findUniqueOrThrow({ where: { id } })).visibility).toBe("hidden");
+    expect(await prisma.auditLog.count({ where: { targetType: "post", targetId: id } })).toBe(0);
+    expect(await prisma.channelJob.count({ where: { entityType: "post", entityId: id } })).toBe(0);
+
+    await signInAdmin(request);
+    const response = await request.patch(`/api/admin/content/${id}`, {
+      headers: authHeaders,
+      data: { action: "publish" }
+    });
+    expect(response.status()).toBe(409);
+    expect(await response.json()).toEqual({
+      error: "Published visibility history is unavailable."
+    });
+    expect((await prisma.post.findUniqueOrThrow({ where: { id } })).visibility).toBe("hidden");
+    expect(await prisma.auditLog.count({ where: { targetType: "post", targetId: id } })).toBe(0);
+    expect(await prisma.channelJob.count({ where: { entityType: "post", entityId: id } })).toBe(0);
+  } finally {
+    await prisma.channelJob.deleteMany({ where: { entityType: "post", entityId: id } });
+    await prisma.auditLog.deleteMany({ where: { targetType: "post", targetId: id } });
+    await prisma.post.deleteMany({ where: { id } });
+  }
+});
+
 test("admin members API writes authenticated account state and audit atomically", async ({ request }) => {
   test.skip(!(await hasDatabase(request)), "Member mutation coverage requires the seeded database.");
   const identity = await registerFan(request, "task10-member-state");
@@ -397,6 +473,88 @@ test("admin members API writes authenticated account state and audit atomically"
   }
 });
 
+test("admin members management rejects every AdminAccount target in repository and route", async ({ request }) => {
+  test.skip(!(await hasDatabase(request)), "Administrator target protection requires the seeded database.");
+  const { updateAdminUser } = await import("../lib/admin-repository");
+  const identity = await registerFan(request, "task10-ops-target");
+  const opsUser = await prisma.user.findUniqueOrThrow({
+    where: { email: identity.email },
+    select: { id: true, status: true }
+  });
+  await prisma.adminAccount.create({
+    data: { userId: opsUser.id, role: "ops_admin", status: "active" }
+  });
+
+  try {
+    const auditCount = await prisma.auditLog.count({
+      where: { action: "admin.user.update", targetType: "user", targetId: opsUser.id }
+    });
+    const jobCount = await prisma.channelJob.count({
+      where: { entityType: "creator", entityId: opsUser.id }
+    });
+    await expect(updateAdminUser(
+      { actorUserId: "admin-demo", role: "super_admin" },
+      opsUser.id,
+      { status: "suspended" }
+    )).rejects.toThrow("Administrator accounts cannot be managed from Member Management.");
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: opsUser.id } })).status).toBe(opsUser.status);
+    expect(await prisma.auditLog.count({
+      where: { action: "admin.user.update", targetType: "user", targetId: opsUser.id }
+    })).toBe(auditCount);
+    expect(await prisma.channelJob.count({
+      where: { entityType: "creator", entityId: opsUser.id }
+    })).toBe(jobCount);
+
+    const superAdminBefore = await prisma.user.findUniqueOrThrow({
+      where: { id: "admin-demo" },
+      select: { status: true }
+    });
+    const superAuditCount = await prisma.auditLog.count({
+      where: { action: "admin.user.update", targetType: "user", targetId: "admin-demo" }
+    });
+    const superJobCount = await prisma.channelJob.count({
+      where: { entityType: "creator", entityId: "admin-demo" }
+    });
+    await signIn(request, identity.email);
+    const response = await request.patch("/api/admin/users/admin-demo", {
+      headers: authHeaders,
+      data: { status: "suspended" }
+    });
+    expect(response.status()).toBe(409);
+    expect(await response.json()).toEqual({
+      error: "Administrator accounts cannot be managed from Member Management."
+    });
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: "admin-demo" } })).status)
+      .toBe(superAdminBefore.status);
+    expect(await prisma.auditLog.count({
+      where: { action: "admin.user.update", targetType: "user", targetId: "admin-demo" }
+    })).toBe(superAuditCount);
+    expect(await prisma.channelJob.count({
+      where: { entityType: "creator", entityId: "admin-demo" }
+    })).toBe(superJobCount);
+
+    const selfResponse = await request.patch(`/api/admin/users/${opsUser.id}`, {
+      headers: authHeaders,
+      data: { status: "suspended" }
+    });
+    expect(selfResponse.status()).toBe(409);
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: opsUser.id } })).status).toBe(opsUser.status);
+    expect(await prisma.auditLog.count({
+      where: { action: "admin.user.update", targetType: "user", targetId: opsUser.id }
+    })).toBe(auditCount);
+    expect(await prisma.channelJob.count({
+      where: { entityType: "creator", entityId: opsUser.id }
+    })).toBe(jobCount);
+  } finally {
+    await prisma.auditLog.deleteMany({ where: { targetType: "user", targetId: opsUser.id } });
+    await prisma.channelJob.deleteMany({ where: { entityType: "creator", entityId: opsUser.id } });
+    await prisma.session.deleteMany({ where: { userId: opsUser.id } });
+    await prisma.account.deleteMany({ where: { userId: opsUser.id } });
+    await prisma.adminAccount.deleteMany({ where: { userId: opsUser.id } });
+    await prisma.user.deleteMany({ where: { id: opsUser.id } });
+  }
+});
+
 test("admin overview and domain pages isolate real browser requests and preserve queue URLs", async ({ page }) => {
   test.skip(!(await hasDatabase(page.request)), "Protected admin browser acceptance requires seeded administrator accounts.");
   await signInAdmin(page.request);
@@ -425,15 +583,30 @@ test("admin overview and domain pages isolate real browser requests and preserve
         admin: { role: "super_admin", permissions: ["overview", "members", "creators", "content", "channels"] }
       },
       "/api/admin/users": {
-        users: [{
-          id: "member-admin",
-          name: "Alice Creator",
-          handle: "alice",
-          status: "active",
-          role: "creator",
-          creatorStatus: "approved",
-          creatorProfile: { followers: 10, members: 1, levelId: "level-1" }
-        }]
+        users: [
+          {
+            id: "member-admin",
+            name: "Alice Creator",
+            handle: "alice",
+            status: "active",
+            role: "creator",
+            creatorStatus: "approved",
+            isAdministrator: false,
+            manageable: true,
+            creatorProfile: { followers: 10, members: 1, levelId: "level-1" }
+          },
+          {
+            id: "administrator-with-fan-role",
+            name: "Ops Account",
+            handle: "ops-account",
+            status: "active",
+            role: "fan",
+            creatorStatus: "none",
+            isAdministrator: true,
+            manageable: false,
+            creatorProfile: null
+          }
+        ]
       },
       "/api/admin/creator-applications": { applications: [] },
       "/api/admin/creator-levels": { levels: [] },
@@ -476,6 +649,13 @@ test("admin overview and domain pages isolate real browser requests and preserve
   await expect(page.getByText("active", { exact: true })).toBeVisible();
 
   calls.length = 0;
+  await page.goto("/admin/members?q=ops");
+  await expect(page.getByText("Ops Account")).toBeVisible();
+  await expect(page.getByText("管理员账号")).toBeVisible();
+  await expect(page.getByRole("button", { name: /Ops Account/ })).toHaveCount(0);
+  expect([...new Set(calls)]).toEqual(["/api/admin/users?q=ops"]);
+
+  calls.length = 0;
   await page.goto("/admin/content?status=pending&q=photo");
   await expect(page.getByRole("heading", { name: "内容管理" })).toBeVisible();
   await expect(page.getByText("没有符合条件的内容")).toBeVisible();
@@ -502,6 +682,8 @@ test("admin members and creators render authenticated support read-only browser 
         status: "active",
         role: "fan",
         creatorStatus: "none",
+        isAdministrator: false,
+        manageable: true,
         creatorProfile: null
       }]
     })

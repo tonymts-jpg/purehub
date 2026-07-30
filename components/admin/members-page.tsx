@@ -12,6 +12,8 @@ type Member = {
   status: string;
   role: string;
   creatorStatus: string;
+  isAdministrator: boolean;
+  manageable: boolean;
   creatorProfile?: { followers: number; members: number; levelId: string | null } | null;
 };
 
@@ -50,6 +52,13 @@ export async function updateAdminMemberStatus(
     })
   );
   return body.user;
+}
+
+export function memberStatusControlAllowed(
+  canWrite: boolean,
+  user: Pick<Member, "isAdministrator" | "manageable"> & { role?: string }
+) {
+  return canWrite && user.manageable && !user.isAdministrator;
 }
 
 export function MembersPage({
@@ -154,7 +163,7 @@ export function MembersPage({
               <td className="px-4 py-3">{user.creatorStatus}</td>
               <td className="px-4 py-3">{user.creatorProfile?.levelId ?? "—"}<p className="text-xs muted">{user.creatorProfile?.followers ?? 0} 粉丝</p></td>
               <td className="px-4 py-3">
-                {canWrite ? (
+                {memberStatusControlAllowed(canWrite, user) ? (
                   <button
                     type="button"
                     onClick={() => void updateStatus(user)}
@@ -162,7 +171,7 @@ export function MembersPage({
                   >
                     {user.status === "active" ? "暂停账号" : "恢复账号"} {user.name}
                   </button>
-                ) : <span className="text-xs muted">只读</span>}
+                ) : <span className="text-xs muted">{user.isAdministrator ? "管理员账号" : "只读"}</span>}
               </td>
             </tr>
           ))}

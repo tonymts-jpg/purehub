@@ -11,6 +11,9 @@ const canUseDatabase = () => Boolean(process.env.DATABASE_URL);
 const adminUserStateSchema = z.object({
   status: z.enum(["active", "suspended"])
 }).strict();
+const fallbackAdministratorUserIds = new Set(["admin-demo"]);
+
+export class AdminMemberTargetError extends Error {}
 
 export function parseAdminUserStatePatch(value: unknown): { status: "active" | "suspended" } {
   const parsed = adminUserStateSchema.safeParse(value);
@@ -144,8 +147,8 @@ export async function getAdminOverview() {
 export async function listAdminUsers() {
   if (!canUseDatabase()) {
     return [
-      { id: "admin-demo", name: "PureHub Admin", handle: "purehub-admin", status: "active", role: "admin", creatorStatus: "none", createdAt: new Date(), adminAccounts: [{ role: "super_admin", status: "active" }], creatorProfile: null },
-      { id: "fan-demo", name: "Pure 粉丝", handle: "pure-fan", status: "active", role: "fan", creatorStatus: "none", createdAt: new Date(), adminAccounts: [], creatorProfile: null },
+      { id: "admin-demo", name: "PureHub Admin", handle: "purehub-admin", status: "active", role: "admin", creatorStatus: "none", createdAt: new Date(), isAdministrator: true, manageable: false, creatorProfile: null },
+      { id: "fan-demo", name: "Pure 粉丝", handle: "pure-fan", status: "active", role: "fan", creatorStatus: "none", createdAt: new Date(), isAdministrator: false, manageable: true, creatorProfile: null },
       ...creators.map((creator) => ({
         id: creator.id,
         name: creator.name,
@@ -154,13 +157,14 @@ export async function listAdminUsers() {
         role: "creator",
         creatorStatus: "approved",
         createdAt: new Date(),
-        adminAccounts: [],
+        isAdministrator: false,
+        manageable: true,
         creatorProfile: { followers: creator.followers, members: creator.members, levelId: creator.followers >= 100_000 ? "level-3" : creator.followers >= 50_000 ? "level-2" : "level-1" }
       }))
     ];
   }
 
-  return prisma.user.findMany({
+  const users = await prisma.user.findMany({
     orderBy: { createdAt: "desc" },
     select: {
       id: true,
@@ -170,19 +174,37 @@ export async function listAdminUsers() {
       role: true,
       creatorStatus: true,
       createdAt: true,
-      adminAccounts: { select: { role: true, status: true } },
+      adminAccounts: { select: { id: true }, take: 1 },
       creatorProfile: { select: { followers: true, members: true, levelId: true } }
     }
+  });
+  return users.map(({ adminAccounts, ...user }) => {
+    const isAdministrator = adminAccounts.length > 0;
+    return {
+      ...user,
+      isAdministrator,
+      manageable: !isAdministrator
+    };
   });
 }
 
 export async function updateAdminUser(admin: AdminContext, id: string, input: { status: "active" | "suspended" }) {
   if (!canUseDatabase()) {
+    if (fallbackAdministratorUserIds.has(id)) {
+      throw new AdminMemberTargetError("Administrator accounts cannot be managed from Member Management.");
+    }
     await writeAuditLog(admin, "admin.user.update", "user", id, input);
     return { id, ...input };
   }
 
   return prisma.$transaction(async (tx) => {
+    const administrator = await tx.adminAccount.findFirst({
+      where: { userId: id },
+      select: { id: true }
+    });
+    if (administrator) {
+      throw new AdminMemberTargetError("Administrator accounts cannot be managed from Member Management.");
+    }
     const user = await tx.user.update({
       where: { id },
       data: {

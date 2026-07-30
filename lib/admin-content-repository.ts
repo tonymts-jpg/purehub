@@ -26,6 +26,7 @@ type AdminContentCursor = {
 };
 
 export class AdminContentInputError extends Error {}
+export class AdminContentConflictError extends Error {}
 
 const actionSchema = z.object({
   action: z.enum(CONTENT_ACTIONS)
@@ -206,7 +207,7 @@ export function resolveModeratedVisibility(
     : previousVisibility ? [previousVisibility] : [];
   const stable = history.find((visibility) => publishableVisibilities.has(visibility));
   if (stable) return stable;
-  return "free";
+  throw new AdminContentConflictError("Published visibility history is unavailable.");
 }
 
 function auditVisibilityHistory(metadata: Prisma.JsonValue | null | undefined) {

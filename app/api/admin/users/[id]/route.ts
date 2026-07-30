@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/admin-auth";
-import { parseAdminUserStatePatch, updateAdminUser } from "@/lib/admin-repository";
+import {
+  AdminMemberTargetError,
+  parseAdminUserStatePatch,
+  updateAdminUser
+} from "@/lib/admin-repository";
 import { enforceSameOrigin } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
@@ -21,6 +25,9 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     );
     return NextResponse.json({ user });
   } catch (error) {
+    if (error instanceof AdminMemberTargetError) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
+    }
     if (error instanceof Error && error.message === "Invalid admin member state.") {
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
