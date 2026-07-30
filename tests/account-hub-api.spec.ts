@@ -5,6 +5,7 @@ import {
   type APIRequestContext,
   type TestInfo
 } from "@playwright/test";
+import { parseAccountCursor } from "../lib/account/cursor";
 import { prisma } from "../lib/prisma";
 import { hasDatabase, registerFan, signIn } from "./auth-helpers";
 
@@ -144,5 +145,83 @@ test("favorites are session-owned and channel bookmarks grant no access", async 
     await prisma.channel.deleteMany({ where: { id: hiddenChannel.id } });
     await prisma.bookmark.deleteMany({ where: { userId: fanId, postId: "post-1" } });
     await prisma.channelBookmark.deleteMany({ where: { userId: fanId } });
+  }
+});
+
+test("favorites paginate only ACL-visible channel bookmarks", async ({ request }, testInfo) => {
+  await requireAccountDatabase(request, testInfo);
+  const fan = await registerFan(request, "account-favorite-pages");
+  await signIn(request, fan.email);
+  const fanId = (await (await request.get("/api/me")).json()).user.id as string;
+  const nonce = Date.now().toString(36);
+  const channels = [
+    { id: `account-page-new-${nonce}`, slug: `account-page-new-${nonce}`, name: "Newest visible favorite" },
+    { id: `account-page-hidden-${nonce}`, slug: `account-page-hidden-${nonce}`, name: "Later hidden favorite" },
+    { id: `account-page-middle-${nonce}`, slug: `account-page-middle-${nonce}`, name: "Middle visible favorite" },
+    { id: `account-page-old-${nonce}`, slug: `account-page-old-${nonce}`, name: "Oldest visible favorite" }
+  ];
+  const bookmarkRows = [
+    { id: `account-bookmark-new-${nonce}`, channelId: channels[0].id, createdAt: new Date("2026-07-30T04:00:00.000Z") },
+    { id: `account-bookmark-hidden-${nonce}`, channelId: channels[1].id, createdAt: new Date("2026-07-30T03:00:00.000Z") },
+    { id: `account-bookmark-middle-${nonce}`, channelId: channels[2].id, createdAt: new Date("2026-07-30T02:00:00.000Z") },
+    { id: `account-bookmark-old-${nonce}`, channelId: channels[3].id, createdAt: new Date("2026-07-30T01:00:00.000Z") }
+  ];
+
+  try {
+    await prisma.channel.createMany({
+      data: channels.map((channel) => ({
+        ...channel,
+        description: "Channel favorite pagination fixture.",
+        kind: "creator",
+        visibility: "public",
+        discoverability: "discoverable",
+        status: "active",
+        ownerUserId: "c1",
+        createdByUserId: "c1",
+        memberPostPolicy: "approval_required"
+      }))
+    });
+    await prisma.channelBookmark.createMany({
+      data: bookmarkRows.map((row) => ({ ...row, userId: fanId }))
+    });
+    await prisma.channel.update({
+      where: { id: channels[1].id },
+      data: { visibility: "private", discoverability: "hidden" }
+    });
+
+    const firstResponse = await request.get("/api/me/favorites?type=channels&limit=2");
+    expect(firstResponse.ok(), await firstResponse.text()).toBeTruthy();
+    const first = await firstResponse.json() as {
+      items: Array<{ slug: string }>;
+      nextCursor: string | null;
+    };
+    expect(first.items.map((item) => item.slug)).toEqual([
+      channels[0].slug,
+      channels[2].slug
+    ]);
+    expect(first.nextCursor).not.toBeNull();
+    expect(parseAccountCursor(first.nextCursor!, "favorite-channels")).toEqual({
+      scope: "favorite-channels",
+      occurredAt: "2026-07-30T02:00:00.000Z",
+      id: bookmarkRows[2].id
+    });
+
+    const secondResponse = await request.get(
+      `/api/me/favorites?type=channels&limit=2&cursor=${encodeURIComponent(first.nextCursor!)}`
+    );
+    expect(secondResponse.ok(), await secondResponse.text()).toBeTruthy();
+    const second = await secondResponse.json() as {
+      items: Array<{ slug: string }>;
+      nextCursor: string | null;
+    };
+    expect(second.items.map((item) => item.slug)).toEqual([channels[3].slug]);
+    expect(second.nextCursor).toBeNull();
+  } finally {
+    await prisma.channelBookmark.deleteMany({
+      where: { id: { in: bookmarkRows.map((row) => row.id) } }
+    });
+    await prisma.channel.deleteMany({
+      where: { id: { in: channels.map((channel) => channel.id) } }
+    });
   }
 });

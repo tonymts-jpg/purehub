@@ -120,32 +120,55 @@ export async function listFavoriteChannels(
   const scope = "favorite-channels";
   const limit = normalizeLimit(input.limit);
   const cursor = decodeCursor(input.cursor, scope);
-  const rows = await prisma.channelBookmark.findMany({
-    where: {
-      userId,
-      ...(cursor ? { AND: [relationAfterPredicate(cursor)] } : {})
-    },
-    select: {
-      id: true,
-      createdAt: true,
-      channel: { select: { slug: true } }
-    },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    take: limit + 1
-  });
-  const hasMore = rows.length > limit;
-  const returned = rows.slice(0, limit);
-  const visible = await Promise.all(returned.map(async (row) => {
-    try {
-      return { ...(await getChannelBySlug(row.channel.slug, userId)), bookmarked: true };
-    } catch (error) {
-      if (error instanceof ChannelRepositoryError && error.status === 404) return null;
-      throw error;
-    }
-  }));
+  let scanCursor = cursor;
+  let exhausted = false;
+  const visibleRows: Array<{
+    relation: { id: string; createdAt: Date };
+    item: Awaited<ReturnType<typeof getChannelBySlug>> & { bookmarked: true };
+  }> = [];
+
+  while (visibleRows.length < limit + 1 && !exhausted) {
+    const rows = await prisma.channelBookmark.findMany({
+      where: {
+        userId,
+        ...(scanCursor ? { AND: [relationAfterPredicate(scanCursor)] } : {})
+      },
+      select: {
+        id: true,
+        createdAt: true,
+        channel: { select: { slug: true } }
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: limit + 1
+    });
+    if (!rows.length) break;
+
+    const visible = await Promise.all(rows.map(async (row) => {
+      try {
+        return {
+          relation: { id: row.id, createdAt: row.createdAt },
+          item: { ...(await getChannelBySlug(row.channel.slug, userId)), bookmarked: true as const }
+        };
+      } catch (error) {
+        if (error instanceof ChannelRepositoryError && error.status === 404) return null;
+        throw error;
+      }
+    }));
+    visibleRows.push(...visible.filter((row) => row !== null));
+    exhausted = rows.length < limit + 1;
+    const last = rows.at(-1)!;
+    scanCursor = {
+      scope,
+      occurredAt: last.createdAt.toISOString(),
+      id: last.id
+    };
+  }
+
+  const hasMore = visibleRows.length > limit;
+  const returned = visibleRows.slice(0, limit);
   return {
-    items: visible.filter((item) => item !== null),
-    nextCursor: nextCursor(scope, hasMore, returned.at(-1))
+    items: returned.map((row) => row.item),
+    nextCursor: nextCursor(scope, hasMore, returned.at(-1)?.relation)
   };
 }
 
