@@ -1,6 +1,13 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import { posts as seededPosts } from "../lib/data";
 import { prisma } from "../lib/prisma";
 import { authHeaders, hasDatabase, signInAdmin, signInCreator, signInFan } from "./auth-helpers";
+
+async function useSeededHomeFeed(page: Page) {
+  await page.route("**/api/feed*", (route) => route.fulfill({
+    json: { posts: seededPosts, nextCursor: null }
+  }));
+}
 
 test("staging does not retain Phase 6 ownership test posts", async ({ request }, testInfo: TestInfo) => {
   test.skip(testInfo.project.name === "mobile", "Database cleanup acceptance runs once against the shared staging database.");
@@ -78,6 +85,7 @@ test("authenticated users see the comment editor", async ({ page }) => {
 });
 
 test("homepage purchase unlock dialog covers the viewport outside the post card", async ({ page }) => {
+  await useSeededHomeFeed(page);
   await page.goto("/");
   const card = page.getByTestId("post-card").filter({ has: page.getByRole("heading", { name: "雨后竹林写真日记", exact: true }) });
   await card.getByRole("button", { name: "解锁图片 3" }).click();
@@ -93,6 +101,7 @@ test("homepage purchase unlock dialog covers the viewport outside the post card"
 });
 
 test("homepage purchase unlock dialog closes on Escape and restores locked-media focus", async ({ page }) => {
+  await useSeededHomeFeed(page);
   await page.goto("/");
   const card = page.getByTestId("post-card").filter({ has: page.getByRole("heading", { name: "雨后竹林写真日记", exact: true }) });
   const lockedMedia = card.getByRole("button", { name: "解锁图片 3" });
@@ -106,6 +115,7 @@ test("homepage purchase unlock dialog closes on Escape and restores locked-media
 
 test("homepage purchase unlock dialog moves focus inside and traps Tab navigation", async ({ page }, testInfo: TestInfo) => {
   test.skip(testInfo.project.name === "mobile", "Mobile emulation does not advance focus with a virtual Tab key; desktop verifies keyboard focus containment.");
+  await useSeededHomeFeed(page);
   await page.goto("/");
   const card = page.getByTestId("post-card").filter({ has: page.getByRole("heading", { name: "雨后竹林写真日记", exact: true }) });
   await card.getByRole("button", { name: "解锁图片 3" }).click();
