@@ -344,7 +344,7 @@ export async function listUnlockedPosts(
       ? prisma.post.findMany({
           where: {
             creatorId: { in: activeCreatorIds },
-            visibility: "members",
+            visibility: { not: "free" },
             entitlements: { none: { userId, source: "purchase" } },
             ...(cursor ? { AND: [unlockedAfterPredicate(cursor, "subscription")] } : {})
           },

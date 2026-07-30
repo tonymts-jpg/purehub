@@ -54,30 +54,44 @@ test("account lists are session-owned, access-aware, and payment-safe", async ({
   await signIn(request, fan.email);
   const fanId = (await (await request.get("/api/me")).json()).user.id as string;
   const nonce = Date.now().toString(36);
+  const activeCreatorId = `account-creator-active-${nonce}`;
+  const expiredCreatorId = `account-creator-expired-${nonce}`;
+  const creatorIds = [activeCreatorId, expiredCreatorId];
   const likedPost = {
     id: `account-liked-${nonce}`,
-    creatorId: "c1",
+    creatorId: activeCreatorId,
     title: "Liked account post",
     visibility: "free",
     createdAt: new Date("2026-07-30T01:00:00.000Z")
   };
   const purchasedPost = {
     id: `account-purchased-${nonce}`,
-    creatorId: "c1",
+    creatorId: activeCreatorId,
     title: "Purchased account post",
-    visibility: "members",
+    visibility: "purchase",
+    saleMode: "single_plus_subscription",
+    price: 28,
     createdAt: new Date("2026-07-30T07:00:00.000Z")
   };
-  const memberPost = {
-    id: `account-member-${nonce}`,
-    creatorId: "c1",
+  const subscriptionPurchasePost = {
+    id: `account-subscription-purchase-${nonce}`,
+    creatorId: activeCreatorId,
+    title: "Subscriber purchase-visible post",
+    visibility: "purchase",
+    saleMode: "single_plus_subscription",
+    price: 28,
+    createdAt: new Date("2026-07-30T07:00:00.000Z")
+  };
+  const activeMemberPost = {
+    id: `account-active-member-${nonce}`,
+    creatorId: activeCreatorId,
     title: "Active member post",
     visibility: "members",
-    createdAt: new Date("2026-07-30T07:00:00.000Z")
+    createdAt: new Date("2026-07-30T06:00:00.000Z")
   };
   const expiredMemberPost = {
     id: `account-expired-member-${nonce}`,
-    creatorId: "c2",
+    creatorId: expiredCreatorId,
     title: "Expired member post",
     visibility: "members",
     createdAt: new Date("2026-07-30T04:00:00.000Z")
@@ -85,7 +99,8 @@ test("account lists are session-owned, access-aware, and payment-safe", async ({
   const postIds = [
     likedPost.id,
     purchasedPost.id,
-    memberPost.id,
+    subscriptionPurchasePost.id,
+    activeMemberPost.id,
     expiredMemberPost.id
   ];
   const ownOrderId = `account-order-own-${nonce}`;
@@ -98,8 +113,56 @@ test("account lists are session-owned, access-aware, and payment-safe", async ({
   const expiredSubscriptionId = `account-sub-expired-${nonce}`;
 
   try {
+    await prisma.user.createMany({
+      data: [
+        {
+          id: activeCreatorId,
+          name: "Account Active Creator",
+          handle: `account-active-${nonce}`,
+          avatar: "A",
+          email: `account-active-${nonce}@e2e.purehub.local`,
+          role: "creator",
+          creatorStatus: "approved"
+        },
+        {
+          id: expiredCreatorId,
+          name: "Account Expired Creator",
+          handle: `account-expired-${nonce}`,
+          avatar: "E",
+          email: `account-expired-${nonce}@e2e.purehub.local`,
+          role: "creator",
+          creatorStatus: "approved"
+        }
+      ]
+    });
+    await prisma.creatorProfile.createMany({
+      data: [
+        {
+          id: `${activeCreatorId}-profile`,
+          userId: activeCreatorId,
+          bio: "Isolated active account-list fixture creator.",
+          category: "Account fixtures",
+          cover: "account-active-cover",
+          verified: true
+        },
+        {
+          id: `${expiredCreatorId}-profile`,
+          userId: expiredCreatorId,
+          bio: "Isolated expired account-list fixture creator.",
+          category: "Account fixtures",
+          cover: "account-expired-cover",
+          verified: true
+        }
+      ]
+    });
     await prisma.post.createMany({
-      data: [likedPost, purchasedPost, memberPost, expiredMemberPost].map((post) => ({
+      data: [
+        likedPost,
+        purchasedPost,
+        subscriptionPurchasePost,
+        activeMemberPost,
+        expiredMemberPost
+      ].map((post) => ({
         ...post,
         excerpt: `${post.title} excerpt`,
         content: `${post.title} content`,
@@ -122,7 +185,7 @@ test("account lists are session-owned, access-aware, and payment-safe", async ({
       data: {
         id: `account-follow-${nonce}`,
         userId: fanId,
-        creatorId: "c1",
+        creatorId: activeCreatorId,
         createdAt: new Date("2026-07-30T06:00:00.000Z")
       }
     });
@@ -140,7 +203,7 @@ test("account lists are session-owned, access-aware, and payment-safe", async ({
         {
           id: activeSubscriptionId,
           userId: fanId,
-          creatorId: "c1",
+          creatorId: activeCreatorId,
           planId: `account-plan-active-${nonce}`,
           status: "active",
           startedAt: new Date("2026-07-30T08:00:00.000Z")
@@ -148,7 +211,7 @@ test("account lists are session-owned, access-aware, and payment-safe", async ({
         {
           id: expiredSubscriptionId,
           userId: fanId,
-          creatorId: "c2",
+          creatorId: expiredCreatorId,
           planId: `account-plan-expired-${nonce}`,
           status: "expired",
           startedAt: new Date("2026-07-30T09:00:00.000Z")
@@ -171,7 +234,7 @@ test("account lists are session-owned, access-aware, and payment-safe", async ({
         postId: expiredMemberPost.id,
         source: "manual",
         status: "published",
-        addedByUserId: "c2"
+        addedByUserId: expiredCreatorId
       }
     });
     await prisma.order.createMany({
@@ -179,7 +242,7 @@ test("account lists are session-owned, access-aware, and payment-safe", async ({
         {
           id: ownOrderId,
           buyerUserId: fanId,
-          creatorUserId: "c1",
+          creatorUserId: activeCreatorId,
           kind: "post_unlock",
           itemId: purchasedPost.id,
           amount: 28,
@@ -198,7 +261,7 @@ test("account lists are session-owned, access-aware, and payment-safe", async ({
         {
           id: otherOrderId,
           buyerUserId: "c1",
-          creatorUserId: "c2",
+          creatorUserId: expiredCreatorId,
           kind: "subscription",
           itemId: `account-other-plan-${nonce}`,
           amount: 48,
@@ -246,7 +309,7 @@ test("account lists are session-owned, access-aware, and payment-safe", async ({
       expect.objectContaining({
         occurredAt: "2026-07-30T06:00:00.000Z",
         creator: expect.objectContaining({
-          id: "c1",
+          id: activeCreatorId,
           handle: expect.any(String),
           bio: expect.any(String),
           category: expect.any(String)
@@ -266,13 +329,18 @@ test("account lists are session-owned, access-aware, and payment-safe", async ({
         source: "purchase"
       }),
       expect.objectContaining({
-        post: expect.objectContaining({ id: memberPost.id, hasAccess: true }),
+        post: expect.objectContaining({ id: subscriptionPurchasePost.id, hasAccess: true }),
+        source: "subscription"
+      }),
+      expect.objectContaining({
+        post: expect.objectContaining({ id: activeMemberPost.id, hasAccess: true }),
         source: "subscription"
       })
     ]));
     expect(unlockedItems.filter((item) => item.post.id === purchasedPost.id)).toEqual([
       expect.objectContaining({ source: "purchase" })
     ]);
+    expect(unlockedItems.map((item) => item.post.id)).not.toContain(likedPost.id);
     expect(unlockedItems.map((item) => item.post.id)).not.toContain(expiredMemberPost.id);
     const firstUnlockedPageResponse = await request.get("/api/me/unlocked?limit=1");
     expect(firstUnlockedPageResponse.ok(), await firstUnlockedPageResponse.text()).toBeTruthy();
@@ -298,10 +366,25 @@ test("account lists are session-owned, access-aware, and payment-safe", async ({
     expect(secondUnlockedPage.items).toEqual([
       expect.objectContaining({
         source: "subscription",
-        post: expect.objectContaining({ id: memberPost.id })
+        post: expect.objectContaining({ id: subscriptionPurchasePost.id })
       })
     ]);
-    expect(secondUnlockedPage.nextCursor).toBeNull();
+    expect(secondUnlockedPage.nextCursor).not.toBeNull();
+    const thirdUnlockedPageResponse = await request.get(
+      `/api/me/unlocked?limit=1&cursor=${encodeURIComponent(secondUnlockedPage.nextCursor!)}`
+    );
+    expect(thirdUnlockedPageResponse.ok(), await thirdUnlockedPageResponse.text()).toBeTruthy();
+    const thirdUnlockedPage = await thirdUnlockedPageResponse.json() as {
+      items: Array<{ source: string; post: { id: string } }>;
+      nextCursor: string | null;
+    };
+    expect(thirdUnlockedPage.items).toEqual([
+      expect.objectContaining({
+        source: "subscription",
+        post: expect.objectContaining({ id: activeMemberPost.id })
+      })
+    ]);
+    expect(thirdUnlockedPage.nextCursor).toBeNull();
 
     const meOrders = await request.get("/api/me/orders");
     expect(meOrders.ok(), await meOrders.text()).toBeTruthy();
@@ -311,7 +394,7 @@ test("account lists are session-owned, access-aware, and payment-safe", async ({
         id: ownOrderId,
         itemId: purchasedPost.id,
         itemLabel: purchasedPost.title,
-        creator: expect.objectContaining({ id: "c1" })
+        creator: expect.objectContaining({ id: activeCreatorId })
       })
     ]);
     expect(orders.map((order) => order.id)).not.toContain(otherOrderId);
@@ -338,8 +421,10 @@ test("account lists are session-owned, access-aware, and payment-safe", async ({
     await prisma.channelPost.deleteMany({ where: { id: channelPostId } });
     await prisma.channelMembership.deleteMany({ where: { id: channelMembershipId } });
     await prisma.postLike.deleteMany({ where: { userId: fanId, postId: likedPost.id } });
-    await prisma.follow.deleteMany({ where: { userId: fanId, creatorId: "c1" } });
+    await prisma.follow.deleteMany({ where: { userId: fanId, creatorId: activeCreatorId } });
     await prisma.post.deleteMany({ where: { id: { in: postIds } } });
+    await prisma.creatorProfile.deleteMany({ where: { userId: { in: creatorIds } } });
+    await prisma.user.deleteMany({ where: { id: { in: creatorIds } } });
   }
 });
 
