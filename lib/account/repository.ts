@@ -24,7 +24,8 @@ const favoritePostInclude = {
 const postHistoryInclude = {
   post: {
     include: {
-      media: { orderBy: { order: "asc" as const } }
+      media: { orderBy: { order: "asc" as const } },
+      creator: { select: { id: true, name: true, handle: true, avatar: true } }
     }
   }
 } satisfies Prisma.PostViewHistoryInclude;
@@ -32,7 +33,8 @@ const postHistoryInclude = {
 const likedPostInclude = {
   post: {
     include: {
-      media: { orderBy: { order: "asc" as const } }
+      media: { orderBy: { order: "asc" as const } },
+      creator: { select: { id: true, name: true, handle: true, avatar: true } }
     }
   }
 } satisfies Prisma.PostLikeInclude;
@@ -202,6 +204,7 @@ export async function listLikedPosts(
   return {
     items: returned.map((row, index) => ({
       post: posts[index],
+      creator: row.post.creator,
       occurredAt: row.createdAt.toISOString()
     })),
     nextCursor: nextCursor(scope, hasMore, returned.at(-1))
@@ -544,6 +547,7 @@ export async function listPostHistory(
   return {
     items: returned.map((row, index) => ({
       post: posts[index],
+      creator: row.post.creator,
       occurredAt: row.lastViewedAt.toISOString()
     })),
     nextCursor: hasMore && last

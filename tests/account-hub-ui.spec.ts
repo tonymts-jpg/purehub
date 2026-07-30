@@ -543,3 +543,109 @@ test("orders: renders only approved fields and switches from a desktop table to 
     await expect(page.getByTestId("order-history-table").getByText("已支付", { exact: true })).toBeVisible();
   }
 });
+function accountCreator(id = "creator-1") {
+  return { id, name: "数据库创作者", handle: "database-creator", avatar: "数" };
+}
+
+test("likes: loading, empty, initial error retry, pagination retry, and stale pagination keep rows", async ({ page }) => {
+  await mockAccountSession(page);
+  let requestCount = 0;
+  let releaseInitial: (() => void) | undefined;
+  const initialPending = new Promise<void>((resolve) => { releaseInitial = resolve; });
+  const cursors: Array<string | null> = [];
+  await page.route("**/api/me/likes**", async (route) => {
+    const cursor = new URL(route.request().url()).searchParams.get("cursor");
+    cursors.push(cursor);
+    requestCount += 1;
+    if (requestCount === 1) {
+      await initialPending;
+      return route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [], nextCursor: null }) });
+    }
+    if (requestCount === 2) return route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "首次加载失败" }) });
+    if (requestCount === 3) return route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [{ post: { ...accountPost("liked-first", "第一页喜欢"), liked: true }, creator: accountCreator(), occurredAt: "2026-07-30T04:00:00.000Z" }], nextCursor: "page-two" }) });
+    if (requestCount === 4) return route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "更多加载失败" }) });
+    if (requestCount === 5) return route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [{ post: { ...accountPost("liked-second", "第二页喜欢"), liked: true }, creator: accountCreator("creator-2"), occurredAt: "2026-07-29T04:00:00.000Z" }], nextCursor: "page-three" }) });
+    return route.fulfill({ status: 401, contentType: "text/plain", body: "expired" });
+  });
+
+  await page.goto("/likes?from=account");
+  await expect(page.getByRole("status")).toBeVisible();
+  releaseInitial?.();
+  await expect(page.getByText("还没有喜欢的作品")).toBeVisible();
+  await page.reload();
+  await expect(page.getByText("首次加载失败", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "重试" }).click();
+  await expect(page.getByTestId("post-card")).toHaveCount(1);
+  await page.getByRole("button", { name: "加载更多" }).click();
+  await expect(page.getByText("更多加载失败", { exact: false })).toBeVisible();
+  await expect(page.getByTestId("post-card")).toHaveCount(1);
+  await page.getByRole("button", { name: "重试" }).click();
+  await expect(page.getByTestId("post-card")).toHaveCount(2);
+  expect(cursors).toEqual([null, null, null, "page-two", "page-two"]);
+  await page.getByRole("button", { name: "加载更多" }).click();
+  await expect(page).toHaveURL(/\/sign-in\?callbackUrl=%2Flikes%3Ffrom%3Daccount/);
+});
+
+test("orders: failed pagination retry repeats its cursor and preserves appended rows", async ({ page }) => {
+  await mockAccountSession(page);
+  const cursors: Array<string | null> = [];
+  let requestCount = 0;
+  await page.route("**/api/me/orders**", (route) => {
+    const cursor = new URL(route.request().url()).searchParams.get("cursor");
+    cursors.push(cursor);
+    requestCount += 1;
+    if (requestCount === 1) return route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [buyerOrder()], nextCursor: "orders-two" }) });
+    if (requestCount === 2) return route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "订单分页失败" }) });
+    return route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [{ ...buyerOrder(), id: "order-1002", itemLabel: "第二页订单" }], nextCursor: null }) });
+  });
+
+  await page.goto("/orders");
+  await expect(page.getByTestId("order-history-table").getByText("订单作品")).toHaveCount(1);
+  await page.getByRole("button", { name: "加载更多" }).click();
+  await expect(page.getByText("订单分页失败", { exact: false })).toBeVisible();
+  await expect(page.getByTestId("order-history-table").getByText("订单作品")).toHaveCount(1);
+  await page.getByRole("button", { name: "重试" }).click();
+  await expect(page.getByTestId("order-history-table").getByText("第二页订单")).toHaveCount(1);
+  expect(cursors).toEqual([null, "orders-two", "orders-two"]);
+});
+
+test("following: failed unfollow retains the creator and exposes retryable failure", async ({ page }) => {
+  await mockAccountSession(page);
+  await page.route("**/api/me/following**", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [{ creator: followingCreator(), occurredAt: "2026-07-30T04:00:00.000Z" }], nextCursor: null }) }));
+  await page.route("**/api/creators/creator-one/follow", (route) => route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "取消关注失败" }) }));
+
+  await page.goto("/following");
+  await page.getByRole("button", { name: "取消关注" }).click();
+  await expect(page.getByTestId("following-card")).toHaveCount(1);
+  await expect(page.getByText("取消关注失败", { exact: false })).toBeVisible();
+});
+
+test("likes: serializes a pending unlike so no stale second mutation can remove the item", async ({ page }) => {
+  await mockAccountSession(page);
+  let requestCount = 0;
+  let releaseUnlike: (() => void) | undefined;
+  const unlikePending = new Promise<void>((resolve) => { releaseUnlike = resolve; });
+  await page.route("**/api/me/likes**", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [{ post: { ...accountPost("liked-serial", "串行喜欢"), liked: true }, creator: accountCreator(), occurredAt: "2026-07-30T04:00:00.000Z" }], nextCursor: null }) }));
+  await page.route("**/api/posts/liked-serial/like", async (route) => {
+    requestCount += 1;
+    await unlikePending;
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ liked: false }) });
+  });
+
+  await page.goto("/likes");
+  const likeButton = page.getByRole("button", { name: "喜欢" });
+  await likeButton.click();
+  await expect(likeButton).toBeDisabled();
+  await likeButton.click({ force: true });
+  expect(requestCount).toBe(1);
+  releaseUnlike?.();
+  await expect(page.getByTestId("post-card")).toHaveCount(0);
+});
+
+test("history: renders the canonical API creator instead of the demo catalog", async ({ page }) => {
+  await mockAccountSession(page);
+  await page.route("**/api/me/history**", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [{ post: accountPost("history-db-creator", "数据库历史"), creator: accountCreator("database-creator"), occurredAt: "2026-07-30T04:05:00.000Z" }], nextCursor: null }) }));
+
+  await page.goto("/history");
+  await expect(page.getByText("数据库创作者", { exact: true })).toBeVisible();
+});

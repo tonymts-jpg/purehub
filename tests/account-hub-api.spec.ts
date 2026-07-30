@@ -299,7 +299,13 @@ test("account lists are session-owned, access-aware, and payment-safe", async ({
     expect((await meLikes.json()).items).toEqual([
       expect.objectContaining({
         occurredAt: "2026-07-30T05:00:00.000Z",
-        post: expect.objectContaining({ id: likedPost.id, liked: true })
+        post: expect.objectContaining({ id: likedPost.id, liked: true }),
+        creator: expect.objectContaining({
+          id: expect.any(String),
+          name: expect.any(String),
+          handle: expect.any(String),
+          avatar: expect.any(String)
+        })
       })
     ]);
 
@@ -734,6 +740,12 @@ test("view history includes the exact ninety day boundary and deletes only older
           bookmarked: expect.any(Boolean),
           liked: expect.any(Boolean),
           hasAccess: expect.any(Boolean)
+        }),
+        creator: expect.objectContaining({
+          id: expect.any(String),
+          name: expect.any(String),
+          handle: expect.any(String),
+          avatar: expect.any(String)
         })
       })
     ]);

@@ -17,7 +17,7 @@ export default function OrdersPage() {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [refresh, setRefresh] = useState(0);
+  const [failedCursor, setFailedCursor] = useState<string | null | undefined>(undefined);
 
   async function request(cursor?: string) {
     const response = await fetch(cursor ? `/api/me/orders?cursor=${encodeURIComponent(cursor)}` : "/api/me/orders");
@@ -30,47 +30,44 @@ export default function OrdersPage() {
     return body ?? {};
   }
 
-  useEffect(() => {
-    let active = true;
-    async function load() {
-      setLoading(true);
-      setError(null);
-      try {
-        const body = await request();
-        if (!active || !body) return;
-        setOrders(body.items ?? []);
-        setNextCursor(body.nextCursor ?? null);
-      } catch (cause) {
-        if (active) setError(cause instanceof Error ? cause.message : "暂时无法加载订单。");
-      } finally {
-        if (active) setLoading(false);
-      }
+  async function load(cursor: string | null, replace: boolean) {
+    if (replace) setLoading(true);
+    else setLoadingMore(true);
+    setError(null);
+    try {
+      const body = await request(cursor ?? undefined);
+      if (!body) return;
+      setOrders((current) => replace ? (body.items ?? []) : [...current, ...(body.items ?? [])]);
+      setNextCursor(body.nextCursor ?? null);
+      setFailedCursor(undefined);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "暂时无法加载更多订单。");
+      setFailedCursor(cursor);
+    } finally {
+      if (replace) setLoading(false);
+      else setLoadingMore(false);
     }
-    void load();
-    return () => { active = false; };
-  // refresh is a deliberate retry trigger for this fixed endpoint.
+  }
+
+  useEffect(() => {
+    void load(null, true);
+  // This account endpoint has no dynamic query input.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pathname, refresh]);
+  }, [pathname]);
 
   async function loadMore() {
     if (!nextCursor || loadingMore) return;
-    setLoadingMore(true);
-    setError(null);
-    try {
-      const body = await request(nextCursor);
-      if (!body) return;
-      setOrders((current) => [...current, ...(body.items ?? [])]);
-      setNextCursor(body.nextCursor ?? null);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "暂时无法加载更多订单。");
-    } finally {
-      setLoadingMore(false);
-    }
+    await load(nextCursor, false);
+  }
+
+  function retry() {
+    if (failedCursor === undefined) return;
+    void load(failedCursor, failedCursor === null);
   }
 
   return <div className="mx-auto max-w-7xl px-4 py-8 sm:px-8">
     <PageHeader title="订单" subtitle="查看你的作品购买和订阅订单。" />
-    <AccountListState loading={loading} error={error} empty={orders.length === 0} onRetry={() => setRefresh((value) => value + 1)} emptyTitle="还没有订单" emptyDescription="购买作品或订阅创作者后，订单会显示在这里。">
+    <AccountListState loading={loading} error={error} empty={orders.length === 0} onRetry={retry} emptyTitle="还没有订单" emptyDescription="购买作品或订阅创作者后，订单会显示在这里。">
       <OrderHistory orders={orders} />
     </AccountListState>
     {nextCursor && !loading && <div className="mt-8 text-center"><button type="button" onClick={() => void loadMore()} disabled={loadingMore} className="rounded-lg border border-[var(--line)] px-5 py-3 text-sm font-black disabled:cursor-wait disabled:opacity-70">{loadingMore ? "正在加载…" : "加载更多"}</button></div>}

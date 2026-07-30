@@ -34,7 +34,7 @@ export function ActivityList<T>({
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [refresh, setRefresh] = useState(0);
+  const [failedCursor, setFailedCursor] = useState<string | null | undefined>(undefined);
 
   function redirectForUnauthorized() {
     redirectToAccountSignIn(pathname, window.location.search);
@@ -52,42 +52,39 @@ export function ActivityList<T>({
     return body ?? {};
   }
 
-  useEffect(() => {
-    let active = true;
-    async function load() {
-      setLoading(true);
-      setError(null);
-      try {
-        const body = await request();
-        if (!active || !body) return;
-        setItems(body.items ?? []);
-        setNextCursor(body.nextCursor ?? null);
-      } catch (cause) {
-        if (active) setError(cause instanceof Error ? cause.message : "暂时无法加载内容。");
-      } finally {
-        if (active) setLoading(false);
-      }
+  async function load(cursor: string | null, replace: boolean) {
+    if (replace) setLoading(true);
+    else setLoadingMore(true);
+    setError(null);
+    try {
+      const body = await request(cursor ?? undefined);
+      if (!body) return;
+      setItems((current) => replace ? (body.items ?? []) : [...current, ...(body.items ?? [])]);
+      setNextCursor(body.nextCursor ?? null);
+      setFailedCursor(undefined);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "暂时无法加载更多内容。");
+      setFailedCursor(cursor);
+    } finally {
+      if (replace) setLoading(false);
+      else setLoadingMore(false);
     }
-    void load();
-    return () => { active = false; };
-  // refresh intentionally retries the same stable endpoint.
+  }
+
+  useEffect(() => {
+    void load(null, true);
+  // Initial load is tied to the stable account endpoint and route identity.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [endpoint, pathname, refresh]);
+  }, [endpoint, pathname]);
 
   async function loadMore() {
     if (!nextCursor || loadingMore) return;
-    setLoadingMore(true);
-    setError(null);
-    try {
-      const body = await request(nextCursor);
-      if (!body) return;
-      setItems((current) => [...current, ...(body.items ?? [])]);
-      setNextCursor(body.nextCursor ?? null);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "暂时无法加载更多内容。");
-    } finally {
-      setLoadingMore(false);
-    }
+    await load(nextCursor, false);
+  }
+
+  function retry() {
+    if (failedCursor === undefined) return;
+    void load(failedCursor, failedCursor === null);
   }
 
   return (
@@ -96,7 +93,7 @@ export function ActivityList<T>({
         loading={loading}
         error={error}
         empty={items.length === 0}
-        onRetry={() => setRefresh((value) => value + 1)}
+        onRetry={retry}
         emptyTitle={emptyTitle}
         emptyDescription={emptyDescription}
       >

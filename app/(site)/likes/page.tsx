@@ -14,7 +14,7 @@ export default function LikesPage() {
       emptyDescription="去发现更多感兴趣的内容吧。"
       getKey={(item) => item.post.id}
       childrenClassName="grid gap-5 md:grid-cols-2 xl:grid-cols-3"
-      renderItem={(item, actions) => <PostCard post={item.post} onUnlike={actions.remove} onMutationError={actions.reportError} />}
+      renderItem={(item, actions) => <PostCard post={item.post} creator={item.creator} onUnlike={actions.remove} onMutationError={actions.reportError} />}
     />
   </div>;
 }

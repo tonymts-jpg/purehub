@@ -18,7 +18,15 @@ export type AccountCursor = {
 
 export type AccountPostListItem = {
   post: Post;
+  creator?: AccountPostCreator;
   occurredAt: string;
+};
+
+export type AccountPostCreator = {
+  id: string;
+  name: string;
+  handle: string;
+  avatar: string;
 };
 
 export type AccountChannelFavoriteListItem = {
