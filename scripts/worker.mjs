@@ -14,6 +14,7 @@ const taskState = {
   lastError: null,
   phase5: { lastRunAt: null, lastError: null },
   phase7: { lastRunAt: null, lastError: null },
+  accountMaintenance: { lastRunAt: null, lastError: null },
   channelMaterialization: { lastRunAt: null, lastError: null, claimed: 0, completed: 0, failed: 0 },
   searchIndexing: { lastRunAt: null, lastError: null, claimed: 0, completed: 0, failed: 0 }
 };
@@ -38,6 +39,7 @@ function workerTaskHealth() {
     status: taskState.lastError ? "error" : taskState.lastRunAt ? "ok" : "pending",
     phase5: subsystemHealth(taskState.phase5),
     phase7: subsystemHealth(taskState.phase7),
+    accountMaintenance: subsystemHealth(taskState.accountMaintenance),
     channelMaterialization: phase7TaskHealth(taskState.channelMaterialization),
     searchIndexing: phase7TaskHealth(taskState.searchIndexing)
   };
@@ -83,6 +85,15 @@ async function runPhase7() {
   const response = await fetch(`${webBaseUrl}/api/internal/phase7/run`, { method: "POST", headers: { "x-worker-token": workerToken } });
   if (!response.ok) throw new Error(`Phase 7 worker run failed with ${response.status}.`);
   return parsePhase7RunResult(await response.json());
+}
+
+async function runAccountMaintenance() {
+  if (!workerToken) throw new Error("WORKER_ACCESS_TOKEN is required.");
+  const response = await fetch(`${webBaseUrl}/api/internal/account-maintenance/run`, {
+    method: "POST",
+    headers: { "x-worker-token": workerToken }
+  });
+  if (!response.ok) throw new Error(`Account maintenance failed with ${response.status}.`);
 }
 
 function updatePhase7Task(name, counter, lastRunAt) {
@@ -144,7 +155,8 @@ async function runSubsystem(name, operation) {
 async function tick() {
   const [phase5Succeeded] = await Promise.all([
     runSubsystem("phase5", () => runPhase5("all")),
-    runPhase7Subsystem()
+    runPhase7Subsystem(),
+    runSubsystem("accountMaintenance", runAccountMaintenance)
   ]);
   const lastReconciliation = taskState.lastReconciliationAt ? new Date(taskState.lastReconciliationAt).getTime() : 0;
   if (Date.now() - lastReconciliation >= 24 * 60 * 60 * 1000) {
@@ -158,7 +170,9 @@ async function tick() {
     }
   }
   taskState.lastRunAt = new Date().toISOString();
-  taskState.lastError = taskState.phase5.lastError ?? taskState.phase7.lastError;
+  taskState.lastError = taskState.phase5.lastError
+    ?? taskState.phase7.lastError
+    ?? taskState.accountMaintenance.lastError;
 }
 
 const guardedTick = createInFlightGuard(tick);

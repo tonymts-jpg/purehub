@@ -13,6 +13,16 @@ const favoritePostInclude = {
   }
 } satisfies Prisma.BookmarkInclude;
 
+const postHistoryInclude = {
+  post: {
+    include: {
+      media: { orderBy: { order: "asc" as const } }
+    }
+  }
+} satisfies Prisma.PostViewHistoryInclude;
+
+const HISTORY_RETENTION_DAYS = 90;
+
 export class AccountRepositoryError extends Error {
   constructor(
     message: string,
@@ -67,6 +77,21 @@ function relationAfterPredicate(cursor: AccountCursor): {
     OR: [
       { createdAt: { lt: createdAt } },
       { createdAt, id: { lt: cursor.id } }
+    ]
+  };
+}
+
+function historyAfterPredicate(cursor: AccountCursor): {
+  OR: Array<
+    | { lastViewedAt: { lt: Date } }
+    | { lastViewedAt: Date; id: { lt: string } }
+  >;
+} {
+  const lastViewedAt = new Date(cursor.occurredAt);
+  return {
+    OR: [
+      { lastViewedAt: { lt: lastViewedAt } },
+      { lastViewedAt, id: { lt: cursor.id } }
     ]
   };
 }
@@ -170,6 +195,75 @@ export async function listFavoriteChannels(
     items: returned.map((row) => row.item),
     nextCursor: nextCursor(scope, hasMore, returned.at(-1)?.relation)
   };
+}
+
+export async function recordPostView(
+  userId: string,
+  postId: string,
+  now = new Date()
+) {
+  const post = await prisma.post.findUnique({
+    where: { id: postId },
+    select: { id: true }
+  });
+  if (!post) throw new AccountRepositoryError("Post not found.", 404);
+
+  return prisma.postViewHistory.upsert({
+    where: { userId_postId: { userId, postId } },
+    update: { lastViewedAt: now },
+    create: {
+      userId,
+      postId,
+      firstViewedAt: now,
+      lastViewedAt: now
+    }
+  });
+}
+
+export async function listPostHistory(
+  userId: string,
+  input: AccountListInput = {},
+  now = new Date()
+): Promise<AccountListResponse<Awaited<ReturnType<typeof addPostViewerState>>[number]>> {
+  const scope = "history";
+  const limit = normalizeLimit(input.limit);
+  const cursor = decodeCursor(input.cursor, scope);
+  const cutoff = new Date(now.getTime() - HISTORY_RETENTION_DAYS * 86_400_000);
+  const rows = await prisma.postViewHistory.findMany({
+    where: {
+      userId,
+      lastViewedAt: { gte: cutoff },
+      ...(cursor ? { AND: [historyAfterPredicate(cursor)] } : {})
+    },
+    include: postHistoryInclude,
+    orderBy: [{ lastViewedAt: "desc" }, { id: "desc" }],
+    take: limit + 1
+  });
+  const hasMore = rows.length > limit;
+  const returned = rows.slice(0, limit);
+  const items = await addPostViewerState(
+    returned.map((row) => mapDatabasePost(row.post)),
+    userId
+  );
+  const last = returned.at(-1);
+  return {
+    items,
+    nextCursor: hasMore && last
+      ? encodeAccountCursor({
+          scope,
+          occurredAt: last.lastViewedAt.toISOString(),
+          id: last.id
+        })
+      : null
+  };
+}
+
+export async function deleteExpiredPostViews(now = new Date()) {
+  const cutoff = new Date(now.getTime() - HISTORY_RETENTION_DAYS * 86_400_000);
+  const result = await prisma.postViewHistory.deleteMany({
+    where: { lastViewedAt: { lt: cutoff } }
+  });
+  return { deleted: result.count };
 }
 
 export async function setChannelBookmark(

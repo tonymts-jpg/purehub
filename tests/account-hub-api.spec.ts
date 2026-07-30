@@ -5,6 +5,11 @@ import {
   type APIRequestContext,
   type TestInfo
 } from "@playwright/test";
+import {
+  deleteExpiredPostViews,
+  listPostHistory,
+  recordPostView
+} from "../lib/account/repository";
 import { parseAccountCursor } from "../lib/account/cursor";
 import { prisma } from "../lib/prisma";
 import { hasDatabase, registerFan, signIn } from "./auth-helpers";
@@ -223,5 +228,174 @@ test("favorites paginate only ACL-visible channel bookmarks", async ({ request }
     await prisma.channel.deleteMany({
       where: { id: { in: channels.map((channel) => channel.id) } }
     });
+  }
+});
+
+test("view history requires authentication", async () => {
+  const anonymous = await playwrightRequest.newContext({
+    baseURL: process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3001"
+  });
+
+  try {
+    expect((await anonymous.post("/api/posts/post-1/view")).status()).toBe(401);
+    expect((await anonymous.get("/api/me/history")).status()).toBe(401);
+  } finally {
+    await anonymous.dispose();
+  }
+});
+
+test("view history preserves the first timestamp and advances the last timestamp", async ({ request }, testInfo) => {
+  await requireAccountDatabase(request, testInfo);
+  const fan = await registerFan(request, "account-view-upsert");
+  await signIn(request, fan.email);
+  const fanId = (await (await request.get("/api/me")).json()).user.id as string;
+  const first = new Date("2026-04-30T00:00:00.000Z");
+  const second = new Date("2026-07-30T00:00:00.000Z");
+
+  try {
+    await recordPostView(fanId, "post-1", first);
+    await recordPostView(fanId, "post-1", second);
+    const row = await prisma.postViewHistory.findUniqueOrThrow({
+      where: { userId_postId: { userId: fanId, postId: "post-1" } }
+    });
+
+    expect(row.firstViewedAt).toEqual(first);
+    expect(row.lastViewedAt).toEqual(second);
+    expect(await prisma.postViewHistory.count({
+      where: { userId: fanId, postId: "post-1" }
+    })).toBe(1);
+  } finally {
+    await prisma.postViewHistory.deleteMany({ where: { userId: fanId } });
+  }
+});
+
+test("view history includes the exact ninety day boundary and deletes only older views", async ({ request }, testInfo) => {
+  await requireAccountDatabase(request, testInfo);
+  const fan = await registerFan(request, "account-view-retention");
+  await signIn(request, fan.email);
+  const fanId = (await (await request.get("/api/me")).json()).user.id as string;
+  const now = new Date("2026-07-30T00:00:00.000Z");
+  const exactCutoff = new Date("2026-05-01T00:00:00.000Z");
+  const expired = new Date("2026-04-30T23:59:59.999Z");
+  const recent = new Date("2026-07-29T00:00:00.000Z");
+
+  try {
+    await recordPostView(fanId, "post-1", exactCutoff);
+    await recordPostView(fanId, "post-2", expired);
+    await recordPostView(fanId, "post-3", recent);
+
+    const page = await listPostHistory(fanId, { limit: 1 }, now);
+    expect(page.items).toEqual([
+      expect.objectContaining({
+        id: "post-3",
+        media: expect.any(Array),
+        bookmarked: expect.any(Boolean),
+        liked: expect.any(Boolean),
+        hasAccess: expect.any(Boolean)
+      })
+    ]);
+    expect(page.nextCursor).not.toBeNull();
+    const recentRow = await prisma.postViewHistory.findUniqueOrThrow({
+      where: { userId_postId: { userId: fanId, postId: "post-3" } }
+    });
+    expect(parseAccountCursor(page.nextCursor!, "history")).toEqual({
+      scope: "history",
+      occurredAt: recent.toISOString(),
+      id: recentRow.id
+    });
+
+    const all = await listPostHistory(fanId, {}, now);
+    expect(all.items.map((post) => post.id)).toEqual(["post-3", "post-1"]);
+
+    expect(await deleteExpiredPostViews(now)).toEqual({ deleted: 1 });
+    expect(await prisma.postViewHistory.findUnique({
+      where: { userId_postId: { userId: fanId, postId: "post-1" } }
+    })).not.toBeNull();
+    expect(await prisma.postViewHistory.findUnique({
+      where: { userId_postId: { userId: fanId, postId: "post-2" } }
+    })).toBeNull();
+    expect(await deleteExpiredPostViews(now)).toEqual({ deleted: 0 });
+  } finally {
+    await prisma.postViewHistory.deleteMany({ where: { userId: fanId } });
+  }
+});
+
+test("view history routes use only the session identity and reject missing posts", async ({ request }, testInfo) => {
+  await requireAccountDatabase(request, testInfo);
+  const fan = await registerFan(request, "account-view-session");
+  await signIn(request, fan.email);
+  const fanId = (await (await request.get("/api/me")).json()).user.id as string;
+
+  try {
+    expect((await request.post("/api/posts/post-1/view", {
+      data: { userId: "c1" }
+    })).status()).toBe(400);
+    expect(await prisma.postViewHistory.count({
+      where: { userId: { in: [fanId, "c1"] }, postId: "post-1" }
+    })).toBe(0);
+
+    const recorded = await request.post("/api/posts/post-1/view", {
+      headers: { "x-user-id": "c1" }
+    });
+    expect(recorded.status(), await recorded.text()).toBe(204);
+    expect(await prisma.postViewHistory.findUnique({
+      where: { userId_postId: { userId: fanId, postId: "post-1" } }
+    })).not.toBeNull();
+    expect(await prisma.postViewHistory.findUnique({
+      where: { userId_postId: { userId: "c1", postId: "post-1" } }
+    })).toBeNull();
+
+    expect((await request.get("/api/me/history?userId=c1")).status()).toBe(400);
+    const history = await request.get("/api/me/history", {
+      headers: { "x-user-id": "c1" }
+    });
+    expect(history.ok(), await history.text()).toBeTruthy();
+    expect((await history.json()).items.map((post: { id: string }) => post.id)).toEqual(["post-1"]);
+
+    expect((await request.post(`/api/posts/missing-${Date.now()}/view`)).status()).toBe(404);
+  } finally {
+    await prisma.postViewHistory.deleteMany({ where: { userId: fanId } });
+  }
+});
+
+test("account maintenance accepts only its worker token and deletes expired view history", async ({ request }, testInfo) => {
+  await requireAccountDatabase(request, testInfo);
+  const { POST: runAccountMaintenance } = await import(
+    "../app/api/internal/account-maintenance/run/route"
+  );
+  const fan = await registerFan(request, "account-view-maintenance");
+  await signIn(request, fan.email);
+  const fanId = (await (await request.get("/api/me")).json()).user.id as string;
+  const previousToken = process.env.WORKER_ACCESS_TOKEN;
+  process.env.WORKER_ACCESS_TOKEN = "account-maintenance-test-token";
+
+  try {
+    await recordPostView(fanId, "post-1", new Date("2020-01-01T00:00:00.000Z"));
+
+    const rejected = await runAccountMaintenance(new Request(
+      "http://localhost/api/internal/account-maintenance/run",
+      { method: "POST", headers: { "x-worker-token": "wrong-token" } }
+    ));
+    expect(rejected.status).toBe(401);
+    expect(await prisma.postViewHistory.findUnique({
+      where: { userId_postId: { userId: fanId, postId: "post-1" } }
+    })).not.toBeNull();
+
+    const accepted = await runAccountMaintenance(new Request(
+      "http://localhost/api/internal/account-maintenance/run",
+      { method: "POST", headers: { "x-worker-token": "account-maintenance-test-token" } }
+    ));
+    expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toEqual({ deleted: expect.any(Number) });
+    expect(await prisma.postViewHistory.findUnique({
+      where: { userId_postId: { userId: fanId, postId: "post-1" } }
+    })).toBeNull();
+  } finally {
+    if (previousToken === undefined) {
+      delete process.env.WORKER_ACCESS_TOKEN;
+    } else {
+      process.env.WORKER_ACCESS_TOKEN = previousToken;
+    }
+    await prisma.postViewHistory.deleteMany({ where: { userId: fanId } });
   }
 });

@@ -53,6 +53,10 @@ export default function PostPage({params}:{params:Promise<{id:string}>}) {
     fetch(`/api/posts/${id}/comments`).then(response=>response.ok?response.json():null).then(body=>body?.comments&&setComments(body.comments)).catch(()=>undefined);
     return()=>{active=false};
   },[id]);
+  useEffect(() => {
+    if (!session?.user || !post?.id) return;
+    void fetch(`/api/posts/${post.id}/view`, { method: "POST" }).catch(() => undefined);
+  }, [post?.id, session?.user]);
 
   if(!post)return <div className="p-20 text-center">作品不存在</div>;
 
