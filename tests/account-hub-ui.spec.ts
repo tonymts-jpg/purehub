@@ -649,3 +649,59 @@ test("history: renders the canonical API creator instead of the demo catalog", a
   await page.goto("/history");
   await expect(page.getByText("数据库创作者", { exact: true })).toBeVisible();
 });
+
+test("hot posts: home rail renders four canonical posts before creators", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "mobile", "The home right rail is desktop-only.");
+  await page.setViewportSize({ width: 1600, height: 900 });
+  const posts = Array.from({ length: 5 }, (_, index) => ({
+    id: `hot-post-${index + 1}`,
+    creatorId: `hot-creator-${index + 1}`,
+    title: `热度作品 ${index + 1}`,
+    excerpt: `热度作品 ${index + 1} 摘要`,
+    content: `热度作品 ${index + 1} 正文`,
+    cover: "from-violet to-coral",
+    category: "摄影",
+    tags: [],
+    visibility: "free",
+    likes: 120 - index,
+    comments: [],
+    createdAt: "刚刚",
+    media: [{
+      id: `hot-media-${index + 1}`,
+      src: `/api/media/hot-media-${index + 1}/content`,
+      alt: `热度作品 ${index + 1} 缩略图`,
+      width: 640,
+      height: 480,
+      order: 0,
+      kind: "image"
+    }],
+    popularityScore: 200 - index,
+    creator: {
+      id: `hot-creator-${index + 1}`,
+      name: `热度博主 ${index + 1}`,
+      handle: `hot-creator-${index + 1}`,
+      avatar: "热"
+    }
+  }));
+  await page.route("**/api/trending/posts?limit=4", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({ posts })
+  }));
+
+  await page.goto("/");
+
+  const hotPosts = page.getByTestId("hot-posts");
+  const hotCreators = page.getByTestId("hot-creators");
+  await expect(hotPosts.getByTestId("hot-post-item")).toHaveCount(4);
+  await expect(hotCreators).toBeVisible();
+  await expect(hotPosts.getByRole("img", { name: "热度作品 1 缩略图" })).toBeVisible();
+  await expect(hotPosts.getByRole("link", { name: "热度作品 1", exact: true })).toHaveAttribute("href", "/post/hot-post-1");
+  await expect(hotPosts.getByText("热度博主 1", { exact: true })).toBeVisible();
+  await expect(hotPosts.getByText("120", { exact: true })).toBeVisible();
+  expect(await hotPosts.evaluate((node) => node.compareDocumentPosition(
+    document.querySelector('[data-testid="hot-creators"]')!
+  ) & Node.DOCUMENT_POSITION_FOLLOWING)).toBeTruthy();
+  await expect(hotPosts.getByRole("link", { name: "查看全部熱度作品" })).toHaveAttribute(
+    "href", "/trending/posts"
+  );
+});

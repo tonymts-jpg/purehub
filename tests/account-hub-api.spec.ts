@@ -13,6 +13,7 @@ import {
 } from "../lib/account/repository";
 import { parseAccountCursor } from "../lib/account/cursor";
 import { prisma } from "../lib/prisma";
+import { normalizeTrendingPostsLimit } from "../lib/search/repository";
 import { hasDatabase, registerFan, signIn } from "./auth-helpers";
 
 async function requireAccountDatabase(
@@ -918,5 +919,207 @@ test("account maintenance accepts only its worker token and deletes expired view
       process.env.WORKER_ACCESS_TOKEN = previousToken;
     }
     await prisma.postViewHistory.deleteMany({ where: { userId: fanId } });
+  }
+});
+
+test("hot posts: public endpoint rejects duplicate, unknown, and invalid limits", async ({ request }) => {
+  expect(normalizeTrendingPostsLimit(null)).toBe(4);
+  expect(normalizeTrendingPostsLimit("12")).toBe(12);
+  const invalidUrls = [
+    "http://localhost/api/trending/posts?limit=1&limit=2",
+    "http://localhost/api/trending/posts?cursor=post-1",
+    "http://localhost/api/trending/posts?userId=attacker",
+    "http://localhost/api/trending/posts?limit=",
+    "http://localhost/api/trending/posts?limit=0",
+    "http://localhost/api/trending/posts?limit=13",
+    "http://localhost/api/trending/posts?limit=1.5",
+    "http://localhost/api/trending/posts?limit=%201"
+  ];
+
+  for (const url of invalidUrls) {
+    const parsed = new URL(url);
+    const response = await request.get(`${parsed.pathname}${parsed.search}`);
+    expect(response.status(), url).toBe(400);
+  }
+});
+
+test("hot posts: indexed ranking returns only canonical public posts and public media", async ({ request }, testInfo) => {
+  await requireAccountDatabase(request, testInfo);
+  const { listTrendingPosts } = await import("../lib/search/repository");
+  const nonce = Date.now().toString(36);
+  const activeCreatorId = `hot-posts-active-${nonce}`;
+  const suspendedCreatorId = `hot-posts-suspended-${nonce}`;
+  const postIds = {
+    top: `hot-posts-10-top-${nonce}`,
+    tieA: `hot-posts-20-a-${nonce}`,
+    tieB: `hot-posts-20-b-${nonce}`,
+    tieC: `hot-posts-20-c-${nonce}`,
+    members: `hot-posts-00-members-${nonce}`,
+    suspended: `hot-posts-01-suspended-${nonce}`
+  };
+  const allPostIds = Object.values(postIds);
+  const mediaIds = [
+    `hot-posts-public-media-${nonce}`,
+    `hot-posts-members-media-${nonce}`,
+    `hot-posts-unsafe-media-${nonce}`
+  ];
+  const publishedAt = new Date("2026-07-30T08:00:00.000Z");
+
+  try {
+    await prisma.user.createMany({
+      data: [
+        {
+          id: activeCreatorId,
+          name: "热度测试博主",
+          handle: `hot-posts-active-${nonce}`,
+          avatar: "热",
+          email: `hot-posts-active-${nonce}@e2e.purehub.local`,
+          role: "creator",
+          creatorStatus: "approved"
+        },
+        {
+          id: suspendedCreatorId,
+          name: "停用热度博主",
+          handle: `hot-posts-suspended-${nonce}`,
+          avatar: "停",
+          email: `hot-posts-suspended-${nonce}@e2e.purehub.local`,
+          status: "suspended",
+          role: "creator",
+          creatorStatus: "approved"
+        }
+      ]
+    });
+    await prisma.creatorProfile.createMany({
+      data: [
+        {
+          id: `${activeCreatorId}-profile`,
+          userId: activeCreatorId,
+          bio: "热度作品测试博主。",
+          category: "摄影",
+          cover: "hot-posts-active-cover",
+          verified: true
+        },
+        {
+          id: `${suspendedCreatorId}-profile`,
+          userId: suspendedCreatorId,
+          bio: "停用热度作品测试博主。",
+          category: "摄影",
+          cover: "hot-posts-suspended-cover"
+        }
+      ]
+    });
+    await prisma.post.createMany({
+      data: [
+        { id: postIds.top, creatorId: activeCreatorId, title: "数据库第一名", visibility: "free", likes: 1 },
+        { id: postIds.tieA, creatorId: activeCreatorId, title: "数据库并列甲", visibility: "free", likes: 999 },
+        { id: postIds.tieB, creatorId: activeCreatorId, title: "数据库并列乙", visibility: "free", likes: 500 },
+        { id: postIds.tieC, creatorId: activeCreatorId, title: "数据库并列丙", visibility: "free", likes: 250 },
+        { id: postIds.members, creatorId: activeCreatorId, title: "会员作品", visibility: "members", likes: 9999 },
+        { id: postIds.suspended, creatorId: suspendedCreatorId, title: "停用博主作品", visibility: "free", likes: 9999 }
+      ].map((post) => ({
+        ...post,
+        excerpt: `${post.title}摘要`,
+        content: `${post.title}正文`,
+        cover: "/images/post-placeholder.svg",
+        category: "摄影",
+        tags: [],
+        comments: [],
+        createdLabel: "刚刚",
+        createdAt: publishedAt
+      }))
+    });
+    await prisma.mediaAsset.createMany({
+      data: [
+        {
+          id: mediaIds[0],
+          postId: postIds.top,
+          src: `/api/media/${mediaIds[0]}/access`,
+          alt: "公开缩略图",
+          width: 640,
+          height: 480,
+          order: 0,
+          kind: "image",
+          mimeType: "image/jpeg",
+          sizeBytes: 1024,
+          status: "ready",
+          visibility: "public"
+        },
+        {
+          id: mediaIds[1],
+          postId: postIds.top,
+          src: `/api/media/${mediaIds[1]}/access`,
+          alt: "会员缩略图",
+          width: 640,
+          height: 480,
+          order: 1,
+          kind: "image",
+          mimeType: "image/jpeg",
+          sizeBytes: 1024,
+          status: "ready",
+          visibility: "members"
+        },
+        {
+          id: mediaIds[2],
+          postId: postIds.top,
+          src: `/api/media/${mediaIds[2]}/access`,
+          alt: "不安全缩略图",
+          width: 640,
+          height: 480,
+          order: 2,
+          kind: "image",
+          mimeType: "image/svg+xml",
+          sizeBytes: 1024,
+          status: "ready",
+          visibility: "public"
+        }
+      ]
+    });
+    await prisma.searchDocument.createMany({
+      data: [
+        { entityType: "post", entityId: postIds.members, title: "索引会员作品", body: "", keywords: "", popularityScore: 50_000, publishedAt },
+        { entityType: "post", entityId: postIds.suspended, title: "索引停用作品", body: "", keywords: "", popularityScore: 40_000, publishedAt },
+        { entityType: "post", entityId: postIds.top, title: "索引标题不应返回", body: "", keywords: "", popularityScore: 30_000, publishedAt },
+        { entityType: "post", entityId: postIds.tieA, title: "索引并列甲", body: "", keywords: "", popularityScore: 20_000, publishedAt: new Date("2026-07-30T07:00:00.000Z") },
+        { entityType: "post", entityId: postIds.tieB, title: "索引并列乙", body: "", keywords: "", popularityScore: 20_000, publishedAt },
+        { entityType: "post", entityId: postIds.tieC, title: "索引并列丙", body: "", keywords: "", popularityScore: 20_000, publishedAt }
+      ]
+    });
+
+    const posts = await listTrendingPosts(6, null);
+
+    expect(posts.map((post) => post.id)).toEqual([
+      postIds.top,
+      postIds.tieB,
+      postIds.tieC,
+      postIds.tieA
+    ]);
+    expect(posts.map((post) => post.title)).toEqual([
+      "数据库第一名",
+      "数据库并列乙",
+      "数据库并列丙",
+      "数据库并列甲"
+    ]);
+    expect(posts[0].media).toEqual([expect.objectContaining({
+      id: mediaIds[0],
+      src: `/api/media/${mediaIds[0]}/content`,
+      alt: "公开缩略图"
+    })]);
+    expect(posts.every((post) => post.visibility === "free")).toBeTruthy();
+
+    const defaultResponse = await request.get("/api/trending/posts", {
+      headers: { "x-user-id": activeCreatorId }
+    });
+    expect(defaultResponse.status()).toBe(200);
+    const defaultBody = await defaultResponse.json() as { posts: Array<{ id: string }> };
+    expect(defaultBody.posts.map((post) => post.id)).toEqual([
+      postIds.top,
+      postIds.tieB
+    ]);
+  } finally {
+    await prisma.searchDocument.deleteMany({ where: { entityType: "post", entityId: { in: allPostIds } } });
+    await prisma.mediaAsset.deleteMany({ where: { id: { in: mediaIds } } });
+    await prisma.post.deleteMany({ where: { id: { in: allPostIds } } });
+    await prisma.creatorProfile.deleteMany({ where: { userId: { in: [activeCreatorId, suspendedCreatorId] } } });
+    await prisma.user.deleteMany({ where: { id: { in: [activeCreatorId, suspendedCreatorId] } } });
   }
 });

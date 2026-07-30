@@ -4,8 +4,10 @@ import type {
   SearchResult
 } from "@/lib/channels/types";
 import type { AdminContext } from "@/lib/admin-auth";
+import { addPostViewerState, mapDatabasePost } from "@/lib/db-repository";
 import { prisma } from "@/lib/prisma";
 import { SAFE_IMAGE_MIME_TYPES, SAFE_VIDEO_MIME_TYPES } from "@/lib/storage/media-policy";
+import type { Post } from "@/lib/types";
 import {
   SEARCH_ENTITY_TYPES,
   type SearchEntityType
@@ -53,6 +55,28 @@ type SearchRow = {
   rank: number;
   publishedAt: Date;
 };
+
+export type TrendingPostDto = Post & {
+  popularityScore: number;
+  creator: {
+    id: string;
+    name: string;
+    handle: string;
+    avatar: string;
+  };
+};
+
+export function normalizeTrendingPostsLimit(rawLimit: string | null): number {
+  if (rawLimit === null) return 4;
+  if (!/^\d+$/.test(rawLimit)) {
+    throw new TypeError("热度作品数量必须是 1 到 12 之间的整数。");
+  }
+  const limit = Number(rawLimit);
+  if (limit < 1 || limit > 12) {
+    throw new TypeError("热度作品数量必须是 1 到 12 之间的整数。");
+  }
+  return limit;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -678,4 +702,80 @@ export async function searchEntities(
       })
     : null;
   return { results, nextCursor };
+}
+
+export async function listTrendingPosts(
+  limit: number,
+  viewerUserId: string | null
+): Promise<TrendingPostDto[]> {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 12) {
+    throw new TypeError("热度作品数量必须是 1 到 12 之间的整数。");
+  }
+
+  const rankedDocuments = await prisma.searchDocument.findMany({
+    where: { entityType: "post" },
+    select: {
+      entityId: true,
+      popularityScore: true,
+      publishedAt: true
+    },
+    orderBy: [
+      { popularityScore: "desc" },
+      { publishedAt: "desc" },
+      { entityId: "asc" }
+    ],
+    take: limit
+  });
+  if (!rankedDocuments.length) return [];
+
+  const rankedPostIds = rankedDocuments.map(({ entityId }) => entityId);
+  const canonicalPosts = await prisma.post.findMany({
+    where: {
+      id: { in: rankedPostIds },
+      visibility: "free",
+      creator: {
+        is: {
+          status: "active",
+          role: "creator",
+          creatorStatus: "approved"
+        }
+      }
+    },
+    include: {
+      creator: {
+        select: {
+          id: true,
+          name: true,
+          handle: true,
+          avatar: true
+        }
+      },
+      media: {
+        where: {
+          status: "ready",
+          visibility: { in: ["public", "free"] },
+          OR: [
+            { kind: "image", mimeType: { in: [...SAFE_IMAGE_MIME_TYPES] } },
+            { kind: "video", mimeType: { in: [...SAFE_VIDEO_MIME_TYPES] } }
+          ]
+        },
+        orderBy: [{ order: "asc" }, { id: "asc" }]
+      }
+    }
+  });
+  const canonicalById = new Map(canonicalPosts.map((post) => [post.id, post]));
+  const eligible = rankedDocuments.flatMap((document) => {
+    const post = canonicalById.get(document.entityId);
+    return post ? [{ document, post }] : [];
+  });
+  const mapped = await addPostViewerState(
+    eligible.map(({ post }) => mapDatabasePost(post)),
+    viewerUserId ?? undefined
+  );
+
+  return mapped.map((post, index) => ({
+    ...post,
+    popularityScore: eligible[index].document.popularityScore,
+    creator: eligible[index].post.creator
+  }));
 }
