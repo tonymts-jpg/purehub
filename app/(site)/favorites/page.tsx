@@ -6,6 +6,7 @@ import { PageHeader } from "@/components/app-shell";
 import { AccountListState } from "@/components/account/account-list-state";
 import { AccountPostGrid } from "@/components/account/account-post-grid";
 import { ChannelFavoriteCard } from "@/components/account/channel-favorite-card";
+import { redirectToAccountSignIn } from "@/lib/account/client";
 import type { AccountChannelFavoriteListItem } from "@/lib/account/types";
 import type { Post } from "@/lib/types";
 
@@ -14,10 +15,6 @@ type FavoriteChannel = AccountChannelFavoriteListItem;
 
 function isFavoriteType(value: string | null): value is FavoriteType {
   return value === "channels" || value === "posts";
-}
-
-function safeCallback(pathname: string, search: string) {
-  return pathname.startsWith("/") ? `${pathname}${search}` : "/favorites";
 }
 
 export default function FavoritesPage() {
@@ -48,7 +45,7 @@ export default function FavoritesPage() {
       try {
         const response = await fetch(`/api/me/favorites?type=${selectedType}`);
         if (response.status === 401) {
-          window.location.assign(`/sign-in?callbackUrl=${encodeURIComponent(safeCallback(pathname, window.location.search))}`);
+          redirectToAccountSignIn(pathname, window.location.search);
           return;
         }
         const body = await response.json().catch(() => null) as { items?: unknown[]; nextCursor?: string | null; error?: string } | null;
@@ -73,6 +70,10 @@ export default function FavoritesPage() {
     setError(null);
     try {
       const response = await fetch(`/api/me/favorites?type=${selectedType}&cursor=${encodeURIComponent(nextCursor)}`);
+      if (response.status === 401) {
+        redirectToAccountSignIn(pathname, window.location.search);
+        return;
+      }
       const body = await response.json().catch(() => null) as { items?: unknown[]; nextCursor?: string | null; error?: string } | null;
       if (!response.ok) throw new Error(body?.error || "暂时无法加载更多收藏。");
       if (selectedType === "posts") setPosts((current) => [...current, ...((body?.items ?? []) as Post[])]);
@@ -91,6 +92,10 @@ export default function FavoritesPage() {
     setError(null);
     try {
       const response = await fetch(`/api/channels/${channel.slug}/bookmark`, { method: "DELETE" });
+      if (response.status === 401) {
+        redirectToAccountSignIn(pathname, window.location.search);
+        return;
+      }
       const body = await response.json().catch(() => null) as { error?: string } | null;
       if (!response.ok) throw new Error(body?.error || "暂时无法取消收藏频道。");
       setChannels((current) => current.filter((candidate) => candidate.channel.slug !== channel.slug));

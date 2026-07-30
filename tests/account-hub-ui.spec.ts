@@ -286,7 +286,7 @@ test("unlocked: renders the API-authoritative purchase and subscription labels",
   await expect(page.getByText("Active Subscription")).toBeVisible();
 });
 
-test("channel favorite: public detail keeps the bookmark action separate and sends a guest to a safe return URL", async ({ page }) => {
+test("favorites: channel favorite public detail keeps the bookmark action separate and sends a guest to a safe return URL", async ({ page }) => {
   test.skip(!(await hasDatabase(page.request)), "Channel detail is server-rendered and requires the seeded PostgreSQL database.");
 
   await page.goto("/channels/purehub-official?from=favorites");
@@ -296,7 +296,7 @@ test("channel favorite: public detail keeps the bookmark action separate and sen
   await expect(page).toHaveURL(/\/sign-in\?callbackUrl=%2Fchannels%2Fpurehub-official%3Ffrom%3Dfavorites/);
 });
 
-test("channel favorite: a visible private owner detail keeps bookmarking separate from membership", async ({ page }) => {
+test("favorites: channel favorite visible private owner detail keeps bookmarking separate from membership", async ({ page }) => {
   test.skip(!(await hasDatabase(page.request)), "Channel detail is server-rendered and requires the seeded PostgreSQL database.");
   await signInCreator(page.request, "chenmo");
 
@@ -304,4 +304,109 @@ test("channel favorite: a visible private owner detail keeps bookmarking separat
   await expect(page.getByRole("button", { name: "收藏频道" })).toBeVisible();
   await expect(page.getByText("频道所有者")).toBeVisible();
   await expect(page.getByRole("button", { name: /申请加入频道|退出频道/ })).toHaveCount(0);
+});
+
+test("favorites: stale session redirects before parsing a pagination response", async ({ page }) => {
+  await mockAccountSession(page);
+  await page.route("**/api/me/favorites**", (route) => {
+    if (new URL(route.request().url()).searchParams.has("cursor")) {
+      return route.fulfill({ status: 401, contentType: "text/plain", body: "expired" });
+    }
+    return route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ items: [{ channel: favoriteChannel(), occurredAt: "2026-07-30T04:00:00.000Z" }], nextCursor: "next-page" })
+    });
+  });
+
+  await page.goto("/favorites?type=channels&from=search");
+  await page.getByRole("button", { name: "加载更多" }).click();
+  await expect(page).toHaveURL(/\/sign-in\?callbackUrl=%2Ffavorites%3Ftype%3Dchannels%26from%3Dsearch/);
+});
+
+test("favorites: stale session redirects before parsing a channel removal response", async ({ page }) => {
+  await mockAccountSession(page);
+  await page.route("**/api/me/favorites**", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({ items: [{ channel: favoriteChannel(), occurredAt: "2026-07-30T04:00:00.000Z" }], nextCursor: null })
+  }));
+  await page.route("**/api/channels/purehub-official/bookmark", (route) => route.fulfill({ status: 401, contentType: "text/plain", body: "expired" }));
+
+  await page.goto("/favorites?type=channels&from=detail");
+  await page.getByRole("button", { name: "取消收藏频道" }).click();
+  await expect(page).toHaveURL(/\/sign-in\?callbackUrl=%2Ffavorites%3Ftype%3Dchannels%26from%3Ddetail/);
+});
+
+test("unlocked: stale session redirects before parsing a pagination response", async ({ page }) => {
+  await mockAccountSession(page);
+  await page.route("**/api/me/unlocked**", (route) => {
+    if (new URL(route.request().url()).searchParams.has("cursor")) {
+      return route.fulfill({ status: 401, contentType: "text/plain", body: "expired" });
+    }
+    return route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [{ post: accountPost("post-1", "已解锁作品"), source: "purchase", occurredAt: "2026-07-30T00:00:00.000Z" }],
+        nextCursor: "next-page"
+      })
+    });
+  });
+
+  await page.goto("/unlocked?from=library");
+  await page.getByRole("button", { name: "加载更多" }).click();
+  await expect(page).toHaveURL(/\/sign-in\?callbackUrl=%2Funlocked%3Ffrom%3Dlibrary/);
+});
+
+test("favorites: channel cards show explicit visibility plus owner avatar or a safe fallback", async ({ page }) => {
+  await mockAccountSession(page);
+  const privateChannel = {
+    slug: "private-curators",
+    name: "私密策展频道",
+    description: "仅显示安全频道摘要。",
+    kind: "creator",
+    visibility: "private",
+    discoverability: "discoverable",
+    status: "active",
+    bookmarked: true
+  };
+  await page.route("**/api/me/favorites**", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({
+      items: [
+        { channel: { ...favoriteChannel(), owner: { id: "owner", name: "频道所有者", handle: "owner", avatar: "O" } }, occurredAt: "2026-07-30T04:00:00.000Z" },
+        { channel: privateChannel, occurredAt: "2026-07-29T04:00:00.000Z" }
+      ],
+      nextCursor: null
+    })
+  }));
+
+  await page.goto("/favorites?type=channels");
+  await expect(page.getByText("官方频道 · 公开频道", { exact: true })).toBeVisible();
+  await expect(page.getByText("创作者频道 · 私密频道", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("channel-favorite-owner-avatar")).toHaveText("O");
+  await expect(page.getByTestId("channel-favorite-fallback")).toHaveText("私");
+});
+
+test("favorites: channel favorite detail redirects on a stale bookmark mutation", async ({ page }) => {
+  test.skip(!(await hasDatabase(page.request)), "Channel detail is server-rendered and requires the seeded PostgreSQL database.");
+  await mockAccountSession(page);
+  await page.route("**/api/channels/purehub-official/bookmark", (route) => route.fulfill({ status: 401, contentType: "text/plain", body: "expired" }));
+
+  await page.goto("/channels/purehub-official?from=favorites");
+  await page.getByRole("button", { name: "收藏频道" }).click();
+  await expect(page).toHaveURL(/\/sign-in\?callbackUrl=%2Fchannels%2Fpurehub-official%3Ffrom%3Dfavorites/);
+});
+
+test("favorites: channel favorite detail defers interaction until session hydration completes", async ({ page }) => {
+  test.skip(!(await hasDatabase(page.request)), "Channel detail is server-rendered and requires the seeded PostgreSQL database.");
+  let releaseSession: (() => void) | undefined;
+  const sessionPending = new Promise<void>((resolve) => { releaseSession = resolve; });
+  await page.route("**/api/auth/get-session", async (route) => {
+    await sessionPending;
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ session: null, user: null }) });
+  });
+
+  await page.goto("/channels/purehub-official");
+  await expect(page.getByRole("button", { name: "收藏频道" })).toBeDisabled();
+  releaseSession?.();
+  await expect(page.getByRole("button", { name: "收藏频道" })).toBeEnabled();
 });

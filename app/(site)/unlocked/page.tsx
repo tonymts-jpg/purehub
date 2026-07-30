@@ -5,11 +5,8 @@ import { usePathname } from "next/navigation";
 import { PageHeader } from "@/components/app-shell";
 import { AccountListState } from "@/components/account/account-list-state";
 import { AccountPostGrid } from "@/components/account/account-post-grid";
+import { redirectToAccountSignIn } from "@/lib/account/client";
 import type { AccountUnlockedListItem } from "@/lib/account/types";
-
-function currentCallback(pathname: string) {
-  return pathname.startsWith("/") ? `${pathname}${window.location.search}` : "/unlocked";
-}
 
 export default function UnlockedPage() {
   const pathname = usePathname();
@@ -30,7 +27,7 @@ export default function UnlockedPage() {
       try {
         const response = await fetch("/api/me/unlocked");
         if (response.status === 401) {
-          window.location.assign(`/sign-in?callbackUrl=${encodeURIComponent(currentCallback(pathname))}`);
+          redirectToAccountSignIn(pathname, window.location.search);
           return;
         }
         const body = await response.json().catch(() => null) as { items?: AccountUnlockedListItem[]; nextCursor?: string | null; error?: string } | null;
@@ -54,6 +51,10 @@ export default function UnlockedPage() {
     setError(null);
     try {
       const response = await fetch(`/api/me/unlocked?cursor=${encodeURIComponent(nextCursor)}`);
+      if (response.status === 401) {
+        redirectToAccountSignIn(pathname, window.location.search);
+        return;
+      }
       const body = await response.json().catch(() => null) as { items?: AccountUnlockedListItem[]; nextCursor?: string | null; error?: string } | null;
       if (!response.ok) throw new Error(body?.error || "暂时无法加载更多已解锁内容。");
       setItems((current) => [...current, ...(body?.items ?? [])]);

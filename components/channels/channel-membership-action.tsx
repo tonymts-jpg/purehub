@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Bookmark, LogOut, UserPlus } from "lucide-react";
+import { redirectToAccountSignIn } from "@/lib/account/client";
 import { authClient } from "@/lib/auth-client";
 
 type MembershipState = "available" | "pending" | "member";
@@ -17,17 +18,12 @@ export function ChannelMembershipAction({
   initialBookmarked?: boolean;
   showMembership?: boolean;
 }) {
-  const { data: session } = authClient.useSession();
+  const { data: session, isPending } = authClient.useSession();
   const [state, setState] = useState(initialState);
   const [bookmarked, setBookmarked] = useState(initialBookmarked);
   const [busy, setBusy] = useState(false);
   const [bookmarkBusy, setBookmarkBusy] = useState(false);
   const [error, setError] = useState("");
-
-  function signInForCurrentLocation() {
-    const callbackUrl = `${window.location.pathname}${window.location.search}`;
-    window.location.assign(`/sign-in?callbackUrl=${encodeURIComponent(callbackUrl.startsWith("/") ? callbackUrl : "/")}`);
-  }
 
   async function mutate() {
     if (busy || state === "pending") return;
@@ -55,13 +51,17 @@ export function ChannelMembershipAction({
   }
 
   async function toggleBookmark() {
-    if (bookmarkBusy) return;
-    if (!session?.user) return signInForCurrentLocation();
+    if (bookmarkBusy || isPending) return;
+    if (!session?.user) return redirectToAccountSignIn(window.location.pathname, window.location.search);
     const next = !bookmarked;
     setBookmarkBusy(true);
     setError("");
     try {
       const response = await fetch(`/api/channels/${slug}/bookmark`, { method: next ? "POST" : "DELETE" });
+      if (response.status === 401) {
+        redirectToAccountSignIn(window.location.pathname, window.location.search);
+        return;
+      }
       const body = await response.json().catch(() => null) as { error?: string } | null;
       if (!response.ok) throw new Error(body?.error || "暂时无法更新频道收藏。");
       setBookmarked(next);
@@ -89,7 +89,7 @@ export function ChannelMembershipAction({
           {state === "member" ? <LogOut size={17} /> : <UserPlus size={17} />}
           {busy ? "处理中…" : state === "member" ? "退出频道" : state === "pending" ? "申请审核中" : "申请加入"}
         </button>}
-        <button type="button" onClick={() => void toggleBookmark()} disabled={bookmarkBusy} aria-label={bookmarked ? "取消收藏频道" : "收藏频道"} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg border border-[var(--line)] px-5 text-sm font-black text-violet disabled:cursor-wait disabled:opacity-70 sm:w-auto">
+        <button type="button" onClick={() => void toggleBookmark()} disabled={bookmarkBusy || isPending} aria-label={bookmarked ? "取消收藏频道" : "收藏频道"} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg border border-[var(--line)] px-5 text-sm font-black text-violet disabled:cursor-wait disabled:opacity-70 sm:w-auto">
           <Bookmark size={17} fill={bookmarked ? "currentColor" : "none"} />
           {bookmarkBusy ? "处理中…" : bookmarked ? "已收藏" : "收藏"}
         </button>
