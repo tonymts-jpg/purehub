@@ -196,19 +196,24 @@ const publishableVisibilities = new Set(["free", "members", "purchase"]);
 export function resolveModeratedVisibility(
   action: AdminContentAction,
   currentVisibility: string,
-  previousVisibility?: string | null
+  previousVisibility?: string | null | readonly string[]
 ) {
   if (action === "hide") return "hidden";
   if (action === "unpublish") return "unpublished";
   if (publishableVisibilities.has(currentVisibility)) return currentVisibility;
-  if (previousVisibility && publishableVisibilities.has(previousVisibility)) return previousVisibility;
+  const history = Array.isArray(previousVisibility)
+    ? previousVisibility
+    : previousVisibility ? [previousVisibility] : [];
+  const stable = history.find((visibility) => publishableVisibilities.has(visibility));
+  if (stable) return stable;
   return "free";
 }
 
-function auditPreviousVisibility(metadata: Prisma.JsonValue | null | undefined) {
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
-  const value = (metadata as Prisma.JsonObject).previousVisibility;
-  return typeof value === "string" ? value : null;
+function auditVisibilityHistory(metadata: Prisma.JsonValue | null | undefined) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return [];
+  const object = metadata as Prisma.JsonObject;
+  return [object.lastPublishedVisibility, object.previousVisibility]
+    .filter((value): value is string => typeof value === "string");
 }
 
 export async function moderateAdminContent(
@@ -231,21 +236,26 @@ export async function moderateAdminContent(
       where: { id },
       select: { visibility: true }
     });
-    const previousAudit = input.action === "publish" && !publishableVisibilities.has(current.visibility)
-      ? await tx.auditLog.findFirst({
+    const previousAudits = !publishableVisibilities.has(current.visibility)
+      ? await tx.auditLog.findMany({
           where: {
             targetType: "post",
             targetId: id,
-            action: { in: ["admin.content.hide", "admin.content.unpublish"] }
+            action: { in: ["admin.content.hide", "admin.content.unpublish", "admin.content.publish"] }
           },
           orderBy: { createdAt: "desc" },
-          select: { metadata: true }
+          select: { metadata: true },
+          take: 100
         })
-      : null;
+      : [];
+    const visibilityHistory = previousAudits.flatMap(({ metadata }) => auditVisibilityHistory(metadata));
+    const lastPublishedVisibility = publishableVisibilities.has(current.visibility)
+      ? current.visibility
+      : visibilityHistory.find((visibility) => publishableVisibilities.has(visibility)) ?? null;
     const visibility = resolveModeratedVisibility(
       input.action,
       current.visibility,
-      auditPreviousVisibility(previousAudit?.metadata)
+      visibilityHistory
     );
     const updated = await tx.post.update({
       where: { id },
@@ -264,7 +274,7 @@ export async function moderateAdminContent(
         action: `admin.content.${input.action}`,
         targetType: "post",
         targetId: id,
-        metadata: { previousVisibility: current.visibility, visibility }
+        metadata: { previousVisibility: current.visibility, lastPublishedVisibility, visibility }
       }
     });
     return updated;

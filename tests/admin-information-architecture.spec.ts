@@ -2,7 +2,8 @@ import { expect, test } from "@playwright/test";
 import { adminNavigationForPermissions } from "../components/admin/admin-nav";
 import { canAdminAccess, canAdminManageSettings } from "../lib/admin-auth";
 import { getAdminOverview } from "../lib/admin-repository";
-import { authHeaders, hasDatabase, signInAdmin, signInSupport } from "./auth-helpers";
+import { prisma } from "../lib/prisma";
+import { authHeaders, hasDatabase, registerFan, signInAdmin, signInSupport } from "./auth-helpers";
 
 test("admin authorization distinguishes domain read and write access", () => {
   expect(canAdminAccess("support_admin", "members", "read")).toBe(true);
@@ -69,7 +70,7 @@ test("admin authorization ignores x-admin-role and enforces direct API writes", 
   expect(readable.status()).toBe(200);
 
   const forbidden = await request.patch("/api/admin/users/user-demo", {
-    headers: { "x-admin-role": "super_admin" },
+    headers: { ...authHeaders, "x-admin-role": "super_admin" },
     data: { status: "suspended" }
   });
   expect(forbidden.status()).toBe(403);
@@ -197,6 +198,56 @@ test("admin content moderation accepts only canonical list filters and actions",
   expect(resolveModeratedVisibility("publish", "members")).toBe("members");
   expect(resolveModeratedVisibility("hide", "purchase")).toBe("hidden");
   expect(resolveModeratedVisibility("publish", "hidden", "purchase")).toBe("purchase");
+  const resolveFromHistory = resolveModeratedVisibility as unknown as (
+    action: "publish" | "unpublish" | "hide",
+    current: string,
+    history: readonly string[]
+  ) => string;
+  expect(resolveFromHistory("publish", "unpublished", ["hidden", "purchase"])).toBe("purchase");
+  expect(resolveFromHistory("publish", "unpublished", ["hidden", "members", "hidden", "members"])).toBe("members");
+  expect(resolveFromHistory("publish", "hidden", [])).toBe("free");
+});
+
+test("admin members accepts only active or suspended account-state patches", async () => {
+  const { parseAdminUserStatePatch } = await import("../lib/admin-repository");
+
+  expect(parseAdminUserStatePatch({ status: "suspended" })).toEqual({ status: "suspended" });
+  expect(parseAdminUserStatePatch({ status: "active" })).toEqual({ status: "active" });
+  expect(() => parseAdminUserStatePatch({ status: "deleted" })).toThrow("Invalid admin member state.");
+  expect(() => parseAdminUserStatePatch({ status: "suspended", actorUserId: "spoofed" }))
+    .toThrow("Invalid admin member state.");
+  expect(() => parseAdminUserStatePatch({ status: "suspended", role: "admin" }))
+    .toThrow("Invalid admin member state.");
+});
+
+test("admin members updates state only after a successful server response", async () => {
+  const { updateAdminMemberStatus } = await import("../components/admin/members-page");
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const success = async (input: string | URL | Request, init?: RequestInit) => {
+    calls.push({ url: String(input), init });
+    return new Response(JSON.stringify({ user: { id: "member-1", status: "suspended" } }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+  const failed = async () => new Response(JSON.stringify({ error: "mutation failed visibly" }), {
+    status: 500,
+    headers: { "content-type": "application/json" }
+  });
+
+  await expect(updateAdminMemberStatus("member-1", "suspended", success)).resolves.toEqual({
+    id: "member-1",
+    status: "suspended"
+  });
+  expect(calls).toEqual([{
+    url: "/api/admin/users/member-1",
+    init: expect.objectContaining({
+      method: "PATCH",
+      body: JSON.stringify({ status: "suspended" })
+    })
+  }]);
+  await expect(updateAdminMemberStatus("member-1", "suspended", failed))
+    .rejects.toThrow("mutation failed visibly");
 });
 
 test("admin content APIs ignore x-admin-role and require a real admin session", async ({ request }) => {
@@ -249,4 +300,240 @@ test("admin content APIs enforce content read and write permissions", async ({ r
     data: { action: "hide", actorUserId: "spoofed" }
   });
   expect(invalidActor.status()).toBe(400);
+
+  const malformed = await request.patch("/api/admin/content/post-demo", {
+    headers: { ...authHeaders, "content-type": "application/json" },
+    data: "{"
+  });
+  expect(malformed.status()).toBe(400);
+
+  const missing = await request.patch("/api/admin/content/post-demo", {
+    headers: authHeaders
+  });
+  expect(missing.status()).toBe(400);
+});
+
+test("admin content repository preserves paid visibility through repeated moderation history", async ({ request }) => {
+  test.skip(!(await hasDatabase(request)), "Moderation transaction coverage requires the seeded database.");
+  const { moderateAdminContent } = await import("../lib/admin-content-repository");
+  const id = `task10-paid-${Date.now().toString(36)}`;
+  const admin = { actorUserId: "admin-demo", role: "super_admin" as const };
+
+  await prisma.post.create({
+    data: {
+      id,
+      creatorId: "c1",
+      title: "Task 10 paid moderation",
+      excerpt: "Visibility history fixture",
+      content: "Private paid content",
+      cover: "cover-1",
+      category: "Test",
+      tags: [],
+      visibility: "purchase",
+      comments: []
+    }
+  });
+  try {
+    expect((await moderateAdminContent(admin, id, { action: "hide" })).visibility).toBe("hidden");
+    expect((await moderateAdminContent(admin, id, { action: "unpublish" })).visibility).toBe("unpublished");
+    expect((await moderateAdminContent(admin, id, { action: "publish" })).visibility).toBe("purchase");
+    expect((await moderateAdminContent(admin, id, { action: "hide" })).visibility).toBe("hidden");
+    expect((await moderateAdminContent(admin, id, { action: "unpublish" })).visibility).toBe("unpublished");
+    expect((await moderateAdminContent(admin, id, { action: "publish" })).visibility).toBe("purchase");
+    expect(await prisma.auditLog.count({
+      where: { targetType: "post", targetId: id, actorUserId: admin.actorUserId }
+    })).toBe(6);
+  } finally {
+    await prisma.auditLog.deleteMany({ where: { targetType: "post", targetId: id } });
+    await prisma.post.deleteMany({ where: { id } });
+  }
+});
+
+test("admin members API writes authenticated account state and audit atomically", async ({ request }) => {
+  test.skip(!(await hasDatabase(request)), "Member mutation coverage requires the seeded database.");
+  const identity = await registerFan(request, "task10-member-state");
+  const user = await prisma.user.findUniqueOrThrow({
+    where: { email: identity.email },
+    select: { id: true }
+  });
+
+  try {
+    await signInAdmin(request);
+    const missingOrigin = await request.patch(`/api/admin/users/${user.id}`, {
+      data: { status: "suspended" }
+    });
+    expect(missingOrigin.status()).toBe(403);
+    const suspended = await request.patch(`/api/admin/users/${user.id}`, {
+      headers: authHeaders,
+      data: { status: "suspended" }
+    });
+    expect(suspended.status()).toBe(200);
+    expect((await suspended.json()).user.status).toBe("suspended");
+    expect(await prisma.auditLog.count({
+      where: {
+        actorUserId: "admin-demo",
+        action: "admin.user.update",
+        targetType: "user",
+        targetId: user.id
+      }
+    })).toBe(1);
+
+    const actorOverride = await request.patch(`/api/admin/users/${user.id}`, {
+      headers: authHeaders,
+      data: { status: "active", actorUserId: "spoofed" }
+    });
+    expect(actorOverride.status()).toBe(400);
+    const roleEscalation = await request.patch(`/api/admin/users/${user.id}`, {
+      headers: authHeaders,
+      data: { status: "active", role: "admin" }
+    });
+    expect(roleEscalation.status()).toBe(400);
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).status).toBe("suspended");
+  } finally {
+    await prisma.auditLog.deleteMany({ where: { targetType: "user", targetId: user.id } });
+    await prisma.session.deleteMany({ where: { userId: user.id } });
+    await prisma.account.deleteMany({ where: { userId: user.id } });
+    await prisma.user.deleteMany({ where: { id: user.id } });
+  }
+});
+
+test("admin overview and domain pages isolate real browser requests and preserve queue URLs", async ({ page }) => {
+  test.skip(!(await hasDatabase(page.request)), "Protected admin browser acceptance requires seeded administrator accounts.");
+  await signInAdmin(page.request);
+  const calls: string[] = [];
+  await page.route("**/api/admin/**", async (route) => {
+    const url = new URL(route.request().url());
+    calls.push(`${url.pathname}${url.search}`);
+    if (route.request().method() === "PATCH" && url.pathname === "/api/admin/users/member-admin") {
+      return route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "member update failed visibly" })
+      });
+    }
+    const bodies: Record<string, unknown> = {
+      "/api/admin/overview": {
+        metrics: { users: 2, creators: 1, posts: 1, transactions: 0 },
+        queues: {
+          pendingApplications: 1,
+          pendingContent: 1,
+          pendingChannels: 1,
+          pendingRefunds: 1,
+          pendingPayouts: 1,
+          reconciliationExceptions: 1
+        },
+        admin: { role: "super_admin", permissions: ["overview", "members", "creators", "content", "channels"] }
+      },
+      "/api/admin/users": {
+        users: [{
+          id: "member-admin",
+          name: "Alice Creator",
+          handle: "alice",
+          status: "active",
+          role: "creator",
+          creatorStatus: "approved",
+          creatorProfile: { followers: 10, members: 1, levelId: "level-1" }
+        }]
+      },
+      "/api/admin/creator-applications": { applications: [] },
+      "/api/admin/creator-levels": { levels: [] },
+      "/api/admin/content": { posts: [], nextCursor: null },
+      "/api/admin/channels": { channels: [], nextCursor: null }
+    };
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(bodies[url.pathname] ?? {})
+    });
+  });
+
+  await page.goto("/admin");
+  await expect(page.getByTestId("admin-work-queues")).toBeVisible();
+  await expect(page.getByRole("link", { name: /待审创作者/ })).toHaveAttribute("href", "/admin/creators?status=pending");
+  await expect(page.getByRole("link", { name: /待审内容/ })).toHaveAttribute("href", "/admin/content?status=pending");
+  await expect(page.getByRole("link", { name: /待审频道/ })).toHaveAttribute("href", "/admin/channels?status=pending");
+  await expect(page.getByRole("link", { name: /待处理退款/ })).toHaveAttribute("href", "/admin/finance?tab=refunds&status=pending");
+  await expect(page.getByRole("link", { name: /待处理提现/ })).toHaveAttribute("href", "/admin/finance?tab=payouts&status=pending");
+  await expect(page.getByRole("link", { name: /对账异常/ })).toHaveAttribute("href", "/admin/finance?tab=reconciliation&status=exception");
+  expect([...new Set(calls)]).toEqual(["/api/admin/overview"]);
+
+  calls.length = 0;
+  await page.getByRole("link", { name: /待审创作者/ }).click();
+  await expect(page).toHaveURL(/\/admin\/creators\?status=pending$/);
+  await expect(page.getByRole("heading", { name: "创作者管理" })).toBeVisible();
+  expect([...new Set(calls)].sort()).toEqual([
+    "/api/admin/creator-applications?status=pending",
+    "/api/admin/creator-levels"
+  ]);
+
+  calls.length = 0;
+  await page.goto("/admin/members?q=alice&role=creator&status=active");
+  await expect(page.getByRole("heading", { name: "会员管理" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "暂停账号 Alice Creator" })).toBeVisible();
+  expect([...new Set(calls)]).toEqual(["/api/admin/users?q=alice&role=creator&status=active"]);
+  await page.getByRole("button", { name: "暂停账号 Alice Creator" }).click();
+  await expect(page.getByRole("alert")).toContainText("member update failed visibly");
+  await expect(page.getByText("active", { exact: true })).toBeVisible();
+
+  calls.length = 0;
+  await page.goto("/admin/content?status=pending&q=photo");
+  await expect(page.getByRole("heading", { name: "内容管理" })).toBeVisible();
+  await expect(page.getByText("没有符合条件的内容")).toBeVisible();
+  expect([...new Set(calls)]).toEqual(["/api/admin/content?status=pending&q=photo"]);
+
+  calls.length = 0;
+  await page.goto("/admin/channels?status=pending");
+  await expect(page.getByRole("heading", { name: "频道管理" })).toBeVisible();
+  await expect(page.getByTestId("admin-channel-operations")).toBeVisible();
+  expect(calls.every((url) => /^\/api\/admin\/channels(?:\?.*)?$/.test(url))).toBe(true);
+});
+
+test("admin members and creators render authenticated support read-only browser controls", async ({ page }) => {
+  test.skip(!(await hasDatabase(page.request)), "Protected support browser acceptance requires seeded administrator accounts.");
+  await signInSupport(page.request);
+  await page.route("**/api/admin/users**", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      users: [{
+        id: "member-1",
+        name: "只读会员",
+        handle: "readonly-member",
+        status: "active",
+        role: "fan",
+        creatorStatus: "none",
+        creatorProfile: null
+      }]
+    })
+  }));
+  await page.route("**/api/admin/creator-applications**", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      applications: [{
+        id: "application-1",
+        displayName: "只读创作者",
+        category: "摄影",
+        contact: "readonly@example.com",
+        status: "pending",
+        user: { handle: "readonly-creator" }
+      }]
+    })
+  }));
+  await page.route("**/api/admin/creator-levels", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ levels: [] })
+  }));
+
+  await page.goto("/admin/members");
+  await expect(page.getByRole("heading", { name: "会员管理" })).toBeVisible();
+  await expect(page.getByLabel("搜索会员")).toBeVisible();
+  await expect(page.getByRole("button", { name: /暂停账号|恢复账号/ })).toHaveCount(0);
+
+  await page.goto("/admin/creators?status=pending");
+  await expect(page.getByRole("heading", { name: "创作者管理" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "通过" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "拒绝" })).toHaveCount(0);
+  await expect(page.getByText("只读", { exact: true })).toBeVisible();
 });

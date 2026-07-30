@@ -37,6 +37,21 @@ export async function loadAdminMembers(params: URLSearchParams, fetcher: Fetcher
   );
 }
 
+export async function updateAdminMemberStatus(
+  id: string,
+  status: "active" | "suspended",
+  fetcher: Fetcher = fetch
+) {
+  const body = await readJson<{ user: Pick<Member, "id" | "status"> }>(
+    await fetcher(`/api/admin/users/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status })
+    })
+  );
+  return body.user;
+}
+
 export function MembersPage({
   initialQ = "",
   initialRole = "",
@@ -55,6 +70,7 @@ export function MembersPage({
   const [users, setUsers] = useState<Member[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
 
   const params = useMemo(() => {
     const next = new URLSearchParams();
@@ -90,6 +106,21 @@ export function MembersPage({
     router.replace(`/admin/members${params.size ? `?${params}` : ""}`);
   }
 
+  async function updateStatus(user: Member) {
+    setError("");
+    setMessage("");
+    const nextStatus = user.status === "active" ? "suspended" : "active";
+    try {
+      const updated = await updateAdminMemberStatus(user.id, nextStatus);
+      setUsers((current) => current.map((item) =>
+        item.id === user.id ? { ...item, status: updated.status } : item
+      ));
+      setMessage(nextStatus === "suspended" ? "账号已暂停。" : "账号已恢复。");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "账号状态更新失败，请重试。");
+    }
+  }
+
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-8">
       <DomainHeader title="会员管理" subtitle={canWrite ? "搜索会员并检查账号、角色与创作者状态。" : "当前角色仅可查看会员资料。"} />
@@ -108,11 +139,13 @@ export function MembersPage({
         <button type="submit" className="rounded-xl bg-[var(--text)] px-4 py-2 font-bold text-[var(--bg)]">筛选</button>
       </form>
 
+      {message ? <p role="status" className="mb-4 rounded-xl bg-emerald-500/10 px-4 py-3 text-sm font-bold text-emerald-700">{message}</p> : null}
+      {error && users.length ? <p role="alert" className="mb-4 rounded-xl bg-rose-500/10 px-4 py-3 text-sm text-rose-700">{error}</p> : null}
       {loading && !users.length ? <AdminPageState title="正在加载会员…" /> : null}
       {error && !users.length ? <AdminPageState title="无法加载会员" message={error} onRetry={() => void load()} /> : null}
       {!loading && !error && !users.length ? <AdminPageState title="没有符合条件的会员" message="请调整搜索或筛选条件。" /> : null}
       {users.length ? (
-        <AdminTable headers={["会员", "账号状态", "角色", "创作者状态", "等级 / 粉丝"]}>
+        <AdminTable headers={["会员", "账号状态", "角色", "创作者状态", "等级 / 粉丝", "操作"]}>
           {users.map((user) => (
             <tr key={user.id}>
               <td className="px-4 py-3 font-black">{user.name}<p className="text-xs font-normal muted">@{user.handle}</p></td>
@@ -120,6 +153,17 @@ export function MembersPage({
               <td className="px-4 py-3">{user.role}</td>
               <td className="px-4 py-3">{user.creatorStatus}</td>
               <td className="px-4 py-3">{user.creatorProfile?.levelId ?? "—"}<p className="text-xs muted">{user.creatorProfile?.followers ?? 0} 粉丝</p></td>
+              <td className="px-4 py-3">
+                {canWrite ? (
+                  <button
+                    type="button"
+                    onClick={() => void updateStatus(user)}
+                    className="rounded-lg border border-[var(--line)] px-3 py-1.5 text-xs font-bold"
+                  >
+                    {user.status === "active" ? "暂停账号" : "恢复账号"} {user.name}
+                  </button>
+                ) : <span className="text-xs muted">只读</span>}
+              </td>
             </tr>
           ))}
         </AdminTable>

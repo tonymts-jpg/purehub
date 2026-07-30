@@ -1,4 +1,5 @@
 import { Prisma } from "@prisma/client";
+import { z } from "zod";
 import { prisma } from "./prisma";
 import { creators, posts, transactions } from "./data";
 import type { AdminContext } from "./admin-auth";
@@ -7,6 +8,15 @@ import { enqueueSearchEntitySync } from "./search/jobs";
 
 const json = (value: unknown) => value as Prisma.InputJsonValue;
 const canUseDatabase = () => Boolean(process.env.DATABASE_URL);
+const adminUserStateSchema = z.object({
+  status: z.enum(["active", "suspended"])
+}).strict();
+
+export function parseAdminUserStatePatch(value: unknown): { status: "active" | "suspended" } {
+  const parsed = adminUserStateSchema.safeParse(value);
+  if (!parsed.success) throw new Error("Invalid admin member state.");
+  return parsed.data;
+}
 
 const fallbackLevels = [
   { id: "level-1", name: "Starter", minFollowers: 0, maxFollowers: 49_999, _count: { creators: 0 } },
@@ -166,7 +176,7 @@ export async function listAdminUsers() {
   });
 }
 
-export async function updateAdminUser(admin: AdminContext, id: string, input: { role?: string; creatorStatus?: string }) {
+export async function updateAdminUser(admin: AdminContext, id: string, input: { status: "active" | "suspended" }) {
   if (!canUseDatabase()) {
     await writeAuditLog(admin, "admin.user.update", "user", id, input);
     return { id, ...input };
@@ -176,8 +186,7 @@ export async function updateAdminUser(admin: AdminContext, id: string, input: { 
     const user = await tx.user.update({
       where: { id },
       data: {
-        role: input.role,
-        creatorStatus: input.creatorStatus
+        status: input.status
       }
     });
     await enqueueSearchEntitySync(tx, {

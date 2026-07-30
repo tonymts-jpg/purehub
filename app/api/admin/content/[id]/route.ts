@@ -37,6 +37,9 @@ export async function PATCH(
     if (error instanceof AdminContentInputError) {
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
+    if (error instanceof SyntaxError) {
+      return NextResponse.json({ error: "Invalid admin content action." }, { status: 400 });
+    }
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2025") {
       return NextResponse.json({ error: "Content was not found." }, { status: 404 });
     }
