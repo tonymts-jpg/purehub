@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
-  const auth = await requireAdmin(request, "channels");
+  const auth = await requireAdmin(request, "channels", "read");
   if (!auth.ok) return auth.response;
   try {
     return NextResponse.json(await listChannels(channelListInput(request), auth.admin.actorUserId));
@@ -21,7 +21,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const originError = enforceSameOrigin(request);
   if (originError) return originError;
-  const auth = await requireAdmin(request, "channels");
+  const auth = await requireAdmin(request, "channels", "write");
   if (!auth.ok) return auth.response;
   try {
     const input = await readChannelJson(request);

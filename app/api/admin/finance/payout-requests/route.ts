@@ -13,14 +13,14 @@ const schema = z.object({
 });
 
 export async function GET(request: Request) {
-  const auth = await requireAdmin(request, "transactions");
+  const auth = await requireAdmin(request, "finance", "read");
   if (!auth.ok) return auth.response;
   const payouts = await listPayoutRequests();
   return NextResponse.json({ payouts });
 }
 
 export async function PATCH(request: Request) {
-  const auth = await requireAdmin(request, "transactions");
+  const auth = await requireAdmin(request, "finance", "write");
   if (!auth.ok) return auth.response;
   try {
     const payout = await reviewPayoutRequest(auth.admin, schema.parse(await request.json()));

@@ -1,13 +1,16 @@
 import { NextResponse } from "next/server";
-import { requireAdmin } from "@/lib/admin-auth";
+import { canAdminManageSettings, requireAdmin } from "@/lib/admin-auth";
 import { activatePlatformFeeConfig } from "@/lib/payments/repository";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const auth = await requireAdmin(request, "transactions");
+  const auth = await requireAdmin(request, "settings", "write");
   if (!auth.ok) return auth.response;
+  if (!canAdminManageSettings(auth.admin.role, "finance")) {
+    return NextResponse.json({ error: "Admin role cannot manage finance settings." }, { status: 403 });
+  }
   try {
     const { id } = await params;
     const config = await activatePlatformFeeConfig(auth.admin, id);

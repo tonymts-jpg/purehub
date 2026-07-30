@@ -11,7 +11,7 @@ export const runtime = "nodejs";
 type Context = { params: Promise<{ id: string }> };
 
 export async function GET(request: Request, { params }: Context) {
-  const auth = await requireAdmin(request, "channels");
+  const auth = await requireAdmin(request, "channels", "read");
   if (!auth.ok) return auth.response;
   try {
     return NextResponse.json(await getAdminChannelById(auth.admin, (await params).id));
@@ -23,7 +23,7 @@ export async function GET(request: Request, { params }: Context) {
 export async function PATCH(request: Request, { params }: Context) {
   const originError = enforceSameOrigin(request);
   if (originError) return originError;
-  const auth = await requireAdmin(request, "channels");
+  const auth = await requireAdmin(request, "channels", "write");
   if (!auth.ok) return auth.response;
   try {
     const input = await readChannelJson(request);

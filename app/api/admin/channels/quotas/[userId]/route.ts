@@ -17,7 +17,7 @@ export const runtime = "nodejs";
 type Context = { params: Promise<{ userId: string }> };
 
 export async function GET(request: Request, { params }: Context) {
-  const auth = await requireAdmin(request, "channels");
+  const auth = await requireAdmin(request, "channels", "read");
   if (!auth.ok) return auth.response;
   try {
     const quota = await getAdminChannelQuota(auth.admin, (await params).userId);
@@ -30,7 +30,7 @@ export async function GET(request: Request, { params }: Context) {
 export async function PUT(request: Request, { params }: Context) {
   const originError = enforceSameOrigin(request);
   if (originError) return originError;
-  const auth = await requireAdmin(request, "channels");
+  const auth = await requireAdmin(request, "channels", "write");
   if (!auth.ok) return auth.response;
   try {
     const input = await readChannelJson(request);

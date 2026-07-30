@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { requireAdmin } from "@/lib/admin-auth";
+import { canAdminManageSettings, requireAdmin } from "@/lib/admin-auth";
 import { createPricingVersion, listPricingVersions } from "@/lib/admin-repository";
 
 export const dynamic = "force-dynamic";
@@ -21,7 +21,7 @@ const schema = z.object({
 });
 
 export async function GET(request: Request) {
-  const auth = await requireAdmin(request, "pricing");
+  const auth = await requireAdmin(request, "settings", "read");
   if (!auth.ok) return auth.response;
 
   const versions = await listPricingVersions();
@@ -29,8 +29,11 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const auth = await requireAdmin(request, "pricing");
+  const auth = await requireAdmin(request, "settings", "write");
   if (!auth.ok) return auth.response;
+  if (!canAdminManageSettings(auth.admin.role, "operations")) {
+    return NextResponse.json({ error: "Admin role cannot manage operational settings." }, { status: 403 });
+  }
 
   const version = await createPricingVersion(auth.admin, schema.parse(await request.json()));
   return NextResponse.json({ version }, { status: 201 });

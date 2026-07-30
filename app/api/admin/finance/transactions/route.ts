@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
-  const auth = await requireAdmin(request, "transactions");
+  const auth = await requireAdmin(request, "finance", "read");
   if (!auth.ok) return auth.response;
   const transactions = await listFinanceTransactions();
   return NextResponse.json({ transactions });

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { requireAdmin } from "@/lib/admin-auth";
+import { canAdminManageSettings, requireAdmin } from "@/lib/admin-auth";
 import { createPlatformFeeConfig, listPlatformFeeConfigs } from "@/lib/payments/repository";
 
 export const dynamic = "force-dynamic";
@@ -12,15 +12,18 @@ const schema = z.object({
 });
 
 export async function GET(request: Request) {
-  const auth = await requireAdmin(request, "transactions");
+  const auth = await requireAdmin(request, "settings", "read");
   if (!auth.ok) return auth.response;
   const configs = await listPlatformFeeConfigs();
   return NextResponse.json({ configs });
 }
 
 export async function POST(request: Request) {
-  const auth = await requireAdmin(request, "transactions");
+  const auth = await requireAdmin(request, "settings", "write");
   if (!auth.ok) return auth.response;
+  if (!canAdminManageSettings(auth.admin.role, "finance")) {
+    return NextResponse.json({ error: "Admin role cannot manage finance settings." }, { status: 403 });
+  }
   try {
     const config = await createPlatformFeeConfig(auth.admin, schema.parse(await request.json()));
     return NextResponse.json({ config });

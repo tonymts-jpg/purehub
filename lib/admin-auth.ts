@@ -8,43 +8,90 @@ export type AdminContext = {
   role: AdminRole;
 };
 
-const DEFAULT_ADMIN_TOKEN = "purehub-admin-demo-token";
 const adminRoles: AdminRole[] = ["super_admin", "ops_admin", "content_admin", "finance_admin", "support_admin", "analyst"];
 export const CHANNEL_ADMIN_ROLES = ["super_admin", "ops_admin", "content_admin"] as const;
 export type ChannelAdminRole = (typeof CHANNEL_ADMIN_ROLES)[number];
 
-export const ADMIN_SECTIONS: Record<AdminRole, string[]> = {
-  super_admin: ["overview", "users", "applications", "levels", "pricing", "transactions", "payments", "channels", "audit"],
-  ops_admin: ["overview", "users", "applications", "levels", "pricing", "channels", "audit"],
-  content_admin: ["overview", "applications", "levels", "channels", "audit"],
-  finance_admin: ["overview", "transactions", "payments", "audit"],
-  support_admin: ["overview", "users", "applications"],
-  analyst: ["overview", "audit"]
+export const ADMIN_SECTIONS = [
+  "overview",
+  "members",
+  "creators",
+  "content",
+  "channels",
+  "finance",
+  "settings",
+  "audit"
+] as const;
+export type AdminSection = (typeof ADMIN_SECTIONS)[number];
+export type AdminAccess = "read" | "write";
+
+type AdminActionMatrix = Record<AdminRole, Partial<Record<AdminSection, readonly AdminAccess[]>>>;
+
+const ADMIN_ACTION_MATRIX: AdminActionMatrix = {
+  super_admin: {
+    overview: ["read", "write"],
+    members: ["read", "write"],
+    creators: ["read", "write"],
+    content: ["read", "write"],
+    channels: ["read", "write"],
+    finance: ["read", "write"],
+    settings: ["read", "write"],
+    audit: ["read", "write"]
+  },
+  ops_admin: {
+    overview: ["read"],
+    members: ["read", "write"],
+    creators: ["read", "write"],
+    content: ["read", "write"],
+    channels: ["read", "write"],
+    settings: ["read", "write"],
+    audit: ["read"]
+  },
+  content_admin: {
+    overview: ["read"],
+    creators: ["read", "write"],
+    content: ["read", "write"],
+    channels: ["read", "write"],
+    audit: ["read"]
+  },
+  finance_admin: {
+    overview: ["read"],
+    finance: ["read", "write"],
+    settings: ["read", "write"],
+    audit: ["read"]
+  },
+  support_admin: {
+    overview: ["read"],
+    members: ["read"],
+    creators: ["read"]
+  },
+  analyst: {
+    overview: ["read"],
+    audit: ["read"]
+  }
 };
 
-function configuredToken() {
-  if (process.env.ADMIN_ACCESS_TOKEN) return process.env.ADMIN_ACCESS_TOKEN;
-  return process.env.NODE_ENV === "production" ? undefined : DEFAULT_ADMIN_TOKEN;
+export function canAdminAccess(
+  role: AdminRole,
+  section: AdminSection,
+  access: AdminAccess = "read"
+) {
+  return ADMIN_ACTION_MATRIX[role][section]?.includes(access) ?? false;
 }
 
-function requestToken(request: Request) {
-  const headerToken = request.headers.get("x-admin-token");
-  const authorization = request.headers.get("authorization");
-  if (headerToken) return headerToken;
-  if (authorization?.startsWith("Bearer ")) return authorization.slice("Bearer ".length);
-  return "";
+export function canAdminManageSettings(role: AdminRole, scope: "finance" | "operations") {
+  if (role === "super_admin") return true;
+  return scope === "finance" ? role === "finance_admin" : role === "ops_admin";
 }
 
-async function resolveActorUserId(request: Request) {
-  const token = configuredToken();
-  if (token && requestToken(request) === token) return process.env.SERVICE_ADMIN_USER_ID ?? "admin-demo";
-  return (await getSessionUser(request))?.id ?? null;
-}
-
-export async function requireAdmin(request: Request, section?: string): Promise<
+export async function requireAdmin(
+  request: Request,
+  section: AdminSection,
+  access: AdminAccess = "read"
+): Promise<
   { ok: true; admin: AdminContext } | { ok: false; response: NextResponse }
 > {
-  const actorUserId = await resolveActorUserId(request);
+  const actorUserId = (await getSessionUser(request))?.id ?? null;
   if (!actorUserId) {
     return { ok: false, response: NextResponse.json({ error: "Administrator authentication is required." }, { status: 401 }) };
   }
@@ -59,14 +106,14 @@ export async function requireAdmin(request: Request, section?: string): Promise<
   }
 
   const admin = { actorUserId, role: account.role as AdminRole };
-  if (section && !ADMIN_SECTIONS[admin.role].includes(section)) {
-    return { ok: false, response: NextResponse.json({ error: "Admin role is not allowed for this section." }, { status: 403 }) };
+  if (!canAdminAccess(admin.role, section, access)) {
+    return { ok: false, response: NextResponse.json({ error: "Admin role is not allowed for this section and action." }, { status: 403 }) };
   }
   return { ok: true, admin };
 }
 
 export function adminPermissions(role: AdminRole) {
-  return ADMIN_SECTIONS[role];
+  return ADMIN_SECTIONS.filter((section) => canAdminAccess(role, section, "read"));
 }
 
 export function isChannelAdminRole(role: string): role is ChannelAdminRole {

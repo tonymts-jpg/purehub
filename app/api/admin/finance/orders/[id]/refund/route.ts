@@ -5,7 +5,7 @@ import { refundOrder } from "@/lib/finance/ledger";
 
 const schema = z.object({ reason: z.string().min(3).max(500) });
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const auth = await requireAdmin(request, "transactions");
+  const auth = await requireAdmin(request, "finance", "write");
   if (!auth.ok) return auth.response;
   try {
     const { id } = await params;

@@ -1,8 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 
 export function middleware(request: NextRequest) {
+  if (request.nextUrl.pathname === "/admin/sign-in") return NextResponse.next();
+
   const cookie = request.cookies.get("purehub.session_token") ?? request.cookies.get("__Secure-purehub.session_token");
   if (cookie) return NextResponse.next();
+
+  if (request.nextUrl.pathname.startsWith("/admin")) {
+    return NextResponse.redirect(new URL("/admin/sign-in", request.url));
+  }
+
   const signIn = new URL("/sign-in", request.url);
   signIn.searchParams.set("callbackUrl", request.nextUrl.pathname + request.nextUrl.search);
   return NextResponse.redirect(signIn);

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { requireAdmin } from "@/lib/admin-auth";
+import { canAdminManageSettings, requireAdmin } from "@/lib/admin-auth";
 import { updatePaymentChannel } from "@/lib/admin-repository";
 
 export const dynamic = "force-dynamic";
@@ -19,8 +19,11 @@ const schema = z.object({
 const providers = ["stripe", "paypal", "card", "alipay_intl", "wechatpay_intl", "usdt"] as const;
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ provider: string }> }) {
-  const auth = await requireAdmin(request, "payments");
+  const auth = await requireAdmin(request, "settings", "write");
   if (!auth.ok) return auth.response;
+  if (!canAdminManageSettings(auth.admin.role, "operations")) {
+    return NextResponse.json({ error: "Admin role cannot manage operational settings." }, { status: 403 });
+  }
 
   const { provider } = await params;
   if (!providers.includes(provider as typeof providers[number])) {

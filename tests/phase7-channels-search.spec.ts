@@ -1,6 +1,6 @@
 import { expect, request as playwrightRequest, test, type APIRequestContext, type TestInfo } from "@playwright/test";
 import sharp from "sharp";
-import { ADMIN_SECTIONS, isChannelAdminRole } from "../lib/admin-auth";
+import { canAdminAccess, isChannelAdminRole } from "../lib/admin-auth";
 import {
   adminChannelOperations,
   executeChannelOperation,
@@ -238,14 +238,14 @@ test("phase 7 ACL resolver preserves lifecycle and visibility boundaries", () =>
   }
 });
 
-test("phase 7 quota constants and admin ACL sections match the approved policy", () => {
+test("phase 7 channel admin authorization matches the approved policy", () => {
   expect(CHANNEL_QUOTAS).toEqual({ "level-1": 1, "level-2": 3, "level-3": 5 });
-  expect(ADMIN_SECTIONS.super_admin).toContain("channels");
-  expect(ADMIN_SECTIONS.ops_admin).toContain("channels");
-  expect(ADMIN_SECTIONS.content_admin).toContain("channels");
-  expect(ADMIN_SECTIONS.finance_admin).not.toContain("channels");
-  expect(ADMIN_SECTIONS.support_admin).not.toContain("channels");
-  expect(ADMIN_SECTIONS.analyst).not.toContain("channels");
+  expect(canAdminAccess("super_admin", "channels", "write")).toBe(true);
+  expect(canAdminAccess("ops_admin", "channels", "write")).toBe(true);
+  expect(canAdminAccess("content_admin", "channels", "write")).toBe(true);
+  expect(canAdminAccess("finance_admin", "channels", "read")).toBe(false);
+  expect(canAdminAccess("support_admin", "channels", "read")).toBe(false);
+  expect(canAdminAccess("analyst", "channels", "read")).toBe(false);
   expect(["super_admin", "ops_admin", "content_admin"].map(isChannelAdminRole)).toEqual([true, true, true]);
   expect(["finance_admin", "support_admin", "analyst"].map(isChannelAdminRole)).toEqual([false, false, false]);
 });
@@ -4755,10 +4755,10 @@ test("phase 7 admin channel UI exposes operations only to channel admins", async
     await expect(financeOperations.getByRole("button", { name: "审核频道" })).toHaveCount(0);
     await expect(financeOperations.getByRole("button", { name: "重新索引搜索" })).toHaveCount(0);
 
-    expect(ADMIN_SECTIONS.finance_admin).not.toContain("channels");
-    expect(ADMIN_SECTIONS.support_admin).not.toContain("channels");
-    expect(ADMIN_SECTIONS.content_admin).toContain("channels");
-    expect(ADMIN_SECTIONS.super_admin).toContain("channels");
+    expect(canAdminAccess("finance_admin", "channels", "read")).toBe(false);
+    expect(canAdminAccess("support_admin", "channels", "read")).toBe(false);
+    expect(canAdminAccess("content_admin", "channels", "write")).toBe(true);
+    expect(canAdminAccess("super_admin", "channels", "write")).toBe(true);
   } finally {
     if (createdReindexAuditIds.length) {
       await prisma.auditLog.deleteMany({ where: { id: { in: createdReindexAuditIds } } });

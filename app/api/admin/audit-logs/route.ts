@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
-  const auth = await requireAdmin(request, "audit");
+  const auth = await requireAdmin(request, "audit", "read");
   if (!auth.ok) return auth.response;
 
   const logs = await listAuditLogs();

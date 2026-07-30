@@ -12,7 +12,7 @@ const schema = z.object({
 });
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const auth = await requireAdmin(request, "users");
+  const auth = await requireAdmin(request, "members", "write");
   if (!auth.ok) return auth.response;
 
   const { id } = await params;

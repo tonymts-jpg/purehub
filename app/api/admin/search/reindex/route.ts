@@ -17,7 +17,7 @@ export const runtime = "nodejs";
 export async function POST(request: Request) {
   const originError = enforceSameOrigin(request);
   if (originError) return originError;
-  const auth = await requireAdmin(request, "channels");
+  const auth = await requireAdmin(request, "channels", "write");
   if (!auth.ok) return auth.response;
   if (!isChannelAdminRole(auth.admin.role)) {
     return NextResponse.json({ error: "Admin role cannot reindex search." }, { status: 403 });

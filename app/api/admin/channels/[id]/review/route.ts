@@ -11,7 +11,7 @@ export const runtime = "nodejs";
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const originError = enforceSameOrigin(request);
   if (originError) return originError;
-  const auth = await requireAdmin(request, "channels");
+  const auth = await requireAdmin(request, "channels", "write");
   if (!auth.ok) return auth.response;
   try {
     const input = await readChannelJson(request);
