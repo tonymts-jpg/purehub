@@ -36,7 +36,7 @@ function mapMedia(asset: {
   };
 }
 
-function mapPost(post: Prisma.PostGetPayload<{ include: typeof postInclude }>): Post {
+export function mapDatabasePost(post: Prisma.PostGetPayload<{ include: typeof postInclude }>): Post {
   return {
     id: post.id,
     creatorId: post.creatorId,
@@ -107,7 +107,7 @@ async function withFallback<T>(operation: () => Promise<T>, fallback: () => T): 
   }
 }
 
-async function addViewerState(items: Post[], viewerId?: string): Promise<Post[]> {
+export async function addPostViewerState(items: Post[], viewerId?: string): Promise<Post[]> {
   if (!viewerId || !items.length || !canUseDatabase()) return items;
   const ids = items.map((post) => post.id);
   const creatorIds = [...new Set(items.map((post) => post.creatorId))];
@@ -134,7 +134,7 @@ export async function getFeed(filters?: { category?: ContentCategory; cursor?: s
         ...(filters?.take ? { take: filters.take + 1 } : {}),
         ...(filters?.cursor ? { cursor: { id: filters.cursor }, skip: 1 } : {})
       });
-      return addViewerState(result.map(mapPost), viewerId);
+      return addPostViewerState(result.map(mapDatabasePost), viewerId);
     },
     () => {
       const filtered = filters?.category ? posts.filter((post) => post.category === filters.category) : posts;
@@ -148,7 +148,7 @@ export async function getPost(id: string, viewerId?: string): Promise<Post | nul
   return withFallback(
     async () => {
       const post = await prisma.post.findUnique({ where: { id }, include: postInclude });
-      return post ? (await addViewerState([mapPost(post)], viewerId))[0] : null;
+      return post ? (await addPostViewerState([mapDatabasePost(post)], viewerId))[0] : null;
     },
     () => posts.find((post) => post.id === id) ?? null
   );
@@ -176,7 +176,7 @@ export async function getCreatorPosts(creatorId: string, viewerId?: string, pagi
         ...(pagination?.take ? { take: pagination.take + 1 } : {}),
         ...(pagination?.cursor ? { cursor: { id: pagination.cursor }, skip: 1 } : {})
       });
-      return addViewerState(result.map(mapPost), viewerId);
+      return addPostViewerState(result.map(mapDatabasePost), viewerId);
     },
     () => {
       const filtered = posts.filter((post) => post.creatorId === creatorId);
@@ -202,7 +202,7 @@ export async function getDashboardSummary(creatorId = "c1") {
         reserved: wallet?.reserved ?? 0,
         debt: wallet?.debt ?? 0,
         nextAvailableAt: nextSettlement?.availableAt ?? null,
-        posts: creatorPosts.map(mapPost),
+        posts: creatorPosts.map(mapDatabasePost),
         transactions: recentTransactions.map(mapTransaction),
         members
       };
@@ -323,7 +323,7 @@ export async function createPost(input: {
     }
     return tx.post.findUniqueOrThrow({ where: { id: postId }, include: postInclude });
   });
-  return mapPost(post);
+  return mapDatabasePost(post);
 }
 
 export async function createCreatorApplication(input: {
