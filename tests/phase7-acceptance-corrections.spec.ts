@@ -345,6 +345,7 @@ test("post hero and gallery open the shared top-level image viewer", async ({ pa
 });
 
 test("homepage post cards open the shared top-level image viewer", async ({ page }) => {
+  await useSeededHomeFeed(page);
   await page.goto("/");
   const viewer = page.getByRole("dialog", { name: "媒体预览" });
   await expect(async () => {
