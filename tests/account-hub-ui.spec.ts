@@ -356,7 +356,7 @@ test("unlocked: stale session redirects before parsing a pagination response", a
   await expect(page).toHaveURL(/\/sign-in\?callbackUrl=%2Funlocked%3Ffrom%3Dlibrary/);
 });
 
-test("favorites: channel cards show explicit visibility plus owner avatar or a safe fallback", async ({ page }) => {
+test("favorites: channel cards prioritize cover media, then avatar media, then a safe fallback", async ({ page }) => {
   await mockAccountSession(page);
   const privateChannel = {
     slug: "private-curators",
@@ -372,7 +372,8 @@ test("favorites: channel cards show explicit visibility plus owner avatar or a s
     contentType: "application/json",
     body: JSON.stringify({
       items: [
-        { channel: { ...favoriteChannel(), owner: { id: "owner", name: "频道所有者", handle: "owner", avatar: "O" } }, occurredAt: "2026-07-30T04:00:00.000Z" },
+        { channel: { ...favoriteChannel(), coverAssetId: "channel-cover", avatarAssetId: "channel-avatar", owner: { id: "owner", name: "频道所有者", handle: "owner", avatar: "O" } }, occurredAt: "2026-07-30T04:00:00.000Z" },
+        { channel: { ...favoriteChannel(), slug: "avatar-only", name: "仅头像频道", coverAssetId: null, avatarAssetId: "channel-avatar-only" }, occurredAt: "2026-07-29T08:00:00.000Z" },
         { channel: privateChannel, occurredAt: "2026-07-29T04:00:00.000Z" }
       ],
       nextCursor: null
@@ -380,9 +381,11 @@ test("favorites: channel cards show explicit visibility plus owner avatar or a s
   }));
 
   await page.goto("/favorites?type=channels");
-  await expect(page.getByText("官方频道 · 公开频道", { exact: true })).toBeVisible();
+  await expect(page.getByText("官方频道 · 公开频道", { exact: true })).toHaveCount(2);
   await expect(page.getByText("创作者频道 · 私密频道", { exact: true })).toBeVisible();
-  await expect(page.getByTestId("channel-favorite-owner-avatar")).toHaveText("O");
+  await expect(page.getByTestId("channel-favorite-cover")).toHaveAttribute("src", "/api/media/channel-cover/content");
+  await expect(page.getByTestId("channel-favorite-avatar")).toHaveAttribute("src", "/api/media/channel-avatar-only/content");
+  await expect(page.getByTestId("channel-favorite-owner-avatar")).toHaveCount(0);
   await expect(page.getByTestId("channel-favorite-fallback")).toHaveText("私");
 });
 

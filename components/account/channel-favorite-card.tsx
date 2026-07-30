@@ -1,4 +1,5 @@
 import Link from "next/link";
+import Image from "next/image";
 import { BadgeCheck, Bookmark, LockKeyhole } from "lucide-react";
 import type { ChannelListItemDto } from "@/lib/channels/types";
 
@@ -18,11 +19,15 @@ export function ChannelFavoriteCard({
   removing?: boolean;
 }) {
   const owner = hasOwner(channel) ? channel.owner : null;
+  const coverAssetId = "coverAssetId" in channel ? channel.coverAssetId : null;
+  const avatarAssetId = "avatarAssetId" in channel ? channel.avatarAssetId : null;
   const fallbackInitial = channel.name.trim().slice(0, 1).toUpperCase() || "P";
   return (
     <article data-testid="channel-favorite-card" className="glass overflow-hidden rounded-lg shadow-soft">
-      <div className="relative flex aspect-[16/6] items-end bg-gradient-to-br from-violet via-[#b55dba] to-coral p-4"><div className="mesh absolute inset-0" />
-        {owner ? <span data-testid="channel-favorite-owner-avatar" className="relative grid h-12 w-12 place-items-center rounded-lg border border-white/30 bg-black/25 text-lg font-black text-white backdrop-blur">{owner.avatar}</span> : <span data-testid="channel-favorite-fallback" className="relative grid h-12 w-12 place-items-center rounded-lg border border-white/30 bg-black/25 text-lg font-black text-white backdrop-blur">{fallbackInitial}</span>}
+      <div className="relative flex aspect-[16/6] items-end bg-gradient-to-br from-violet via-[#b55dba] to-coral p-4">
+        {coverAssetId && <Image data-testid="channel-favorite-cover" src={`/api/media/${coverAssetId}/content`} alt={`${channel.name} 频道封面`} fill sizes="(min-width: 768px) 33vw, 100vw" className="object-cover" />}
+        <div className="mesh absolute inset-0" />
+        {coverAssetId ? null : avatarAssetId ? <Image data-testid="channel-favorite-avatar" src={`/api/media/${avatarAssetId}/content`} alt={`${channel.name} 频道头像`} width={48} height={48} className="relative h-12 w-12 rounded-lg border border-white/30 object-cover shadow-lg" /> : owner ? <span data-testid="channel-favorite-owner-avatar" className="relative grid h-12 w-12 place-items-center rounded-lg border border-white/30 bg-black/25 text-lg font-black text-white backdrop-blur">{owner.avatar}</span> : <span data-testid="channel-favorite-fallback" className="relative grid h-12 w-12 place-items-center rounded-lg border border-white/30 bg-black/25 text-lg font-black text-white backdrop-blur">{fallbackInitial}</span>}
       </div>
       <div className="p-5">
         <div className="flex items-start justify-between gap-3">
