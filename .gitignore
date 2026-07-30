@@ -29,6 +29,7 @@ blob-report/
 # Local Codex / agent workspace metadata
 .agents/
 .codex/
+.worktrees/
 
 # Raw/generated source experiments not required by the demo runtime
 pictures/
