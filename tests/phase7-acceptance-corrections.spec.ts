@@ -253,7 +253,11 @@ test("authenticated homepage purchase creates a persistent entitlement", async (
     });
     expect(enabled.ok(), await enabled.text()).toBeTruthy();
 
-    await signInCreator(page.request);
+    await signInCreator(page.request, "chenmo");
+    expect(await prisma.subscription.findFirst({
+      where: { userId: "fan-demo", creatorId: "c2", status: "active" },
+      select: { id: true }
+    })).toBeNull();
     const created = await page.request.post("/api/posts", {
       data: {
         title: `Homepage purchase ${nonce}`,
