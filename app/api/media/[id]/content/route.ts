@@ -12,11 +12,15 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     const user = await getSessionUser(request);
     const content = await mediaContent(id, user?.id, request.headers.get("range"));
     if (content.kind === "redirect") {
-      const response = NextResponse.redirect(resolveStaticMediaRedirect(content.url, request.url), 307);
-      response.headers.set("cache-control", content.isPublic ? "public, max-age=300" : "private, no-store");
-      response.headers.set("content-disposition", "inline");
-      response.headers.set("x-content-type-options", "nosniff");
-      return response;
+      return new Response(null, {
+        status: 307,
+        headers: {
+          location: resolveStaticMediaRedirect(content.url, request.url),
+          "cache-control": content.isPublic ? "public, max-age=300" : "private, no-store",
+          "content-disposition": "inline",
+          "x-content-type-options": "nosniff"
+        }
+      });
     }
     return new Response(content.body, {
       status: content.status,

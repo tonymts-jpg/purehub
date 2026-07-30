@@ -104,5 +104,5 @@ export function resolveStaticMediaRedirect(src: string, requestUrl: string) {
   ) {
     throw new Error("Static media redirect is not allowed.");
   }
-  return target;
+  return target.pathname;
 }

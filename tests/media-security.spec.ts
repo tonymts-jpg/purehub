@@ -46,8 +46,9 @@ test("media MIME policy rejects active content and kind mismatches", () => {
 
 test("static media redirect policy permits only passive same-origin generated assets", () => {
   const requestUrl = "https://purehub.example/api/media/asset/content";
-  expect(resolveStaticMediaRedirect("/generated/posts/post-1/01.webp", requestUrl).href)
-    .toBe("https://purehub.example/generated/posts/post-1/01.webp");
+  const location = resolveStaticMediaRedirect("/generated/posts/post-1/01.webp", requestUrl);
+  expect(location).toBe("/generated/posts/post-1/01.webp");
+  expect(location).not.toContain("purehub.example");
 
   for (const src of [
     "https://evil.example/payload.svg",
