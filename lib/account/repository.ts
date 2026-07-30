@@ -4,6 +4,7 @@ import { addPostViewerState, mapDatabasePost } from "@/lib/db-repository";
 import { prisma } from "@/lib/prisma";
 import { encodeAccountCursor, parseAccountCursor } from "./cursor";
 import type {
+  AccountChannelFavoriteListItem,
   AccountCursor,
   AccountFollowingListItem,
   AccountListScope,
@@ -432,7 +433,7 @@ export async function listFavoritePosts(
 export async function listFavoriteChannels(
   userId: string,
   input: AccountListInput = {}
-) {
+): Promise<AccountListResponse<AccountChannelFavoriteListItem>> {
   const scope = "favorite-channels";
   const limit = normalizeLimit(input.limit);
   const cursor = decodeCursor(input.cursor, scope);
@@ -483,7 +484,10 @@ export async function listFavoriteChannels(
   const hasMore = visibleRows.length > limit;
   const returned = visibleRows.slice(0, limit);
   return {
-    items: returned.map((row) => row.item),
+    items: returned.map((row) => ({
+      channel: row.item,
+      occurredAt: row.relation.createdAt.toISOString()
+    })),
     nextCursor: nextCursor(scope, hasMore, returned.at(-1)?.relation)
   };
 }

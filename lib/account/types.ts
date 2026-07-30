@@ -1,4 +1,5 @@
 import type { Post } from "@/lib/types";
+import type { ChannelListItemDto } from "@/lib/channels/types";
 
 export type AccountListScope =
   | "favorite-posts"
@@ -17,6 +18,11 @@ export type AccountCursor = {
 
 export type AccountPostListItem = {
   post: Post;
+  occurredAt: string;
+};
+
+export type AccountChannelFavoriteListItem = {
+  channel: ChannelListItemDto & { bookmarked: true };
   occurredAt: string;
 };
 

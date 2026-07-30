@@ -529,9 +529,12 @@ test("favorites are session-owned and channel bookmarks grant no access", async 
     expect(await channelFavorites.json()).toEqual({
       items: [
         expect.objectContaining({
-          id: "channel-purehub-official",
-          slug: "purehub-official",
-          bookmarked: true
+          channel: expect.objectContaining({
+            id: "channel-purehub-official",
+            slug: "purehub-official",
+            bookmarked: true
+          }),
+          occurredAt: expect.any(String)
         })
       ],
       nextCursor: null
@@ -603,12 +606,16 @@ test("favorites paginate only ACL-visible channel bookmarks", async ({ request }
     const firstResponse = await request.get("/api/me/favorites?type=channels&limit=2");
     expect(firstResponse.ok(), await firstResponse.text()).toBeTruthy();
     const first = await firstResponse.json() as {
-      items: Array<{ slug: string }>;
+      items: Array<{ channel: { slug: string }; occurredAt: string }>;
       nextCursor: string | null;
     };
-    expect(first.items.map((item) => item.slug)).toEqual([
+    expect(first.items.map((item) => item.channel.slug)).toEqual([
       channels[0].slug,
       channels[2].slug
+    ]);
+    expect(first.items.map((item) => item.occurredAt)).toEqual([
+      "2026-07-30T04:00:00.000Z",
+      "2026-07-30T02:00:00.000Z"
     ]);
     expect(first.nextCursor).not.toBeNull();
     expect(parseAccountCursor(first.nextCursor!, "favorite-channels")).toEqual({
@@ -622,10 +629,11 @@ test("favorites paginate only ACL-visible channel bookmarks", async ({ request }
     );
     expect(secondResponse.ok(), await secondResponse.text()).toBeTruthy();
     const second = await secondResponse.json() as {
-      items: Array<{ slug: string }>;
+      items: Array<{ channel: { slug: string }; occurredAt: string }>;
       nextCursor: string | null;
     };
-    expect(second.items.map((item) => item.slug)).toEqual([channels[3].slug]);
+    expect(second.items.map((item) => item.channel.slug)).toEqual([channels[3].slug]);
+    expect(second.items.map((item) => item.occurredAt)).toEqual(["2026-07-30T01:00:00.000Z"]);
     expect(second.nextCursor).toBeNull();
   } finally {
     await prisma.channelBookmark.deleteMany({

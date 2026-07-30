@@ -71,16 +71,19 @@ export default async function ChannelDetailPage({ params }: { params: Promise<{ 
             <p className="mt-3 max-w-3xl break-words leading-7 muted">{channel.description}</p>
             {detail && <p className="mt-3 text-sm muted">由 {detail.owner.name} 管理</p>}
           </div>
-          {isPrivate && detail?.access.role === "owner" ? (
-            <span className="rounded-lg border border-[var(--line)] px-4 py-3 text-sm font-black">
-              频道所有者
-            </span>
-          ) : isPrivate && (
+          <div className="flex flex-wrap items-center gap-3">
+            {isPrivate && detail?.access.role === "owner" && (
+              <span className="rounded-lg border border-[var(--line)] px-4 py-3 text-sm font-black">
+                频道所有者
+              </span>
+            )}
             <ChannelMembershipAction
               slug={channel.slug}
               initialState={detail?.access.role ? "member" : "available"}
+              initialBookmarked={"bookmarked" in channel && channel.bookmarked === true}
+              showMembership={isPrivate && detail?.access.role !== "owner"}
             />
-          )}
+          </div>
         </div>
       </header>
 

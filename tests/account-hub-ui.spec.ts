@@ -166,3 +166,142 @@ test("legacy library redirects to favorites", async ({ page }) => {
   await page.goto("/library");
   await expect(page).toHaveURL(/\/favorites$/);
 });
+
+function accountPost(id: string, title: string) {
+  return {
+    id,
+    creatorId: "c1",
+    title,
+    excerpt: "用于验证账户列表的确定性作品夹具。",
+    content: "用于验证账户列表的确定性作品夹具。",
+    cover: "cover-1",
+    category: "Cosplay",
+    tags: ["Cosplay"],
+    visibility: "free",
+    likes: 12,
+    comments: [],
+    createdAt: "今天",
+    media: [],
+    bookmarked: true,
+    liked: false,
+    hasAccess: true
+  };
+}
+
+function favoriteChannel() {
+  return {
+    id: "channel-purehub-official",
+    slug: "purehub-official",
+    name: "PureHub 官方频道",
+    description: "平台精选的公开频道。",
+    kind: "official",
+    visibility: "public",
+    discoverability: "discoverable",
+    status: "active",
+    bookmarked: true,
+    owner: { id: "admin-demo", name: "PureHub", handle: "purehub", avatar: "P" }
+  };
+}
+
+async function mockAccountSession(page: Page) {
+  await page.route("**/api/auth/get-session", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      session: { id: "account-hub-ui-session", userId: "fan", expiresAt: "2027-07-30T00:00:00.000Z" },
+      user: { id: "fan", name: "Fan", email: "fan@purehub.local", role: "fan", status: "active" }
+    })
+  }));
+}
+
+test("favorites: channel tab removes a favorite only after its delete succeeds", async ({ page }) => {
+  await mockAccountSession(page);
+  await page.route("**/api/me/favorites**", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({
+      items: [{ channel: favoriteChannel(), occurredAt: "2026-07-30T04:00:00.000Z" }],
+      nextCursor: null
+    })
+  }));
+  await page.route("**/api/channels/purehub-official/bookmark", (route) => {
+    if (route.request().method() !== "DELETE") return route.fallback();
+    return route.fulfill({ contentType: "application/json", body: JSON.stringify({ bookmarked: false }) });
+  });
+
+  await page.goto("/favorites?type=channels");
+  await expect(page.getByRole("tab", { name: "频道" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByTestId("channel-favorite-card")).toBeVisible();
+  await page.getByRole("button", { name: "取消收藏频道" }).click();
+  await expect(page.getByTestId("channel-favorite-card")).toHaveCount(0);
+});
+
+test("favorites: loading, empty, retryable failure, and load more preserve the account list contract", async ({ page }) => {
+  await mockAccountSession(page);
+  let requestCount = 0;
+  let releaseFirstRequest: (() => void) | undefined;
+  const firstRequest = new Promise<void>((resolve) => { releaseFirstRequest = resolve; });
+  await page.route("**/api/me/favorites**", async (route) => {
+    requestCount += 1;
+    if (requestCount === 1) {
+      await firstRequest;
+      return route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [], nextCursor: null }) });
+    }
+    if (requestCount === 2) {
+      return route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "暂时无法加载收藏。" }) });
+    }
+    if (requestCount === 3) {
+      return route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [], nextCursor: "page-2" }) });
+    }
+    return route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [accountPost("post-2", "第二页收藏")], nextCursor: null }) });
+  });
+
+  await page.goto("/favorites");
+  await expect(page.getByRole("status")).toContainText("正在加载");
+  releaseFirstRequest?.();
+  await expect(page.getByText("还没有收藏内容")).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByText("暂时无法加载收藏。", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "重试" }).click();
+  await expect(page.getByText("还没有收藏内容")).toBeVisible();
+  await page.getByRole("button", { name: "加载更多" }).click();
+  await expect(page.getByTestId("post-card")).toHaveCount(1);
+});
+
+test("unlocked: renders the API-authoritative purchase and subscription labels", async ({ page }) => {
+  await mockAccountSession(page);
+  await page.route("**/api/me/unlocked**", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({
+      items: [
+        { post: accountPost("post-1", "一次购买作品"), source: "purchase", occurredAt: "2026-07-30T00:00:00.000Z" },
+        { post: accountPost("post-2", "订阅作品"), source: "subscription", occurredAt: "2026-07-29T00:00:00.000Z" }
+      ],
+      nextCursor: null
+    })
+  }));
+
+  await page.goto("/unlocked");
+  await expect(page.getByText("Single Purchase")).toBeVisible();
+  await expect(page.getByText("Active Subscription")).toBeVisible();
+});
+
+test("channel favorite: public detail keeps the bookmark action separate and sends a guest to a safe return URL", async ({ page }) => {
+  test.skip(!(await hasDatabase(page.request)), "Channel detail is server-rendered and requires the seeded PostgreSQL database.");
+
+  await page.goto("/channels/purehub-official?from=favorites");
+  await expect(page.getByRole("button", { name: "收藏频道" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "申请加入频道" })).toHaveCount(0);
+  await page.getByRole("button", { name: "收藏频道" }).click();
+  await expect(page).toHaveURL(/\/sign-in\?callbackUrl=%2Fchannels%2Fpurehub-official%3Ffrom%3Dfavorites/);
+});
+
+test("channel favorite: a visible private owner detail keeps bookmarking separate from membership", async ({ page }) => {
+  test.skip(!(await hasDatabase(page.request)), "Channel detail is server-rendered and requires the seeded PostgreSQL database.");
+  await signInCreator(page.request, "chenmo");
+
+  await page.goto("/channels/private-curators");
+  await expect(page.getByRole("button", { name: "收藏频道" })).toBeVisible();
+  await expect(page.getByText("频道所有者")).toBeVisible();
+  await expect(page.getByRole("button", { name: /申请加入频道|退出频道/ })).toHaveCount(0);
+});
