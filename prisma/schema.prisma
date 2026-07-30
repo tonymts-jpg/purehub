@@ -57,6 +57,8 @@ model User {
   channelInvitations         ChannelInvitation[]    @relation("ChannelInvitee")
   sentChannelInvitations     ChannelInvitation[]    @relation("ChannelInvitationInviter")
   acceptedChannelInvitations ChannelInvitation[]    @relation("ChannelInvitationAcceptor")
+  channelBookmarks          ChannelBookmark[]
+  postViewHistory           PostViewHistory[]
 }
 
 model CreatorProfile {
@@ -126,6 +128,7 @@ model Post {
   entitlements      Entitlement[]
   channelPosts      ChannelPost[]
   channelExclusions ChannelPostExclusion[]
+  viewHistory       PostViewHistory[]
 }
 
 model Channel {
@@ -156,6 +159,7 @@ model Channel {
   exclusions        ChannelPostExclusion[]
   invitations       ChannelInvitation[]
   jobs              ChannelJob[]
+  channelBookmarks  ChannelBookmark[]
 
   @@index([status, visibility, createdAt])
   @@index([ownerUserId, status])
@@ -344,6 +348,31 @@ model Bookmark {
   post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
 
   @@unique([userId, postId])
+}
+
+model ChannelBookmark {
+  id        String   @id @default(cuid())
+  userId    String
+  channelId String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  channel   Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, channelId])
+  @@index([userId, createdAt, id])
+}
+
+model PostViewHistory {
+  id            String   @id @default(cuid())
+  userId        String
+  postId        String
+  firstViewedAt DateTime @default(now())
+  lastViewedAt  DateTime @default(now())
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post          Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, postId])
+  @@index([userId, lastViewedAt, id])
 }
 
 model PostLike {
