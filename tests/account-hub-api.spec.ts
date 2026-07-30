@@ -727,11 +727,14 @@ test("view history includes the exact ninety day boundary and deletes only older
     const page = await listPostHistory(fanId, { limit: 1 }, now);
     expect(page.items).toEqual([
       expect.objectContaining({
-        id: "post-3",
-        media: expect.any(Array),
-        bookmarked: expect.any(Boolean),
-        liked: expect.any(Boolean),
-        hasAccess: expect.any(Boolean)
+        occurredAt: recent.toISOString(),
+        post: expect.objectContaining({
+          id: "post-3",
+          media: expect.any(Array),
+          bookmarked: expect.any(Boolean),
+          liked: expect.any(Boolean),
+          hasAccess: expect.any(Boolean)
+        })
       })
     ]);
     expect(page.nextCursor).not.toBeNull();
@@ -745,7 +748,11 @@ test("view history includes the exact ninety day boundary and deletes only older
     });
 
     const all = await listPostHistory(fanId, {}, now);
-    expect(all.items.map((post) => post.id)).toEqual(["post-3", "post-1"]);
+    expect(all.items.map((item) => item.post.id)).toEqual(["post-3", "post-1"]);
+    expect(all.items.map((item) => item.occurredAt)).toEqual([
+      recent.toISOString(),
+      exactCutoff.toISOString()
+    ]);
 
     expect(await deleteExpiredPostViews(now)).toEqual({ deleted: 1 });
     expect(await prisma.postViewHistory.findUnique({

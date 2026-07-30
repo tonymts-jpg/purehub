@@ -413,3 +413,133 @@ test("favorites: channel favorite detail defers interaction until session hydrat
   releaseSession?.();
   await expect(page.getByRole("button", { name: "收藏频道" })).toBeEnabled();
 });
+
+function followingCreator() {
+  return {
+    id: "creator-1",
+    name: "测试创作者",
+    handle: "creator-one",
+    avatar: "测",
+    bio: "用于验证关注列表的简介。",
+    category: "Photography",
+    verified: true,
+    following: true
+  };
+}
+
+function buyerOrder(status = "paid") {
+  return {
+    id: "order-1001",
+    kind: "post_unlock",
+    itemId: "post-1",
+    itemLabel: "订单作品",
+    amount: 1990,
+    currency: "CNY",
+    status,
+    provider: "微信支付",
+    createdAt: "2026-07-30T04:00:00.000Z",
+    paidAt: "2026-07-30T04:01:00.000Z",
+    creator: { id: "creator-1", name: "测试创作者", handle: "creator-one", avatar: "测" }
+  };
+}
+
+test("likes: keeps a liked post until the canonical unlike response succeeds", async ({ page }) => {
+  await mockAccountSession(page);
+  let releaseUnlike: (() => void) | undefined;
+  const unlikePending = new Promise<void>((resolve) => { releaseUnlike = resolve; });
+  await page.route("**/api/me/likes**", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({ items: [{ post: { ...accountPost("post-liked", "已喜欢作品"), liked: true }, occurredAt: "2026-07-30T04:00:00.000Z" }], nextCursor: null })
+  }));
+  await page.route("**/api/posts/post-liked/like", async (route) => {
+    if (route.request().method() !== "DELETE") return route.fallback();
+    await unlikePending;
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ liked: false }) });
+  });
+
+  await page.goto("/likes");
+  await expect(page.getByTestId("post-card")).toHaveCount(1);
+  await page.getByRole("button", { name: "喜欢" }).click();
+  await expect(page.getByTestId("post-card")).toHaveCount(1);
+  releaseUnlike?.();
+  await expect(page.getByTestId("post-card")).toHaveCount(0);
+});
+
+test("likes: failed unlike retains the already loaded item and exposes a retryable error", async ({ page }) => {
+  await mockAccountSession(page);
+  await page.route("**/api/me/likes**", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({ items: [{ post: { ...accountPost("post-like-failure", "喜欢失败仍保留"), liked: true }, occurredAt: "2026-07-30T04:00:00.000Z" }], nextCursor: null })
+  }));
+  await page.route("**/api/posts/post-like-failure/like", (route) => route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "操作失败" }) }));
+
+  await page.goto("/likes");
+  await page.getByRole("button", { name: "喜欢" }).click();
+  await expect(page.getByTestId("post-card")).toHaveCount(1);
+  await expect(page.getByText("操作失败", { exact: false })).toBeVisible();
+});
+
+test("following: removes a creator only after canonical unfollow succeeds", async ({ page }) => {
+  await mockAccountSession(page);
+  let releaseUnfollow: (() => void) | undefined;
+  const unfollowPending = new Promise<void>((resolve) => { releaseUnfollow = resolve; });
+  await page.route("**/api/me/following**", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({ items: [{ creator: followingCreator(), occurredAt: "2026-07-30T04:00:00.000Z" }], nextCursor: null })
+  }));
+  await page.route("**/api/creators/creator-one/follow", async (route) => {
+    if (route.request().method() !== "DELETE") return route.fallback();
+    await unfollowPending;
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ following: false }) });
+  });
+
+  await page.goto("/following");
+  await expect(page.getByTestId("following-card")).toHaveCount(1);
+  await page.getByRole("button", { name: "取消关注" }).click();
+  await expect(page.getByTestId("following-card")).toHaveCount(1);
+  releaseUnfollow?.();
+  await expect(page.getByTestId("following-card")).toHaveCount(0);
+});
+
+test("history: renders API last-viewed time and never records a view", async ({ page }) => {
+  await mockAccountSession(page);
+  let recordedViews = 0;
+  await page.route("**/api/me/history**", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({ items: [{ post: accountPost("post-history", "浏览历史作品"), occurredAt: "2026-07-30T04:05:00.000Z" }], nextCursor: null })
+  }));
+  await page.route("**/api/posts/*/view", (route) => {
+    recordedViews += 1;
+    return route.fulfill({ status: 500 });
+  });
+
+  await page.goto("/history");
+  await expect(page.getByTestId("history-item")).toHaveCount(1);
+  await expect(page.getByTestId("history-last-viewed")).toContainText("2026");
+  await expect(page.getByTestId("history-item").getByRole("link")).toHaveAttribute("href", "/post/post-history");
+  expect(recordedViews).toBe(0);
+});
+
+test("orders: renders only approved fields and switches from a desktop table to mobile cards", async ({ page }, testInfo: TestInfo) => {
+  await mockAccountSession(page);
+  await page.route("**/api/me/orders**", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({
+      items: [{ ...buyerOrder(), clientSecret: "must-not-render", manualInstructions: "must-not-render" }],
+      nextCursor: null
+    })
+  }));
+
+  await page.goto("/orders");
+  await expect(page.getByText(/clientSecret|manualInstructions/)).toHaveCount(0);
+  if (testInfo.project.name === "mobile") {
+    await expect(page.getByTestId("order-history-cards")).toBeVisible();
+    await expect(page.getByTestId("order-history-table")).toBeHidden();
+    await expect(page.getByTestId("order-history-cards").getByText("已支付", { exact: true })).toBeVisible();
+  } else {
+    await expect(page.getByTestId("order-history-table")).toBeVisible();
+    await expect(page.getByTestId("order-history-cards")).toBeHidden();
+    await expect(page.getByRole("columnheader", { name: "订单编号" })).toBeVisible();
+    await expect(page.getByTestId("order-history-table").getByText("已支付", { exact: true })).toBeVisible();
+  }
+});

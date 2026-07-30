@@ -519,7 +519,7 @@ export async function listPostHistory(
   userId: string,
   input: AccountListInput = {},
   now = new Date()
-): Promise<AccountListResponse<Awaited<ReturnType<typeof addPostViewerState>>[number]>> {
+): Promise<AccountListResponse<AccountPostListItem>> {
   const scope = "history";
   const limit = normalizeLimit(input.limit);
   const cursor = decodeCursor(input.cursor, scope);
@@ -536,13 +536,16 @@ export async function listPostHistory(
   });
   const hasMore = rows.length > limit;
   const returned = rows.slice(0, limit);
-  const items = await addPostViewerState(
+  const posts = await addPostViewerState(
     returned.map((row) => mapDatabasePost(row.post)),
     userId
   );
   const last = returned.at(-1);
   return {
-    items,
+    items: returned.map((row, index) => ({
+      post: posts[index],
+      occurredAt: row.lastViewedAt.toISOString()
+    })),
     nextCursor: hasMore && last
       ? encodeAccountCursor({
           scope,

@@ -12,7 +12,14 @@ import { UnlockDialog } from "./unlock-dialog";
 import { authClient } from "@/lib/auth-client";
 import { usePostPurchase } from "./use-post-purchase";
 
-export function PostCard({post}:{post:Post}) {
+type PostCardProps = {
+  post: Post;
+  onUnlike?: (postId: string) => void;
+  onUnbookmark?: (postId: string) => void;
+  onMutationError?: (message: string) => void;
+};
+
+export function PostCard({post, onUnlike, onUnbookmark, onMutationError}:PostCardProps) {
   const creator=creators.find(c=>c.id===post.creatorId)!;
   const [unlockOpen,setUnlockOpen]=useState(false);
   const {liked,bookmarked,subscriptions,unlocked}=useDemoStore();
@@ -35,18 +42,38 @@ export function PostCard({post}:{post:Post}) {
     || (demoMode&&subscriptions.some(item=>item.creatorId===creator.id))
     || (demoMode&&unlocked.includes(post.id))
   );
-  const signIn=()=>{window.location.href=`/sign-in?callbackUrl=${encodeURIComponent(window.location.pathname)}`};
+  const signIn=()=>{window.location.href=`/sign-in?callbackUrl=${encodeURIComponent(`${window.location.pathname}${window.location.search}`)}`};
   const updateLike=async()=>{
     if(!session?.user)return signIn();
     const next=!isLiked; setIsLiked(next); setLikeCount(value=>value+(next?1:-1));
-    const response=await fetch(`/api/posts/${post.id}/like`,{method:next?"POST":"DELETE"});
-    if(!response.ok){setIsLiked(!next);setLikeCount(value=>value+(next?-1:1))}
+    try {
+      const response=await fetch(`/api/posts/${post.id}/like`,{method:next?"POST":"DELETE"});
+      if(response.status===401){setIsLiked(!next);setLikeCount(value=>value+(next?-1:1));return signIn()}
+      if(!response.ok){
+        const body=await response.json().catch(()=>null) as {error?:string}|null;
+        throw new Error(body?.error||"暂时无法更新喜欢状态。");
+      }
+      if(!next)onUnlike?.(post.id);
+    } catch(error) {
+      setIsLiked(!next);setLikeCount(value=>value+(next?-1:1));
+      onMutationError?.(error instanceof Error?error.message:"暂时无法更新喜欢状态。");
+    }
   };
   const updateBookmark=async()=>{
     if(!session?.user)return signIn();
     const next=!saved; setSaved(next);
-    const response=await fetch(`/api/posts/${post.id}/bookmark`,{method:next?"POST":"DELETE"});
-    if(!response.ok)setSaved(!next);
+    try {
+      const response=await fetch(`/api/posts/${post.id}/bookmark`,{method:next?"POST":"DELETE"});
+      if(response.status===401){setSaved(!next);return signIn()}
+      if(!response.ok){
+        const body=await response.json().catch(()=>null) as {error?:string}|null;
+        throw new Error(body?.error||"暂时无法更新收藏状态。");
+      }
+      if(!next)onUnbookmark?.(post.id);
+    } catch(error) {
+      setSaved(!next);
+      onMutationError?.(error instanceof Error?error.message:"暂时无法更新收藏状态。");
+    }
   };
   const handleLocked=()=>setUnlockOpen(true);
   return <article data-testid="post-card" data-post-id={post.id} className="glass overflow-hidden rounded-[28px] shadow-soft transition duration-300 hover:-translate-y-1">
