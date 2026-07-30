@@ -419,11 +419,34 @@ function OwnerControls({
 }
 
 const channelAdminRoles = new Set<AdminRole>(["super_admin", "ops_admin", "content_admin"]);
+const adminChannelStatuses = new Set(["all", "pending", "active", "draft", "rejected", "suspended", "archived"]);
 
-export function AdminChannelOperations({ admin }: { admin: AdminContext }) {
-  const allowed = Boolean(admin && admin.permissions.includes("channels") && channelAdminRoles.has(admin.role));
+function normalizeAdminChannelStatus(status: string) {
+  return adminChannelStatuses.has(status) ? status : "pending";
+}
+
+export function adminChannelListUrl(status: string) {
+  const normalized = normalizeAdminChannelStatus(status);
+  if (normalized === "all") return "/api/admin/channels";
+  const params = new URLSearchParams({ status: normalized });
+  return `/api/admin/channels?${params}`;
+}
+
+export function canUseAdminChannelOperations(admin: AdminContext) {
+  return Boolean(admin && admin.permissions.includes("channels") && channelAdminRoles.has(admin.role));
+}
+
+export function AdminChannelOperations({
+  admin,
+  initialStatus = "pending"
+}: {
+  admin: AdminContext;
+  initialStatus?: string;
+}) {
+  const router = useRouter();
+  const allowed = canUseAdminChannelOperations(admin);
   const [channels, setChannels] = useState<Channel[]>([]);
-  const [filter, setFilter] = useState("pending");
+  const [filter, setFilter] = useState(() => normalizeAdminChannelStatus(initialStatus));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -453,10 +476,8 @@ export function AdminChannelOperations({ admin }: { admin: AdminContext }) {
     setLoading(true);
     setError("");
     try {
-      const params = new URLSearchParams();
-      if (filter !== "all") params.set("status", filter);
       const result = await loadEveryChannelPage<Channel>(
-        `/api/admin/channels${params.size ? `?${params}` : ""}`,
+        adminChannelListUrl(filter),
         "channels",
         controller.signal
       );
@@ -502,7 +523,11 @@ export function AdminChannelOperations({ admin }: { admin: AdminContext }) {
           <div className="flex flex-wrap items-end gap-2">
             <label className="text-xs font-bold muted">
               频道状态筛选
-              <select aria-label="频道状态筛选" value={filter} onChange={(event) => setFilter(event.target.value)} className="mt-1 block rounded-md border border-[var(--line)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--text)]">
+              <select aria-label="频道状态筛选" value={filter} onChange={(event) => {
+                const next = event.target.value;
+                setFilter(next);
+                router.replace(`/admin/channels${next === "all" ? "" : `?status=${encodeURIComponent(next)}`}`);
+              }} className="mt-1 block rounded-md border border-[var(--line)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--text)]">
                 <option value="all">全部</option><option value="pending">待审核</option><option value="active">active</option><option value="draft">draft</option><option value="rejected">rejected</option><option value="suspended">suspended</option><option value="archived">archived</option>
               </select>
             </label>

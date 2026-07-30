@@ -77,39 +77,70 @@ export async function writeAuditLog(admin: AdminContext, action: string, targetT
 export async function getAdminOverview() {
   if (!canUseDatabase()) {
     return {
-      metrics: { users: creators.length + 2, creators: creators.length, pendingApplications: 0, posts: posts.length, transactions: transactions.length, payouts: 0 },
-      activePricingVersion: fallbackPricingVersion,
-      auditLogs: fallbackAuditLogs
+      metrics: {
+        users: creators.length + 2,
+        creators: creators.length,
+        posts: posts.length,
+        transactions: transactions.length
+      },
+      queues: {
+        pendingApplications: 0,
+        pendingContent: 0,
+        pendingChannels: 0,
+        pendingRefunds: 0,
+        pendingPayouts: 0,
+        reconciliationExceptions: 0
+      }
     };
   }
 
-  const [users, creatorCount, pendingApplications, postCount, transactionCount, payouts, activePricingVersion, auditLogs] = await Promise.all([
+  const [
+    users,
+    creatorCount,
+    postCount,
+    transactionCount,
+    pendingApplications,
+    pendingContent,
+    pendingChannels,
+    pendingRefunds,
+    pendingPayouts,
+    reconciliationExceptions
+  ] = await Promise.all([
     prisma.user.count(),
     prisma.user.count({ where: { role: "creator" } }),
-    prisma.creatorApplication.count({ where: { status: "pending" } }),
     prisma.post.count(),
     prisma.transaction.count(),
-    prisma.payoutRequest.count(),
-    prisma.pricingVersion.findFirst({ where: { status: "active" }, orderBy: { publishedAt: "desc" } }),
-    prisma.auditLog.findMany({ orderBy: { createdAt: "desc" }, take: 8 })
+    prisma.creatorApplication.count({ where: { status: "pending" } }),
+    prisma.post.count({ where: { visibility: "pending" } }),
+    prisma.channel.count({ where: { status: "pending" } }),
+    prisma.refund.count({ where: { status: "pending" } }),
+    prisma.payoutRequest.count({ where: { status: "pending" } }),
+    prisma.reconciliationRun.count({ where: { discrepancyCount: { gt: 0 } } })
   ]);
 
   return {
-    metrics: { users, creators: creatorCount, pendingApplications, posts: postCount, transactions: transactionCount, payouts },
-    activePricingVersion,
-    auditLogs
+    metrics: { users, creators: creatorCount, posts: postCount, transactions: transactionCount },
+    queues: {
+      pendingApplications,
+      pendingContent,
+      pendingChannels,
+      pendingRefunds,
+      pendingPayouts,
+      reconciliationExceptions
+    }
   };
 }
 
 export async function listAdminUsers() {
   if (!canUseDatabase()) {
     return [
-      { id: "admin-demo", name: "PureHub Admin", handle: "purehub-admin", role: "admin", creatorStatus: "none", createdAt: new Date(), adminAccounts: [{ role: "super_admin", status: "active" }], creatorProfile: null },
-      { id: "fan-demo", name: "Pure 粉丝", handle: "pure-fan", role: "fan", creatorStatus: "none", createdAt: new Date(), adminAccounts: [], creatorProfile: null },
+      { id: "admin-demo", name: "PureHub Admin", handle: "purehub-admin", status: "active", role: "admin", creatorStatus: "none", createdAt: new Date(), adminAccounts: [{ role: "super_admin", status: "active" }], creatorProfile: null },
+      { id: "fan-demo", name: "Pure 粉丝", handle: "pure-fan", status: "active", role: "fan", creatorStatus: "none", createdAt: new Date(), adminAccounts: [], creatorProfile: null },
       ...creators.map((creator) => ({
         id: creator.id,
         name: creator.name,
         handle: creator.handle,
+        status: "active",
         role: "creator",
         creatorStatus: "approved",
         createdAt: new Date(),
@@ -125,6 +156,7 @@ export async function listAdminUsers() {
       id: true,
       name: true,
       handle: true,
+      status: true,
       role: true,
       creatorStatus: true,
       createdAt: true,
