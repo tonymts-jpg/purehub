@@ -4,11 +4,39 @@ import type { AdminContext } from "@/lib/admin-auth";
 import { PLATFORM_FEE_RULES, type PaymentProvider } from "@/lib/platform-config";
 import { resolvePaymentAdapter } from "./adapters";
 import { completePayout, recordPaymentLedger, refundOrder, releasePayout, reservePayout } from "@/lib/finance/ledger";
+import {
+  AccountRepositoryError,
+  type AccountListInput,
+  type AccountListResponse
+} from "@/lib/account/repository";
+import { encodeAccountCursor, parseAccountCursor } from "@/lib/account/cursor";
+import type { BuyerOrderListItem } from "@/lib/account/types";
 
 const json = (value: unknown) => value as Prisma.InputJsonValue;
 const canUseDatabase = () => Boolean(process.env.DATABASE_URL);
 
 type OrderKind = "post_unlock" | "subscription";
+
+const buyerOrderSelect = {
+  id: true,
+  kind: true,
+  itemId: true,
+  amount: true,
+  currency: true,
+  status: true,
+  provider: true,
+  createdAt: true,
+  paidAt: true,
+  creator: {
+    select: {
+      id: true,
+      name: true,
+      handle: true,
+      avatar: true
+    }
+  },
+  metadata: true
+} satisfies Prisma.OrderSelect;
 
 export const PHASE4_FALLBACK_FEE_CONFIG = {
   id: "platform-fee-v1",
@@ -30,6 +58,88 @@ function feeSnapshot(amount: number, feeBps: number) {
     platformFeeBps: feeBps,
     platformFeeAmount,
     creatorNetAmount: amount - platformFeeAmount
+  };
+}
+
+function buyerOrderLimit(value: number | undefined): number {
+  if (value === undefined) return 20;
+  if (!Number.isInteger(value) || value < 1 || value > 50) {
+    throw new AccountRepositoryError("Limit must be an integer between 1 and 50.", 400);
+  }
+  return value;
+}
+
+function buyerOrderCursor(value: string | undefined) {
+  if (!value) return null;
+  try {
+    return parseAccountCursor(value, "orders");
+  } catch (error) {
+    throw new AccountRepositoryError(
+      error instanceof Error ? error.message : "Account cursor is invalid.",
+      400
+    );
+  }
+}
+
+function safeOrderItemLabel(metadata: Prisma.JsonValue): string | null {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
+  const postTitle = metadata.postTitle;
+  if (typeof postTitle === "string") return postTitle;
+  const planName = metadata.planName;
+  return typeof planName === "string" ? planName : null;
+}
+
+export async function listBuyerOrders(
+  buyerUserId: string,
+  input: AccountListInput = {}
+): Promise<AccountListResponse<BuyerOrderListItem>> {
+  const limit = buyerOrderLimit(input.limit);
+  const cursor = buyerOrderCursor(input.cursor);
+  const rows = await prisma.order.findMany({
+    where: {
+      buyerUserId,
+      ...(cursor
+        ? {
+            AND: [{
+              OR: [
+                { createdAt: { lt: new Date(cursor.occurredAt) } },
+                {
+                  createdAt: new Date(cursor.occurredAt),
+                  id: { lt: cursor.id }
+                }
+              ]
+            }]
+          }
+        : {})
+    },
+    select: buyerOrderSelect,
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: limit + 1
+  });
+  const hasMore = rows.length > limit;
+  const returned = rows.slice(0, limit);
+  const last = returned.at(-1);
+  return {
+    items: returned.map((order) => ({
+      id: order.id,
+      kind: order.kind,
+      itemId: order.itemId,
+      itemLabel: safeOrderItemLabel(order.metadata),
+      amount: order.amount,
+      currency: order.currency,
+      status: order.status,
+      provider: order.provider,
+      createdAt: order.createdAt.toISOString(),
+      paidAt: order.paidAt?.toISOString() ?? null,
+      creator: order.creator
+    })),
+    nextCursor: hasMore && last
+      ? encodeAccountCursor({
+          scope: "orders",
+          occurredAt: last.createdAt.toISOString(),
+          id: last.id
+        })
+      : null
   };
 }
 

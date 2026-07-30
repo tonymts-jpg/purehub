@@ -23,6 +23,326 @@ async function requireAccountDatabase(
   test.skip(!(await hasDatabase(request)), "Account APIs require PostgreSQL.");
 }
 
+test("account lists require authentication and reject identity headers first", async () => {
+  const anonymous = await playwrightRequest.newContext({
+    baseURL: process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3001"
+  });
+  const paths = [
+    "/api/me/likes",
+    "/api/me/following",
+    "/api/me/unlocked",
+    "/api/me/orders"
+  ];
+
+  try {
+    for (const path of paths) {
+      expect((await anonymous.get(path)).status()).toBe(401);
+      for (const header of ["x-user-id", "x-user-role", "x-admin-role"]) {
+        expect((await anonymous.get(path, {
+          headers: { [header]: "attacker-controlled" }
+        })).status()).toBe(400);
+      }
+    }
+  } finally {
+    await anonymous.dispose();
+  }
+});
+
+test("account lists are session-owned, access-aware, and payment-safe", async ({ request }, testInfo) => {
+  await requireAccountDatabase(request, testInfo);
+  const fan = await registerFan(request, "account-lists");
+  await signIn(request, fan.email);
+  const fanId = (await (await request.get("/api/me")).json()).user.id as string;
+  const nonce = Date.now().toString(36);
+  const likedPost = {
+    id: `account-liked-${nonce}`,
+    creatorId: "c1",
+    title: "Liked account post",
+    visibility: "free",
+    createdAt: new Date("2026-07-30T01:00:00.000Z")
+  };
+  const purchasedPost = {
+    id: `account-purchased-${nonce}`,
+    creatorId: "c1",
+    title: "Purchased account post",
+    visibility: "members",
+    createdAt: new Date("2026-07-30T07:00:00.000Z")
+  };
+  const memberPost = {
+    id: `account-member-${nonce}`,
+    creatorId: "c1",
+    title: "Active member post",
+    visibility: "members",
+    createdAt: new Date("2026-07-30T07:00:00.000Z")
+  };
+  const expiredMemberPost = {
+    id: `account-expired-member-${nonce}`,
+    creatorId: "c2",
+    title: "Expired member post",
+    visibility: "members",
+    createdAt: new Date("2026-07-30T04:00:00.000Z")
+  };
+  const postIds = [
+    likedPost.id,
+    purchasedPost.id,
+    memberPost.id,
+    expiredMemberPost.id
+  ];
+  const ownOrderId = `account-order-own-${nonce}`;
+  const otherOrderId = `account-order-other-${nonce}`;
+  const paymentIntentId = `account-intent-${nonce}`;
+  const channelMembershipId = `account-channel-member-${nonce}`;
+  const channelPostId = `account-channel-post-${nonce}`;
+  const purchaseEntitlementId = `account-entitlement-${nonce}`;
+  const activeSubscriptionId = `account-sub-active-${nonce}`;
+  const expiredSubscriptionId = `account-sub-expired-${nonce}`;
+
+  try {
+    await prisma.post.createMany({
+      data: [likedPost, purchasedPost, memberPost, expiredMemberPost].map((post) => ({
+        ...post,
+        excerpt: `${post.title} excerpt`,
+        content: `${post.title} content`,
+        cover: "/images/post-placeholder.svg",
+        category: "生活",
+        tags: [],
+        comments: [],
+        createdLabel: "刚刚"
+      }))
+    });
+    await prisma.postLike.create({
+      data: {
+        id: `account-like-${nonce}`,
+        userId: fanId,
+        postId: likedPost.id,
+        createdAt: new Date("2026-07-30T05:00:00.000Z")
+      }
+    });
+    await prisma.follow.create({
+      data: {
+        id: `account-follow-${nonce}`,
+        userId: fanId,
+        creatorId: "c1",
+        createdAt: new Date("2026-07-30T06:00:00.000Z")
+      }
+    });
+    await prisma.entitlement.create({
+      data: {
+        id: purchaseEntitlementId,
+        userId: fanId,
+        postId: purchasedPost.id,
+        source: "purchase",
+        createdAt: new Date("2026-07-30T07:00:00.000Z")
+      }
+    });
+    await prisma.subscription.createMany({
+      data: [
+        {
+          id: activeSubscriptionId,
+          userId: fanId,
+          creatorId: "c1",
+          planId: `account-plan-active-${nonce}`,
+          status: "active",
+          startedAt: new Date("2026-07-30T08:00:00.000Z")
+        },
+        {
+          id: expiredSubscriptionId,
+          userId: fanId,
+          creatorId: "c2",
+          planId: `account-plan-expired-${nonce}`,
+          status: "expired",
+          startedAt: new Date("2026-07-30T09:00:00.000Z")
+        }
+      ]
+    });
+    await prisma.channelMembership.create({
+      data: {
+        id: channelMembershipId,
+        channelId: "channel-purehub-official",
+        userId: fanId,
+        role: "member",
+        status: "active"
+      }
+    });
+    await prisma.channelPost.create({
+      data: {
+        id: channelPostId,
+        channelId: "channel-purehub-official",
+        postId: expiredMemberPost.id,
+        source: "manual",
+        status: "published",
+        addedByUserId: "c2"
+      }
+    });
+    await prisma.order.createMany({
+      data: [
+        {
+          id: ownOrderId,
+          buyerUserId: fanId,
+          creatorUserId: "c1",
+          kind: "post_unlock",
+          itemId: purchasedPost.id,
+          amount: 28,
+          currency: "CNY",
+          status: "fulfilled",
+          provider: "card",
+          createdAt: new Date("2026-07-30T10:00:00.000Z"),
+          paidAt: new Date("2026-07-30T10:01:00.000Z"),
+          metadata: {
+            postTitle: purchasedPost.title,
+            clientSecret: "metadata-must-not-leak",
+            manualInstructions: { message: "metadata-must-not-leak" },
+            providerPayload: { credential: "metadata-must-not-leak" }
+          }
+        },
+        {
+          id: otherOrderId,
+          buyerUserId: "c1",
+          creatorUserId: "c2",
+          kind: "subscription",
+          itemId: `account-other-plan-${nonce}`,
+          amount: 48,
+          currency: "CNY",
+          status: "pending",
+          provider: "card",
+          createdAt: new Date("2026-07-30T11:00:00.000Z"),
+          metadata: { planName: "Another buyer plan" }
+        }
+      ]
+    });
+    await prisma.paymentIntent.create({
+      data: {
+        id: paymentIntentId,
+        orderId: ownOrderId,
+        provider: "card",
+        status: "requires_confirmation",
+        amount: 28,
+        currency: "CNY",
+        clientSecret: "intent-must-not-leak",
+        manualInstructions: { message: "intent-must-not-leak" },
+        metadata: { providerPayload: "intent-must-not-leak" }
+      }
+    });
+
+    for (const path of ["/api/me/likes", "/api/me/following", "/api/me/unlocked", "/api/me/orders"]) {
+      expect((await request.get(`${path}?userId=c1`)).status()).toBe(400);
+      for (const header of ["x-user-id", "x-user-role", "x-admin-role"]) {
+        expect((await request.get(path, { headers: { [header]: "c1" } })).status()).toBe(400);
+      }
+    }
+
+    const meLikes = await request.get("/api/me/likes");
+    expect(meLikes.ok(), await meLikes.text()).toBeTruthy();
+    expect((await meLikes.json()).items).toEqual([
+      expect.objectContaining({
+        occurredAt: "2026-07-30T05:00:00.000Z",
+        post: expect.objectContaining({ id: likedPost.id, liked: true })
+      })
+    ]);
+
+    const meFollowing = await request.get("/api/me/following");
+    expect(meFollowing.ok(), await meFollowing.text()).toBeTruthy();
+    expect((await meFollowing.json()).items).toEqual([
+      expect.objectContaining({
+        occurredAt: "2026-07-30T06:00:00.000Z",
+        creator: expect.objectContaining({
+          id: "c1",
+          handle: expect.any(String),
+          bio: expect.any(String),
+          category: expect.any(String)
+        })
+      })
+    ]);
+
+    const meUnlocked = await request.get("/api/me/unlocked");
+    expect(meUnlocked.ok(), await meUnlocked.text()).toBeTruthy();
+    const unlockedItems = (await meUnlocked.json()).items as Array<{
+      source: "purchase" | "subscription";
+      post: { id: string; hasAccess: boolean };
+    }>;
+    expect(unlockedItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        post: expect.objectContaining({ id: purchasedPost.id, hasAccess: true }),
+        source: "purchase"
+      }),
+      expect.objectContaining({
+        post: expect.objectContaining({ id: memberPost.id, hasAccess: true }),
+        source: "subscription"
+      })
+    ]));
+    expect(unlockedItems.filter((item) => item.post.id === purchasedPost.id)).toEqual([
+      expect.objectContaining({ source: "purchase" })
+    ]);
+    expect(unlockedItems.map((item) => item.post.id)).not.toContain(expiredMemberPost.id);
+    const firstUnlockedPageResponse = await request.get("/api/me/unlocked?limit=1");
+    expect(firstUnlockedPageResponse.ok(), await firstUnlockedPageResponse.text()).toBeTruthy();
+    const firstUnlockedPage = await firstUnlockedPageResponse.json() as {
+      items: Array<{ source: string; post: { id: string } }>;
+      nextCursor: string | null;
+    };
+    expect(firstUnlockedPage.items).toEqual([
+      expect.objectContaining({
+        source: "purchase",
+        post: expect.objectContaining({ id: purchasedPost.id })
+      })
+    ]);
+    expect(firstUnlockedPage.nextCursor).not.toBeNull();
+    const secondUnlockedPageResponse = await request.get(
+      `/api/me/unlocked?limit=1&cursor=${encodeURIComponent(firstUnlockedPage.nextCursor!)}`
+    );
+    expect(secondUnlockedPageResponse.ok(), await secondUnlockedPageResponse.text()).toBeTruthy();
+    const secondUnlockedPage = await secondUnlockedPageResponse.json() as {
+      items: Array<{ source: string; post: { id: string } }>;
+      nextCursor: string | null;
+    };
+    expect(secondUnlockedPage.items).toEqual([
+      expect.objectContaining({
+        source: "subscription",
+        post: expect.objectContaining({ id: memberPost.id })
+      })
+    ]);
+    expect(secondUnlockedPage.nextCursor).toBeNull();
+
+    const meOrders = await request.get("/api/me/orders");
+    expect(meOrders.ok(), await meOrders.text()).toBeTruthy();
+    const orders = (await meOrders.json()).items as Array<Record<string, unknown>>;
+    expect(orders).toEqual([
+      expect.objectContaining({
+        id: ownOrderId,
+        itemId: purchasedPost.id,
+        itemLabel: purchasedPost.title,
+        creator: expect.objectContaining({ id: "c1" })
+      })
+    ]);
+    expect(orders.map((order) => order.id)).not.toContain(otherOrderId);
+    const serializedOrders = JSON.stringify(orders);
+    for (const forbidden of [
+      "clientSecret",
+      "manualInstructions",
+      "providerPayload",
+      "intent-must-not-leak",
+      "metadata-must-not-leak"
+    ]) {
+      expect(serializedOrders).not.toContain(forbidden);
+    }
+    expect(orders[0]).not.toHaveProperty("metadata");
+    expect(orders[0]).not.toHaveProperty("paymentIntents");
+    expect(orders[0]).not.toHaveProperty("paymentTransactions");
+  } finally {
+    await prisma.paymentIntent.deleteMany({ where: { id: paymentIntentId } });
+    await prisma.entitlement.deleteMany({ where: { id: purchaseEntitlementId } });
+    await prisma.subscription.deleteMany({
+      where: { id: { in: [activeSubscriptionId, expiredSubscriptionId] } }
+    });
+    await prisma.order.deleteMany({ where: { id: { in: [ownOrderId, otherOrderId] } } });
+    await prisma.channelPost.deleteMany({ where: { id: channelPostId } });
+    await prisma.channelMembership.deleteMany({ where: { id: channelMembershipId } });
+    await prisma.postLike.deleteMany({ where: { userId: fanId, postId: likedPost.id } });
+    await prisma.follow.deleteMany({ where: { userId: fanId, creatorId: "c1" } });
+    await prisma.post.deleteMany({ where: { id: { in: postIds } } });
+  }
+});
+
 test("favorites require authentication", async () => {
   const anonymous = await playwrightRequest.newContext({
     baseURL: process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3001"

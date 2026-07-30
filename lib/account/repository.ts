@@ -3,7 +3,14 @@ import { ChannelRepositoryError, getChannelBySlug } from "@/lib/channels/reposit
 import { addPostViewerState, mapDatabasePost } from "@/lib/db-repository";
 import { prisma } from "@/lib/prisma";
 import { encodeAccountCursor, parseAccountCursor } from "./cursor";
-import type { AccountCursor, AccountListScope } from "./types";
+import type {
+  AccountCursor,
+  AccountFollowingListItem,
+  AccountListScope,
+  AccountPostListItem,
+  AccountUnlockedListItem,
+  AccountUnlockedSource
+} from "./types";
 
 const favoritePostInclude = {
   post: {
@@ -20,6 +27,22 @@ const postHistoryInclude = {
     }
   }
 } satisfies Prisma.PostViewHistoryInclude;
+
+const likedPostInclude = {
+  post: {
+    include: {
+      media: { orderBy: { order: "asc" as const } }
+    }
+  }
+} satisfies Prisma.PostLikeInclude;
+
+const unlockedPostInclude = {
+  post: {
+    include: {
+      media: { orderBy: { order: "asc" as const } }
+    }
+  }
+} satisfies Prisma.EntitlementInclude;
 
 const HISTORY_RETENTION_DAYS = 90;
 const ACCOUNT_IDENTITY_OVERRIDE_HEADERS = [
@@ -47,6 +70,36 @@ export type AccountListResponse<T> = {
   items: T[];
   nextCursor: string | null;
 };
+
+export function accountListInput(request: Request): AccountListInput {
+  const searchParams = new URL(request.url).searchParams;
+  const allowed = new Set(["cursor", "limit"]);
+  for (const field of searchParams.keys()) {
+    if (!allowed.has(field)) {
+      throw new TypeError(`This request does not accept the ${field} query parameter.`);
+    }
+    if (searchParams.getAll(field).length > 1) {
+      throw new TypeError(`The ${field} query parameter may be provided at most once.`);
+    }
+  }
+
+  const cursor = searchParams.get("cursor");
+  if (cursor !== null && cursor.length === 0) {
+    throw new TypeError("Account cursor is invalid.");
+  }
+  const rawLimit = searchParams.get("limit");
+  if (rawLimit !== null && !/^\d+$/.test(rawLimit)) {
+    throw new TypeError("Limit must be an integer between 1 and 50.");
+  }
+  const limit = rawLimit === null ? undefined : Number(rawLimit);
+  if (limit !== undefined && (limit < 1 || limit > 50)) {
+    throw new TypeError("Limit must be an integer between 1 and 50.");
+  }
+  return {
+    ...(cursor ? { cursor } : {}),
+    ...(limit !== undefined ? { limit } : {})
+  };
+}
 
 export function assertNoAccountIdentityOverrideHeaders(request: Request): void {
   for (const header of ACCOUNT_IDENTITY_OVERRIDE_HEADERS) {
@@ -121,6 +174,231 @@ function nextCursor(
         id: last.id
       })
     : null;
+}
+
+export async function listLikedPosts(
+  userId: string,
+  input: AccountListInput = {}
+): Promise<AccountListResponse<AccountPostListItem>> {
+  const scope = "likes";
+  const limit = normalizeLimit(input.limit);
+  const cursor = decodeCursor(input.cursor, scope);
+  const rows = await prisma.postLike.findMany({
+    where: {
+      userId,
+      ...(cursor ? { AND: [relationAfterPredicate(cursor)] } : {})
+    },
+    include: likedPostInclude,
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: limit + 1
+  });
+  const hasMore = rows.length > limit;
+  const returned = rows.slice(0, limit);
+  const posts = await addPostViewerState(
+    returned.map((row) => mapDatabasePost(row.post)),
+    userId
+  );
+  return {
+    items: returned.map((row, index) => ({
+      post: posts[index],
+      occurredAt: row.createdAt.toISOString()
+    })),
+    nextCursor: nextCursor(scope, hasMore, returned.at(-1))
+  };
+}
+
+export async function listFollowingCreators(
+  userId: string,
+  input: AccountListInput = {}
+): Promise<AccountListResponse<AccountFollowingListItem>> {
+  const scope = "following";
+  const limit = normalizeLimit(input.limit);
+  const cursor = decodeCursor(input.cursor, scope);
+  const rows = await prisma.follow.findMany({
+    where: {
+      userId,
+      ...(cursor ? { AND: [relationAfterPredicate(cursor)] } : {})
+    },
+    select: {
+      id: true,
+      createdAt: true,
+      creator: {
+        select: {
+          id: true,
+          name: true,
+          handle: true,
+          avatar: true,
+          creatorProfile: {
+            select: {
+              bio: true,
+              category: true,
+              verified: true
+            }
+          }
+        }
+      }
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: limit + 1
+  });
+  const hasMore = rows.length > limit;
+  const returned = rows.slice(0, limit);
+  return {
+    items: returned.map((row) => ({
+      creator: {
+        id: row.creator.id,
+        name: row.creator.name,
+        handle: row.creator.handle,
+        avatar: row.creator.avatar,
+        bio: row.creator.creatorProfile?.bio ?? null,
+        category: row.creator.creatorProfile?.category ?? null,
+        verified: row.creator.creatorProfile?.verified ?? false,
+        following: true
+      },
+      occurredAt: row.createdAt.toISOString()
+    })),
+    nextCursor: nextCursor(scope, hasMore, returned.at(-1))
+  };
+}
+
+type UnlockedCandidate = {
+  id: string;
+  createdAt: Date;
+  source: AccountUnlockedSource;
+  post: Prisma.PostGetPayload<{ include: { media: { orderBy: { order: "asc" } } } }>;
+};
+
+type UnlockedCursor = AccountCursor & {
+  source: AccountUnlockedSource;
+  relationId: string;
+};
+
+function unlockedCursorId(source: AccountUnlockedSource, relationId: string): string {
+  return `${source}:${relationId}`;
+}
+
+function decodeUnlockedCursor(value: string | undefined): UnlockedCursor | null {
+  const cursor = decodeCursor(value, "unlocked");
+  if (!cursor) return null;
+  for (const source of ["purchase", "subscription"] as const) {
+    const prefix = `${source}:`;
+    if (cursor.id.startsWith(prefix) && cursor.id.length > prefix.length) {
+      return {
+        ...cursor,
+        source,
+        relationId: cursor.id.slice(prefix.length)
+      };
+    }
+  }
+  throw new AccountRepositoryError("Account cursor is invalid.", 400);
+}
+
+function unlockedAfterPredicate(
+  cursor: UnlockedCursor,
+  source: AccountUnlockedSource
+): {
+  OR: Array<
+    | { createdAt: { lt: Date } }
+    | { createdAt: Date }
+    | { createdAt: Date; id: { lt: string } }
+  >;
+} {
+  const createdAt = new Date(cursor.occurredAt);
+  const equalTime = source === cursor.source
+    ? { createdAt, id: { lt: cursor.relationId } }
+    : source === "subscription" && cursor.source === "purchase"
+      ? { createdAt }
+      : null;
+  return {
+    OR: [
+      { createdAt: { lt: createdAt } },
+      ...(equalTime ? [equalTime] : [])
+    ]
+  };
+}
+
+export async function listUnlockedPosts(
+  userId: string,
+  input: AccountListInput = {}
+): Promise<AccountListResponse<AccountUnlockedListItem>> {
+  const scope = "unlocked";
+  const limit = normalizeLimit(input.limit);
+  const cursor = decodeUnlockedCursor(input.cursor);
+  const activeSubscriptions = await prisma.subscription.findMany({
+    where: { userId, status: "active" },
+    select: { creatorId: true }
+  });
+  const activeCreatorIds = [...new Set(activeSubscriptions.map((row) => row.creatorId))];
+  const [purchaseRows, subscriptionPosts] = await Promise.all([
+    prisma.entitlement.findMany({
+      where: {
+        userId,
+        source: "purchase",
+        ...(cursor ? { AND: [unlockedAfterPredicate(cursor, "purchase")] } : {})
+      },
+      include: unlockedPostInclude,
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: limit + 1
+    }),
+    activeCreatorIds.length
+      ? prisma.post.findMany({
+          where: {
+            creatorId: { in: activeCreatorIds },
+            visibility: "members",
+            entitlements: { none: { userId, source: "purchase" } },
+            ...(cursor ? { AND: [unlockedAfterPredicate(cursor, "subscription")] } : {})
+          },
+          include: { media: { orderBy: { order: "asc" } } },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          take: limit + 1
+        })
+      : []
+  ]);
+  const candidates: UnlockedCandidate[] = [
+    ...purchaseRows.map((row) => ({
+      id: row.id,
+      createdAt: row.createdAt,
+      source: "purchase" as const,
+      post: row.post
+    })),
+    ...subscriptionPosts.map((post) => ({
+      id: post.id,
+      createdAt: post.createdAt,
+      source: "subscription" as const,
+      post
+    }))
+  ].sort((left, right) => {
+    const timeDifference = right.createdAt.getTime() - left.createdAt.getTime();
+    if (timeDifference) return timeDifference;
+    if (left.source !== right.source) return left.source === "purchase" ? -1 : 1;
+    if (left.id === right.id) return 0;
+    return left.id < right.id ? 1 : -1;
+  });
+  const hasMore = candidates.length > limit;
+  const returned = candidates.slice(0, limit);
+  const posts = await addPostViewerState(
+    returned.map((row) => mapDatabasePost(row.post)),
+    userId
+  );
+  const items = returned.flatMap((row, index) => {
+    const post = posts[index];
+    return post.hasAccess
+      ? [{
+          post,
+          source: row.source,
+          occurredAt: row.createdAt.toISOString()
+        }]
+      : [];
+  });
+  return {
+    items,
+    nextCursor: nextCursor(scope, hasMore, returned.at(-1)
+      ? {
+          ...returned.at(-1)!,
+          id: unlockedCursorId(returned.at(-1)!.source, returned.at(-1)!.id)
+        }
+      : undefined)
+  };
 }
 
 export async function listFavoritePosts(
