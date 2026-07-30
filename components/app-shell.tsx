@@ -2,26 +2,44 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Bell, BookOpen, Compass, Home, LayoutDashboard, LogIn, LogOut, Moon, PlusCircle, Radio, Search, Sparkles, Sun, UserPlus, UserRound } from "lucide-react";
+import { Bell, Bookmark, Compass, Heart, History, Home, LayoutDashboard, LockKeyhole, LogIn, LogOut, Moon, PlusCircle, Radio, Search, ShoppingBag, Sparkles, Sun, UserPlus, UserRound, Users, WalletCards, type LucideIcon } from "lucide-react";
 import { useDemoStore } from "@/lib/store";
 import { useEffect } from "react";
 import { authClient } from "@/lib/auth-client";
+import { accountNav, canApplyAsCreator, creatorNav, isApprovedCreator, publicNav, type NavItem } from "@/components/account-nav";
 
-const nav = [
-  { href: "/", label: "首页", icon: Home }, { href: "/explore", label: "探索", icon: Compass },
-  { href: "/channels", label: "频道", icon: Radio }, { href: "/search", label: "搜索", icon: Search },
-  { href: "/library", label: "收藏库", icon: BookOpen }, { href: "/notifications", label: "通知", icon: Bell },
-  { href: "/become-creator", label: "成为博主", icon: UserPlus }
-];
+const navigationIcons: Record<string, LucideIcon> = {
+  "/": Home,
+  "/explore": Compass,
+  "/channels": Radio,
+  "/search": Search,
+  "/favorites": Bookmark,
+  "/unlocked": LockKeyhole,
+  "/likes": Heart,
+  "/history": History,
+  "/orders": ShoppingBag,
+  "/following": Users,
+  "/notifications": Bell,
+  "/dashboard": LayoutDashboard,
+  "/dashboard/posts": Bookmark,
+  "/dashboard/posts/new": PlusCircle,
+  "/dashboard/channels": Radio,
+  "/dashboard/members": Users,
+  "/dashboard/wallet": WalletCards,
+  "/become-creator": UserPlus,
+  "/me": UserRound
+};
+
+const becomeCreatorNav: NavItem = { href: "/become-creator", label: "成为博主" };
+const mobileNav: NavItem[] = [publicNav[0], publicNav[1], publicNav[2], { href: "/me", label: "我的" }];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { theme, toggleTheme, toast, clearToast } = useDemoStore();
   const { data: session } = authClient.useSession();
   const user = session?.user;
-  const approvedCreator = user?.role === "creator" && user.creatorStatus === "approved" && user.status === "active";
-  const dashboard = pathname.startsWith("/dashboard");
-  const mobileNav = approvedCreator ? [...nav.slice(0, 3), nav[6], { href: "/dashboard", label: "工作台", icon: UserRound }] : [nav[0], nav[1], nav[2], nav[6]];
+  const sessionUser = user ? { role: user.role ?? undefined, creatorStatus: user.creatorStatus ?? undefined, status: user.status ?? undefined } : null;
+  const approvedCreator = isApprovedCreator(sessionUser);
 
   useEffect(() => { document.documentElement.classList.toggle("dark", theme === "dark"); }, [theme]);
   useEffect(() => {
@@ -36,13 +54,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <span className="brand-gradient grid h-10 w-10 place-items-center rounded-2xl text-white"><Sparkles size={20} /></span>PureHub
       </Link>
       <nav className="space-y-1">
-        {nav.map(({ href, label, icon: Icon }) => <Link key={href} href={href} className={`flex items-center gap-3 rounded-2xl px-4 py-3 text-sm font-semibold transition ${pathname === href ? "bg-ink text-white dark:bg-white dark:text-ink" : "muted hover:bg-black/5 dark:hover:bg-white/5"}`}><Icon size={19} />{label}</Link>)}
+        <NavigationLinks items={[...publicNav, ...(canApplyAsCreator(sessionUser) ? [becomeCreatorNav] : [])]} pathname={pathname} />
       </nav>
+      {user && <>
+        <div className="my-6 border-t border-[var(--line)]" />
+        <p className="mb-2 px-4 text-[11px] font-bold uppercase tracking-[.18em] muted">账户</p>
+        <nav className="space-y-1"><NavigationLinks items={accountNav} pathname={pathname} /></nav>
+      </>}
       {approvedCreator && <>
         <div className="my-6 border-t border-[var(--line)]" />
         <p className="mb-2 px-4 text-[11px] font-bold uppercase tracking-[.18em] muted">博主空间</p>
-        <Link href="/dashboard" className={`flex items-center gap-3 rounded-2xl px-4 py-3 text-sm font-semibold ${dashboard ? "bg-gradient-to-r from-coral to-violet text-white" : "muted hover:bg-black/5 dark:hover:bg-white/5"}`}><LayoutDashboard size={19} />博主工作台</Link>
-        <Link href="/dashboard/posts/new" className="mt-2 flex items-center gap-3 rounded-2xl px-4 py-3 text-sm font-semibold muted hover:bg-black/5 dark:hover:bg-white/5"><PlusCircle size={19} />发布作品</Link>
+        <nav className="space-y-1"><NavigationLinks items={creatorNav} pathname={pathname} creator /></nav>
       </>}
       <div className="mt-auto space-y-3">
         <button onClick={toggleTheme} className="glass flex w-full items-center justify-between rounded-2xl px-4 py-3 text-sm font-semibold"><span className="flex items-center gap-3">{theme === "light" ? <Moon size={18} /> : <Sun size={18} />}外观模式</span><span className="muted">{theme === "light" ? "浅色" : "深色"}</span></button>
@@ -59,10 +81,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     </header>
     <main className="pb-24 lg:ml-64 lg:pb-0">{children}</main>
     <nav className="fixed bottom-0 left-0 right-0 z-30 flex items-center justify-around border-t border-[var(--line)] bg-[var(--bg)]/92 px-2 py-2 backdrop-blur-xl lg:hidden">
-      {mobileNav.map(({ href, label, icon: Icon }) => <Link key={href} href={href} className={`flex min-w-0 flex-1 flex-col items-center gap-1 rounded-xl py-2 text-[10px] font-semibold ${pathname === href ? "text-violet" : "muted"}`}><Icon size={20} /><span className="max-w-full truncate">{label}</span></Link>)}
+      {mobileNav.map((item) => {
+        const Icon = navigationIcons[item.href];
+        return <Link key={item.href} href={item.href} className={`flex min-w-0 flex-1 flex-col items-center gap-1 rounded-xl py-2 text-[10px] font-semibold ${pathname === item.href ? "text-violet" : "muted"}`}><Icon size={20} /><span className="max-w-full truncate">{item.label}</span></Link>;
+      })}
     </nav>
     {toast && <div role="status" className="fixed bottom-24 left-1/2 z-50 -translate-x-1/2 rounded-2xl bg-ink px-5 py-3 text-sm font-semibold text-white shadow-2xl dark:bg-white dark:text-ink">{toast}</div>}
   </div>;
+}
+
+function NavigationLinks({ items, pathname, creator = false }: { items: NavItem[]; pathname: string; creator?: boolean }) {
+  return items.map((item) => {
+    const Icon = navigationIcons[item.href];
+    const active = item.href === "/dashboard" ? pathname.startsWith("/dashboard") : pathname === item.href;
+    return <Link key={item.href} href={item.href} className={`flex items-center gap-3 rounded-2xl px-4 py-3 text-sm font-semibold transition ${active ? (creator ? "bg-gradient-to-r from-coral to-violet text-white" : "bg-ink text-white dark:bg-white dark:text-ink") : "muted hover:bg-black/5 dark:hover:bg-white/5"}`}><Icon size={19} />{item.label}</Link>;
+  });
 }
 
 export function Avatar({ text, small = false }: { text: string; small?: boolean }) {
