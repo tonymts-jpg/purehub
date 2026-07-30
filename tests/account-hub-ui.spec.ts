@@ -5,7 +5,7 @@ async function signInCreatorPage(page: Page) {
   await signInCreator(page.request);
 }
 
-async function usePendingCreatorSession(page: Page) {
+async function useCreatorApplicantSession(page: Page, creatorStatus: "pending" | "rejected") {
   const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3001";
   await page.context().addCookies([{
     name: "purehub.session_token",
@@ -16,13 +16,39 @@ async function usePendingCreatorSession(page: Page) {
     status: 200,
     contentType: "application/json",
     body: JSON.stringify({
-      session: { id: "pending-creator-session", userId: "pending-creator", expiresAt: "2027-07-30T00:00:00.000Z" },
+      session: { id: `${creatorStatus}-creator-session`, userId: `${creatorStatus}-creator`, expiresAt: "2027-07-30T00:00:00.000Z" },
       user: {
-        id: "pending-creator",
-        name: "Pending Creator",
-        email: "pending-creator@purehub.local",
+        id: `${creatorStatus}-creator`,
+        name: `${creatorStatus} Creator`,
+        email: `${creatorStatus}-creator@purehub.local`,
         role: "creator",
-        creatorStatus: "pending",
+        creatorStatus,
+        status: "active"
+      }
+    })
+  }));
+}
+
+const usePendingCreatorSession = (page: Page) => useCreatorApplicantSession(page, "pending");
+
+async function useApprovedCreatorSession(page: Page) {
+  const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3001";
+  await page.context().addCookies([{
+    name: "purehub.session_token",
+    value: "account-hub-approved-creator",
+    url: baseURL
+  }]);
+  await page.route("**/api/auth/get-session", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      session: { id: "approved-creator-session", userId: "approved-creator", expiresAt: "2027-07-30T00:00:00.000Z" },
+      user: {
+        id: "approved-creator",
+        name: "Approved Creator",
+        email: "approved-creator@purehub.local",
+        role: "creator",
+        creatorStatus: "approved",
         status: "active"
       }
     })
@@ -80,6 +106,38 @@ test("navigation: pending creator keeps the application link and receives accoun
   await expect(page.getByRole("link", { name: "收藏", exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "成为博主" })).toBeVisible();
   await expect(page.getByText("博主空间", { exact: true })).toHaveCount(0);
+});
+
+test("navigation: rejected creator keeps account links and the application entry", async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name === "mobile", "Desktop navigation groups are hidden on mobile.");
+  await useCreatorApplicantSession(page, "rejected");
+  await page.goto("/");
+
+  await expect(page.getByRole("navigation", { name: "账户" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "收藏", exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "成为博主" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "博主空间" })).toHaveCount(0);
+});
+
+test("navigation: desktop groups have distinct accessible names", async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name === "mobile", "Desktop navigation groups are hidden on mobile.");
+  await useApprovedCreatorSession(page);
+  await page.goto("/");
+
+  await expect(page.getByRole("navigation", { name: "公共导航" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "账户" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "博主空间" })).toBeVisible();
+});
+
+test("navigation: only the current creator item is active", async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name === "mobile", "Desktop navigation groups are hidden on mobile.");
+  await useApprovedCreatorSession(page);
+  await page.goto("/dashboard/posts");
+
+  const creatorNavigation = page.getByRole("navigation", { name: "博主空间" });
+  await expect(creatorNavigation.locator("a[class*='bg-gradient-to-r']")).toHaveCount(1);
+  await expect(creatorNavigation.getByRole("link", { name: "作品管理" })).toHaveClass(/bg-gradient-to-r/);
+  await expect(creatorNavigation.getByRole("link", { name: "博主工作台" })).not.toHaveClass(/bg-gradient-to-r/);
 });
 
 test("navigation: mobile My opens the complete account menu", async ({ page }, testInfo: TestInfo) => {

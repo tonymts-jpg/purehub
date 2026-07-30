@@ -53,18 +53,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <Link href="/" className="mb-9 flex items-center gap-3 text-xl font-black tracking-tight">
         <span className="brand-gradient grid h-10 w-10 place-items-center rounded-2xl text-white"><Sparkles size={20} /></span>PureHub
       </Link>
-      <nav className="space-y-1">
+      <nav aria-label="公共导航" className="space-y-1">
         <NavigationLinks items={[...publicNav, ...(canApplyAsCreator(sessionUser) ? [becomeCreatorNav] : [])]} pathname={pathname} />
       </nav>
       {user && <>
         <div className="my-6 border-t border-[var(--line)]" />
-        <p className="mb-2 px-4 text-[11px] font-bold uppercase tracking-[.18em] muted">账户</p>
-        <nav className="space-y-1"><NavigationLinks items={accountNav} pathname={pathname} /></nav>
+        <p id="account-navigation-heading" className="mb-2 px-4 text-[11px] font-bold uppercase tracking-[.18em] muted">账户</p>
+        <nav aria-labelledby="account-navigation-heading" className="space-y-1"><NavigationLinks items={accountNav} pathname={pathname} /></nav>
       </>}
       {approvedCreator && <>
         <div className="my-6 border-t border-[var(--line)]" />
-        <p className="mb-2 px-4 text-[11px] font-bold uppercase tracking-[.18em] muted">博主空间</p>
-        <nav className="space-y-1"><NavigationLinks items={creatorNav} pathname={pathname} creator /></nav>
+        <p id="creator-navigation-heading" className="mb-2 px-4 text-[11px] font-bold uppercase tracking-[.18em] muted">博主空间</p>
+        <nav aria-labelledby="creator-navigation-heading" className="space-y-1"><NavigationLinks items={creatorNav} pathname={pathname} creator /></nav>
       </>}
       <div className="mt-auto space-y-3">
         <button onClick={toggleTheme} className="glass flex w-full items-center justify-between rounded-2xl px-4 py-3 text-sm font-semibold"><span className="flex items-center gap-3">{theme === "light" ? <Moon size={18} /> : <Sun size={18} />}外观模式</span><span className="muted">{theme === "light" ? "浅色" : "深色"}</span></button>
@@ -93,7 +93,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 function NavigationLinks({ items, pathname, creator = false }: { items: NavItem[]; pathname: string; creator?: boolean }) {
   return items.map((item) => {
     const Icon = navigationIcons[item.href];
-    const active = item.href === "/dashboard" ? pathname.startsWith("/dashboard") : pathname === item.href;
+    const active = pathname === item.href;
     return <Link key={item.href} href={item.href} className={`flex items-center gap-3 rounded-2xl px-4 py-3 text-sm font-semibold transition ${active ? (creator ? "bg-gradient-to-r from-coral to-violet text-white" : "bg-ink text-white dark:bg-white dark:text-ink") : "muted hover:bg-black/5 dark:hover:bg-white/5"}`}><Icon size={19} />{item.label}</Link>;
   });
 }
