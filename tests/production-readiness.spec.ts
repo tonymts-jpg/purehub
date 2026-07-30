@@ -210,14 +210,15 @@ test("phase 7 public smoke surfaces and identity boundary are ready", async ({ r
 });
 
 test("deployment defaults and both smoke runners enforce the phase 7 contract", async () => {
-  const [environment, compose, deploy, health, nodeSmoke, shellSmoke, worker] = await Promise.all([
+  const [environment, compose, deploy, health, nodeSmoke, shellSmoke, worker, acceptance] = await Promise.all([
     readFile(".env.example", "utf8"),
     readFile("docker-compose.yml", "utf8"),
     readFile("scripts/deploy.sh", "utf8"),
     readFile("app/api/health/route.ts", "utf8"),
     readFile("scripts/smoke-test.mjs", "utf8"),
     readFile("scripts/smoke-test.sh", "utf8"),
-    readFile("scripts/worker.mjs", "utf8")
+    readFile("scripts/worker.mjs", "utf8"),
+    readFile("docs/server-acceptance.md", "utf8")
   ]);
 
   expect(environment).toMatch(/^PUREHUB_PHASE=phase-7$/m);
@@ -240,6 +241,8 @@ test("deployment defaults and both smoke runners enforce the phase 7 contract", 
 
   expect(worker).toContain('"channelMaterialization"');
   expect(worker).toContain('"searchIndexing"');
+  expect(acceptance).toContain("printenv NEXT_PUBLIC_APP_URL");
+  expect(acceptance).not.toContain("export PLAYWRIGHT_BASE_URL=http://127.0.0.1");
 });
 
 test("phase 7 smoke validators require the known seeded channel, creator, and runtime commit", () => {

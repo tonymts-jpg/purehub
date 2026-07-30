@@ -177,7 +177,8 @@ directly on the deployed staging site:
 npm ci --registry=https://registry.npmmirror.com/
 npm run db:generate
 npx playwright install --with-deps chromium
-export PLAYWRIGHT_BASE_URL=http://127.0.0.1
+export PLAYWRIGHT_BASE_URL="$(docker compose --env-file .env.staging exec -T web printenv NEXT_PUBLIC_APP_URL)"
+test -n "${PLAYWRIGHT_BASE_URL}"
 export ADMIN_ACCESS_TOKEN="$(grep '^ADMIN_ACCESS_TOKEN=' .env.staging | tail -1 | cut -d= -f2-)"
 export DEMO_ACCOUNT_PASSWORD="$(grep '^DEMO_ACCOUNT_PASSWORD=' .env.staging | tail -1 | cut -d= -f2-)"
 export WORKER_ACCESS_TOKEN="$(grep '^WORKER_ACCESS_TOKEN=' .env.staging | tail -1 | cut -d= -f2-)"
@@ -202,7 +203,11 @@ unset OBJECT_STORAGE_ENDPOINT OBJECT_STORAGE_ACCESS_KEY OBJECT_STORAGE_SECRET_KE
 unset OBJECT_STORAGE_BUCKET OBJECT_STORAGE_REGION OBJECT_STORAGE_FORCE_PATH_STYLE runtime_object_storage_endpoint
 ```
 
-`PLAYWRIGHT_BASE_URL` tells Playwright to use the already deployed Docker service instead of starting a local Next.js dev server.
+`PLAYWRIGHT_BASE_URL` tells Playwright to use the already deployed public
+origin instead of starting a local Next.js dev server. Reading the configured
+public URL from the running web container keeps state-changing requests on the
+same trusted origin while the host-side database and object-storage connections
+continue to use their private Docker bridge addresses.
 The host-side `DATABASE_URL` uses PostgreSQL's private Docker bridge address so
 database-gated tests can run without publishing the database port.
 The object-storage variables use MinIO's private Docker bridge address so the
