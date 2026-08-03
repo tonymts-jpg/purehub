@@ -892,7 +892,7 @@ test("admin audit request isolation forwards only the opaque cursor and exposes 
 });
 
 test("admin audit cursor is opaque, strict, and round-trips its stable marker", async () => {
-  const { encodeAuditCursor, parseAuditCursor } = await import("../app/api/admin/audit-logs/route");
+  const { encodeAuditCursor, parseAuditCursor } = await import("../lib/admin-audit-cursor");
   const marker = { createdAt: "2026-07-30T12:00:00.000Z", id: "audit-20" };
   const cursor = encodeAuditCursor(marker);
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { PageHeader } from "@/components/app-shell";
 import { AccountListState } from "@/components/account/account-list-state";
@@ -17,7 +17,7 @@ function isFavoriteType(value: string | null): value is FavoriteType {
   return value === "channels" || value === "posts";
 }
 
-export default function FavoritesPage() {
+function FavoritesContent() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -128,5 +128,13 @@ export default function FavoritesPage() {
         <div className="mt-8 text-center"><button type="button" onClick={() => void loadMore()} disabled={loadingMore} className="rounded-lg border border-[var(--line)] px-5 py-3 text-sm font-black disabled:cursor-wait disabled:opacity-70">{loadingMore ? "正在加载…" : "加载更多"}</button></div>
       )}
     </div>
+  );
+}
+
+export default function FavoritesPage() {
+  return (
+    <Suspense>
+      <FavoritesContent />
+    </Suspense>
   );
 }

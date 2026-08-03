@@ -98,7 +98,7 @@ test("navigation: pending creator keeps the application link and receives accoun
     await expect(page.getByRole("link", { name: "我的" })).toHaveAttribute("href", "/me");
     await page.goto("/me");
     await expect(page.getByRole("link", { name: "收藏", exact: true })).toBeVisible();
-    await expect(page.getByRole("link", { name: "成为博主" })).toBeVisible();
+    await expect(page.getByRole("main").getByRole("link", { name: "成为博主" })).toBeVisible();
     await expect(page.getByText("博主空间", { exact: true })).toHaveCount(0);
     return;
   }
@@ -156,8 +156,10 @@ test("navigation: mobile bottom stays compact with My", async ({ page }, testInf
   test.skip(testInfo.project.name !== "mobile", "Mobile-only navigation coverage.");
   await page.goto("/");
 
-  await expect(page.getByRole("link", { name: "我的" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "成为博主" })).toHaveCount(0);
+  const mobileNavigation = page.getByRole("navigation", { name: "移动导航" });
+  await expect(mobileNavigation.getByRole("link", { name: "我的" })).toBeVisible();
+  await expect(mobileNavigation.getByRole("link", { name: "成为博主" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "成为博主" })).toBeVisible();
 });
 
 test("legacy library redirects to favorites", async ({ page }) => {

@@ -74,13 +74,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     <header className="sticky top-0 z-20 flex h-16 items-center justify-between border-b border-[var(--line)] bg-[var(--bg)]/85 px-4 backdrop-blur-xl lg:hidden">
       <Link href="/" className="flex items-center gap-2 font-black"><span className="brand-gradient grid h-8 w-8 place-items-center rounded-xl text-white"><Sparkles size={16} /></span>PureHub</Link>
       <div className="flex items-center gap-2">
+        {canApplyAsCreator(sessionUser) && <Link href="/become-creator" aria-label="成为博主" title="成为博主" className="glass rounded-xl p-2"><UserPlus size={18} /></Link>}
         <Link href="/search" aria-label="搜索" title="搜索" className="glass rounded-xl p-2"><Search size={18} /></Link>
         <button onClick={toggleTheme} aria-label="切换主题" className="glass rounded-xl p-2">{theme === "light" ? <Moon size={18} /> : <Sun size={18} />}</button>
         {user ? <button title="登出" aria-label="登出" onClick={() => authClient.signOut().then(() => window.location.assign("/"))} className="glass rounded-xl p-2"><LogOut size={18} /></button> : <Link href="/sign-in" aria-label="登入" className="brand-gradient rounded-xl p-2 text-white"><LogIn size={18} /></Link>}
       </div>
     </header>
     <main className="pb-24 lg:ml-64 lg:pb-0">{children}</main>
-    <nav className="fixed bottom-0 left-0 right-0 z-30 flex items-center justify-around border-t border-[var(--line)] bg-[var(--bg)]/92 px-2 py-2 backdrop-blur-xl lg:hidden">
+    <nav aria-label="移动导航" className="fixed bottom-0 left-0 right-0 z-30 flex items-center justify-around border-t border-[var(--line)] bg-[var(--bg)]/92 px-2 py-2 backdrop-blur-xl lg:hidden">
       {mobileNav.map((item) => {
         const Icon = navigationIcons[item.href];
         return <Link key={item.href} href={item.href} className={`flex min-w-0 flex-1 flex-col items-center gap-1 rounded-xl py-2 text-[10px] font-semibold ${pathname === item.href ? "text-violet" : "muted"}`}><Icon size={20} /><span className="max-w-full truncate">{item.label}</span></Link>;

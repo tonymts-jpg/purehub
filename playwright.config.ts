@@ -6,13 +6,14 @@ const baseURL = deployedBaseURL ?? "http://localhost:3001";
 export default defineConfig({
   testDir:"./tests",
   timeout: deployedBaseURL ? 120_000 : 30_000,
-  workers: deployedBaseURL ? 1 : 2,
+  expect:{timeout:15_000},
+  workers:1,
   use:{baseURL,trace:"on-first-retry"},
   webServer:deployedBaseURL ? undefined : {
     command:"npm run dev -- -p 3001",
     url:baseURL,
     reuseExistingServer:true,
-    env:{NEXT_PUBLIC_DEMO_MODE:"true",BETTER_AUTH_SECRET:"purehub-local-playwright-secret-at-least-32-characters"}
+    env:{NEXT_PUBLIC_DEMO_MODE:"true",BETTER_AUTH_SECRET:"purehub-local-playwright-secret-at-least-32-characters",PUREHUB_PHASE:"phase-7"}
   },
   projects:[
     {name:"desktop",use:{...devices["Desktop Chrome"]}},
