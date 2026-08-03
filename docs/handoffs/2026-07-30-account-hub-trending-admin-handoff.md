@@ -10,10 +10,9 @@ Updated: 2026-08-03
 - Initial handoff commit: `e8f953c20a1ab29a158cf34dd08a586a40a312ef`
 - Corrected handoff commit: the commit containing this revision, with message
   `docs: correct account hub staging runbook`
-- Final broad-review hardening commit: the commit containing the final-fix report
-  and this revision.
-- Channel visibility hardening commit: the commit containing the Round 2 channel
-  evidence and this revision, with message `fix: hide moderated posts from channels`.
+- Final broad-review hardening commit: `b641d7e49df4f2ef9a7f04d9b3463873e786ee57`.
+- Channel visibility hardening commit: `ad196ea9672141e988977821c3e338498dd2a4d3`.
+- Final locally verified feature HEAD: `ad196ea9672141e988977821c3e338498dd2a4d3`.
 - Migration: `prisma/migrations/20260730000000_account_hub`
 - Scope completed here: Task 12 steps 1-6 only. No push, merge, SSH, deployment,
   staging data reset, or deployed acceptance was performed.
@@ -27,12 +26,12 @@ All commands ran in the linked worktree on the branch above.
   `npx playwright test tests/account-hub-data.spec.ts tests/account-hub-api.spec.ts tests/account-hub-ui.spec.ts tests/admin-information-architecture.spec.ts --project=desktop --workers=1`:
   `60 passed`, `31 skipped`, `0 failed` (3.4 minutes; 207.4 seconds wall time).
 - Canonical complete suite, `npm run test:e2e`, with `workers: 1`:
-  `264 passed`, `190 skipped`, `0 failed` (`454` total; 13.5 minutes,
-  810 seconds wall time).
-- Fresh post-suite `npm run lint`: exit `0` (14.0 seconds).
+  `278 passed`, `200 skipped`, `0 failed` (`478` total; 12.2 minutes,
+  738.3 seconds wall time) on the final feature HEAD.
+- Fresh post-suite `npm run lint`: exit `0` (13.6 seconds).
 - Fresh post-suite `npx tsc --noEmit --incremental false`: exit `0`
-  (26.8 seconds).
-- Fresh post-suite `npm run build`: exit `0` (125.1 seconds), including all
+  (24.6 seconds).
+- Fresh post-suite `npm run build`: exit `0` (108.6 seconds), including all
   `36/36` static pages.
 
 The local host intentionally had no `DATABASE_URL`, so the suite emitted Prisma
