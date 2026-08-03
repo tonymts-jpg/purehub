@@ -4504,7 +4504,7 @@ test("phase 7 dashboard channel operations use exact membership, invitation, pos
     body: { membershipId: "pending-row", decision: "approved" }
   });
   await page.getByLabel("变更 active 的角色").selectOption("editor");
-  expect(mutations.at(-1)).toMatchObject({
+  await expect.poll(() => mutations.at(-1)).toMatchObject({
     url: "/api/dashboard/channels/owner-private/members/active-row",
     method: "PATCH",
     body: { role: "editor" }
@@ -4756,7 +4756,7 @@ test("phase 7 admin channel UI exposes operations only to channel admins", async
     await expect(operations.getByLabel("接管新所有者 ID")).toBeVisible();
 
     await signInSupport(page.request);
-    await page.goto("/admin");
+    await page.goto("/admin/channels");
     const readOnlyOperations = page.getByTestId("admin-channel-operations");
     await expect(readOnlyOperations).toBeVisible();
     await expect(readOnlyOperations).toContainText("当前管理员角色无频道变更权限");
