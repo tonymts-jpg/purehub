@@ -1,4 +1,5 @@
 import { Prisma } from "@prisma/client";
+import { publishablePostWhere } from "@/lib/post-visibility";
 import { prisma } from "@/lib/prisma";
 import {
   runSearchReindexBatch,
@@ -190,7 +191,7 @@ export async function materializeChannel(channelId: string): Promise<{
     const ruleWhere = postRuleWhere(channel.rules);
     const matchedPosts = channel.status === "active" && ruleWhere.length
       ? await tx.post.findMany({
-          where: { OR: ruleWhere },
+          where: { ...publishablePostWhere, OR: ruleWhere },
           select: { id: true }
         })
       : [];

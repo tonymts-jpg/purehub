@@ -12,6 +12,8 @@ Updated: 2026-08-03
   `docs: correct account hub staging runbook`
 - Final broad-review hardening commit: the commit containing the final-fix report
   and this revision.
+- Channel visibility hardening commit: the commit containing the Round 2 channel
+  evidence and this revision, with message `fix: hide moderated posts from channels`.
 - Migration: `prisma/migrations/20260730000000_account_hub`
 - Scope completed here: Task 12 steps 1-6 only. No push, merge, SSH, deployment,
   staging data reset, or deployed acceptance was performed.
@@ -67,6 +69,32 @@ Final local evidence after these changes:
 The new moderated-content and audit rollback cases are PostgreSQL-gated and were
 included in the 34 expected local skips. They must execute with zero unexpected
 skips on seeded staging. Detailed evidence is in
+`.superpowers/sdd/2026-07-30-account-hub-trending-admin/final-fix-1-report.md`.
+
+## Round 2 channel visibility hardening (2026-08-03)
+
+- Public and authorized private channel feeds now filter the underlying post to
+  canonical publishable visibility inside the database query before stable
+  ordering, cursor predicates, and `take` are applied.
+- Manual curation returns the same `404` for a missing post and for hidden,
+  unpublished, pending, or removed posts. Rule materialization uses the same
+  predicate and removes non-publishable rule rows.
+- Moderating a retained active manual curation hides it immediately. Republishing
+  the post exposes the same row again with its curation identity/order/pin intact.
+  Rule rows remain removed until the next materialization after republish, which
+  reactivates the same row.
+- The authorized dashboard curation inventory remains available for management;
+  it does not serialize hidden post content or media. Existing private membership
+  and entitlement boundaries were not weakened.
+
+Local evidence: the Round 2 focused file collected four tests with `1 passed`
+and `3 expected PostgreSQL skips`; the targeted Phase 7 channel/search ACL run
+completed with `10 passed` and `3 expected PostgreSQL skips`, both on one desktop
+worker. TypeScript, scoped ESLint, and the production build passed; the build
+compiled successfully and generated all `36/36` static pages. The skipped DB
+cases must execute on seeded PostgreSQL staging before deployment acceptance.
+
+Detailed Round 2 evidence and the exact required staging cases are appended to
 `.superpowers/sdd/2026-07-30-account-hub-trending-admin/final-fix-1-report.md`.
 
 ## Repairs included in `dc81104`

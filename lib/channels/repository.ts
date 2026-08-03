@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { CHANNEL_ADMIN_ROLES, isChannelAdminRole, type AdminContext } from "@/lib/admin-auth";
+import { publishablePostWhere } from "@/lib/post-visibility";
 import { prisma } from "@/lib/prisma";
 import { getChannelAccess, resolveChannelAccess } from "./auth";
 import {
@@ -326,6 +327,24 @@ export function channelFeedAfterPredicate(cursor: ChannelCursor): Prisma.Channel
       { pinnedAt: { lt: pinnedAt } },
       { pinnedAt: null },
       { pinnedAt, AND: [positionTail] }
+    ]
+  };
+}
+
+export function channelPostFeedWhere(
+  channelId: string,
+  excludedPostIds: string[],
+  cursor?: ChannelCursor | null
+): Prisma.ChannelPostWhereInput {
+  return {
+    AND: [
+      {
+        channelId,
+        status: "active",
+        ...(excludedPostIds.length ? { postId: { notIn: excludedPostIds } } : {}),
+        post: { is: publishablePostWhere }
+      },
+      ...(cursor ? [channelFeedAfterPredicate(cursor)] : [])
     ]
   };
 }
@@ -1289,16 +1308,11 @@ export async function getChannelBySlug(
     select: { postId: true }
   });
   const postRows = await prisma.channelPost.findMany({
-    where: {
-      AND: [
-        {
-          channelId: channel.id,
-          status: "active",
-          ...(excluded.length ? { postId: { notIn: excluded.map((item) => item.postId) } } : {})
-        },
-        ...(cursor ? [channelFeedAfterPredicate(cursor)] : [])
-      ]
-    },
+    where: channelPostFeedWhere(
+      channel.id,
+      excluded.map((item) => item.postId),
+      cursor
+    ),
     include: {
       post: {
         select: {
@@ -2350,7 +2364,10 @@ export async function addChannelPost(
       allowMember: true,
       mutation: true
     });
-    const post = await tx.post.findUnique({ where: { id: input.postId }, select: { id: true } });
+    const post = await tx.post.findFirst({
+      where: { id: input.postId, ...publishablePostWhere },
+      select: { id: true }
+    });
     if (!post) throw new ChannelRepositoryError("Published post not found.", 404);
     const existing = await tx.channelPost.findUnique({
       where: { channelId_postId: { channelId, postId: input.postId } },
