@@ -4,6 +4,7 @@ import Link from "next/link";
 import { CreditCard, LockKeyhole, X } from "lucide-react";
 import { useRef } from "react";
 import { OverlayPortal } from "./overlay-portal";
+import { safeCallbackPath } from "@/lib/safe-callback";
 
 type UnlockDialogProps = {
   open: boolean;
@@ -36,7 +37,7 @@ export function UnlockDialog({
 }: UnlockDialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
-  const signInHref = `/sign-in?callbackUrl=${encodeURIComponent(callbackUrl)}`;
+  const signInHref = `/sign-in?callbackUrl=${encodeURIComponent(safeCallbackPath(callbackUrl))}`;
   const isMembership = visibility === "members";
   const trapFocus = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "Tab") return;

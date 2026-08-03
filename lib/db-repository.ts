@@ -6,6 +6,7 @@ import type { ContentCategory } from "./categories";
 import type { Comment, CreatorProfile, MediaAsset, Post, Transaction } from "./types";
 import type { ContentType, SaleMode } from "./platform-config";
 import { isSaleModeAllowed } from "./platform-config";
+import { isPublishablePostVisibility, publishablePostWhere } from "./post-visibility";
 
 const postInclude = { media: { orderBy: { order: "asc" as const } } };
 const creatorInclude = { creatorProfile: { include: { plans: true } } };
@@ -108,9 +109,10 @@ async function withFallback<T>(operation: () => Promise<T>, fallback: () => T): 
 }
 
 export async function addPostViewerState(items: Post[], viewerId?: string): Promise<Post[]> {
-  if (!viewerId || !items.length || !canUseDatabase()) return items;
-  const ids = items.map((post) => post.id);
-  const creatorIds = [...new Set(items.map((post) => post.creatorId))];
+  const publishable = items.filter((post) => isPublishablePostVisibility(post.visibility));
+  if (!viewerId || !publishable.length || !canUseDatabase()) return publishable;
+  const ids = publishable.map((post) => post.id);
+  const creatorIds = [...new Set(publishable.map((post) => post.creatorId))];
   const [likes, bookmarks, entitlements, subscriptions] = await Promise.all([
     prisma.postLike.findMany({ where: { userId: viewerId, postId: { in: ids } }, select: { postId: true } }),
     prisma.bookmark.findMany({ where: { userId: viewerId, postId: { in: ids } }, select: { postId: true } }),
@@ -121,14 +123,17 @@ export async function addPostViewerState(items: Post[], viewerId?: string): Prom
   const bookmarked = new Set(bookmarks.map((item) => item.postId));
   const unlocked = new Set(entitlements.map((item) => item.postId));
   const subscribed = new Set(subscriptions.map((item) => item.creatorId));
-  return items.map((post) => ({ ...post, liked: liked.has(post.id), bookmarked: bookmarked.has(post.id), hasAccess: post.visibility === "free" || unlocked.has(post.id) || subscribed.has(post.creatorId) }));
+  return publishable.map((post) => ({ ...post, liked: liked.has(post.id), bookmarked: bookmarked.has(post.id), hasAccess: post.visibility === "free" || unlocked.has(post.id) || subscribed.has(post.creatorId) }));
 }
 
 export async function getFeed(filters?: { category?: ContentCategory; cursor?: string; take?: number }, viewerId?: string): Promise<Post[]> {
   return withFallback(
     async () => {
       const result = await prisma.post.findMany({
-        where: filters?.category ? { category: filters.category } : undefined,
+        where: {
+          ...publishablePostWhere,
+          ...(filters?.category ? { category: filters.category } : {})
+        },
         include: postInclude,
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         ...(filters?.take ? { take: filters.take + 1 } : {}),
@@ -137,7 +142,8 @@ export async function getFeed(filters?: { category?: ContentCategory; cursor?: s
       return addPostViewerState(result.map(mapDatabasePost), viewerId);
     },
     () => {
-      const filtered = filters?.category ? posts.filter((post) => post.category === filters.category) : posts;
+      const publishable = posts.filter((post) => isPublishablePostVisibility(post.visibility));
+      const filtered = filters?.category ? publishable.filter((post) => post.category === filters.category) : publishable;
       const start = filters?.cursor ? Math.max(0, filtered.findIndex((post) => post.id === filters.cursor) + 1) : 0;
       return filters?.take ? filtered.slice(start, start + filters.take + 1) : filtered.slice(start);
     }
@@ -147,10 +153,10 @@ export async function getFeed(filters?: { category?: ContentCategory; cursor?: s
 export async function getPost(id: string, viewerId?: string): Promise<Post | null> {
   return withFallback(
     async () => {
-      const post = await prisma.post.findUnique({ where: { id }, include: postInclude });
+      const post = await prisma.post.findFirst({ where: { id, ...publishablePostWhere }, include: postInclude });
       return post ? (await addPostViewerState([mapDatabasePost(post)], viewerId))[0] : null;
     },
-    () => posts.find((post) => post.id === id) ?? null
+    () => posts.find((post) => post.id === id && isPublishablePostVisibility(post.visibility)) ?? null
   );
 }
 
@@ -170,7 +176,7 @@ export async function getCreatorPosts(creatorId: string, viewerId?: string, pagi
   return withFallback(
     async () => {
       const result = await prisma.post.findMany({
-        where: { creatorId },
+        where: { creatorId, ...publishablePostWhere },
         include: postInclude,
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         ...(pagination?.take ? { take: pagination.take + 1 } : {}),
@@ -179,7 +185,7 @@ export async function getCreatorPosts(creatorId: string, viewerId?: string, pagi
       return addPostViewerState(result.map(mapDatabasePost), viewerId);
     },
     () => {
-      const filtered = posts.filter((post) => post.creatorId === creatorId);
+      const filtered = posts.filter((post) => post.creatorId === creatorId && isPublishablePostVisibility(post.visibility));
       const start = pagination?.cursor ? Math.max(0, filtered.findIndex((post) => post.id === pagination.cursor) + 1) : 0;
       return pagination?.take ? filtered.slice(start, start + pagination.take + 1) : filtered.slice(start);
     }

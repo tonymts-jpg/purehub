@@ -1,9 +1,90 @@
 import { expect, test } from "@playwright/test";
+import { readdir } from "node:fs/promises";
+import { relative, resolve } from "node:path";
 import { adminNavigationForPermissions } from "../components/admin/admin-nav";
+import { ADMIN_MUTATION_AUDIT_MATRIX, auditAdminMutation } from "../lib/admin-audit-matrix";
 import { canAdminAccess, canAdminManageSettings } from "../lib/admin-auth";
 import { getAdminOverview } from "../lib/admin-repository";
 import { prisma } from "../lib/prisma";
 import { authHeaders, hasDatabase, registerFan, signIn, signInAdmin, signInSupport } from "./auth-helpers";
+
+async function mutationRouteFiles(directory: string): Promise<string[]> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const files = await Promise.all(entries.map(async (entry) => {
+    const path = resolve(directory, entry.name);
+    if (entry.isDirectory()) return mutationRouteFiles(path);
+    if (!entry.isFile() || entry.name !== "route.ts") return [];
+    const source = await import("node:fs/promises").then(({ readFile }) => readFile(path, "utf8"));
+    return /export async function (?:POST|PUT|PATCH|DELETE)/.test(source) ? [path] : [];
+  }));
+  return files.flat();
+}
+
+test("admin audit inventory covers every state-changing route exactly once", async () => {
+  const root = resolve("app/api/admin");
+  const routeFiles = (await mutationRouteFiles(root))
+    .map((path) => relative(root, path).replaceAll("\\", "/"))
+    .sort();
+  const inventoried = ADMIN_MUTATION_AUDIT_MATRIX.map((entry) => entry.route).sort();
+
+  expect(new Set(inventoried).size).toBe(inventoried.length);
+  expect(inventoried).toEqual(routeFiles);
+  for (const entry of ADMIN_MUTATION_AUDIT_MATRIX) {
+    expect(entry.action).toMatch(/^[a-z][a-z0-9_.]+$/);
+    expect(entry.targetType).toMatch(/^[a-z][a-z0-9_]+$/);
+  }
+});
+
+test("admin audit helper writes once on success and none on failure in the mutation transaction", async ({ request }) => {
+  test.skip(!(await hasDatabase(request)), "Admin audit transaction coverage requires PostgreSQL.");
+  const nonce = Date.now().toString(36);
+  const admin = { actorUserId: "admin-demo", role: "super_admin" as const };
+  const successTarget = `audit-helper-success-${nonce}`;
+  const failureTarget = `audit-helper-failure-${nonce}`;
+  const rollback = new Error("rollback audit helper fixture");
+
+  await expect(prisma.$transaction(async (tx) => {
+    const result = await auditAdminMutation(
+      tx,
+      admin,
+      (level) => ({
+        action: "admin.audit_helper.success",
+        targetType: "test_fixture",
+        targetId: level.id,
+        metadata: { result: "updated" }
+      }),
+      () => tx.creatorLevel.create({
+        data: { id: successTarget, name: "Audit helper success", minFollowers: 900_000 }
+      })
+    );
+    expect(result.id).toBe(successTarget);
+    expect(await tx.auditLog.count({ where: { targetId: successTarget } })).toBe(1);
+    throw rollback;
+  })).rejects.toBe(rollback);
+
+  expect(await prisma.creatorLevel.count({ where: { id: successTarget } })).toBe(0);
+  expect(await prisma.auditLog.count({ where: { targetId: successTarget } })).toBe(0);
+
+  await expect(prisma.$transaction((tx) => auditAdminMutation(
+    tx,
+    admin,
+    {
+      action: "admin.audit_helper.failure",
+      targetType: "test_fixture",
+      targetId: failureTarget,
+      metadata: { result: "failed" }
+    },
+    async () => {
+      await tx.creatorLevel.create({
+        data: { id: failureTarget, name: "Audit helper failure", minFollowers: 900_001 }
+      });
+      throw new Error("fixture mutation failed");
+    }
+  ))).rejects.toThrow("fixture mutation failed");
+
+  expect(await prisma.creatorLevel.count({ where: { id: failureTarget } })).toBe(0);
+  expect(await prisma.auditLog.count({ where: { targetId: failureTarget } })).toBe(0);
+});
 
 test("admin authorization distinguishes domain read and write access", () => {
   expect(canAdminAccess("support_admin", "members", "read")).toBe(true);

@@ -5,6 +5,7 @@ import { creators, posts, transactions } from "./data";
 import type { AdminContext } from "./admin-auth";
 import type { ContentType, PaymentProvider, SaleMode } from "./platform-config";
 import { enqueueSearchEntitySync } from "./search/jobs";
+import { auditAdminMutation } from "./admin-audit-matrix";
 
 const json = (value: unknown) => value as Prisma.InputJsonValue;
 const canUseDatabase = () => Boolean(process.env.DATABASE_URL);
@@ -312,16 +313,26 @@ export async function createCreatorLevel(admin: AdminContext, input: { id: strin
     return { ...input, maxFollowers: input.maxFollowers ?? null };
   }
 
-  const level = await prisma.creatorLevel.create({
-    data: {
-      id: input.id,
-      name: input.name,
-      minFollowers: input.minFollowers,
-      maxFollowers: input.maxFollowers ?? null
-    }
+  return prisma.$transaction(async (tx) => {
+    return auditAdminMutation(
+      tx,
+      admin,
+      (level) => ({
+        action: "admin.creator_level.create",
+        targetType: "creator_level",
+        targetId: level.id,
+        metadata: json(input)
+      }),
+      () => tx.creatorLevel.create({
+        data: {
+          id: input.id,
+          name: input.name,
+          minFollowers: input.minFollowers,
+          maxFollowers: input.maxFollowers ?? null
+        }
+      })
+    );
   });
-  await writeAuditLog(admin, "admin.creator_level.create", "creator_level", level.id, input);
-  return level;
 }
 
 export async function updateCreatorLevel(admin: AdminContext, id: string, input: { name?: string; minFollowers?: number; maxFollowers?: number | null }) {
@@ -330,16 +341,26 @@ export async function updateCreatorLevel(admin: AdminContext, id: string, input:
     return { id, ...input };
   }
 
-  const level = await prisma.creatorLevel.update({
-    where: { id },
-    data: {
-      name: input.name,
-      minFollowers: input.minFollowers,
-      maxFollowers: input.maxFollowers
-    }
+  return prisma.$transaction(async (tx) => {
+    return auditAdminMutation(
+      tx,
+      admin,
+      {
+        action: "admin.creator_level.update",
+        targetType: "creator_level",
+        targetId: id,
+        metadata: json(input)
+      },
+      () => tx.creatorLevel.update({
+        where: { id },
+        data: {
+          name: input.name,
+          minFollowers: input.minFollowers,
+          maxFollowers: input.maxFollowers
+        }
+      })
+    );
   });
-  await writeAuditLog(admin, "admin.creator_level.update", "creator_level", id, input);
-  return level;
 }
 
 export async function listPricingVersions() {
@@ -361,36 +382,41 @@ export async function createPricingVersion(
   }
 
   const versionId = `pricing-${Date.now()}`;
-  const sourceTiers = input.copyFromVersionId
-    ? await prisma.priceTier.findMany({ where: { pricingVersionId: input.copyFromVersionId, active: true } })
-    : [];
-  const tiers = input.tiers?.length ? input.tiers : sourceTiers;
-
-  const version = await prisma.pricingVersion.create({
-    data: {
-      id: versionId,
-      name: input.name,
-      status: "draft",
-      tiers: {
-        create: tiers.map((tier, index) => ({
-          id: `${versionId}-${tier.levelId}-${tier.contentType}-${tier.saleMode}-${tier.price}-${index}`,
-          levelId: tier.levelId,
-          contentType: tier.contentType,
-          saleMode: tier.saleMode,
-          price: tier.price,
-          currency: tier.currency ?? "CNY",
-          active: true
-        }))
-      }
-    },
-    include: { tiers: true }
+  return prisma.$transaction(async (tx) => {
+    const sourceTiers = input.copyFromVersionId
+      ? await tx.priceTier.findMany({ where: { pricingVersionId: input.copyFromVersionId, active: true } })
+      : [];
+    const tiers = input.tiers?.length ? input.tiers : sourceTiers;
+    return auditAdminMutation(
+      tx,
+      admin,
+      (version) => ({
+        action: "admin.pricing_version.create",
+        targetType: "pricing_version",
+        targetId: version.id,
+        metadata: json({ copiedFrom: input.copyFromVersionId ?? null, tierCount: version.tiers.length })
+      }),
+      () => tx.pricingVersion.create({
+        data: {
+          id: versionId,
+          name: input.name,
+          status: "draft",
+          tiers: {
+            create: tiers.map((tier, index) => ({
+              id: `${versionId}-${tier.levelId}-${tier.contentType}-${tier.saleMode}-${tier.price}-${index}`,
+              levelId: tier.levelId,
+              contentType: tier.contentType,
+              saleMode: tier.saleMode,
+              price: tier.price,
+              currency: tier.currency ?? "CNY",
+              active: true
+            }))
+          }
+        },
+        include: { tiers: true }
+      })
+    );
   });
-
-  await writeAuditLog(admin, "admin.pricing_version.create", "pricing_version", version.id, {
-    copiedFrom: input.copyFromVersionId ?? null,
-    tierCount: version.tiers.length
-  });
-  return version;
 }
 
 export async function publishPricingVersion(admin: AdminContext, id: string) {
@@ -399,19 +425,29 @@ export async function publishPricingVersion(admin: AdminContext, id: string) {
     return { ...fallbackPricingVersion, id, status: "active" };
   }
 
-  const version = await prisma.$transaction(async (tx) => {
-    await tx.pricingVersion.updateMany({
-      where: { status: "active", id: { not: id } },
-      data: { status: "archived" }
-    });
-    return tx.pricingVersion.update({
-      where: { id },
-      data: { status: "active", publishedAt: new Date() },
-      include: { tiers: true }
-    });
+  return prisma.$transaction(async (tx) => {
+    return auditAdminMutation(
+      tx,
+      admin,
+      (version) => ({
+        action: "admin.pricing_version.publish",
+        targetType: "pricing_version",
+        targetId: id,
+        metadata: json({ tierCount: version.tiers.length })
+      }),
+      async () => {
+        await tx.pricingVersion.updateMany({
+          where: { status: "active", id: { not: id } },
+          data: { status: "archived" }
+        });
+        return tx.pricingVersion.update({
+          where: { id },
+          data: { status: "active", publishedAt: new Date() },
+          include: { tiers: true }
+        });
+      }
+    );
   });
-  await writeAuditLog(admin, "admin.pricing_version.publish", "pricing_version", id, { tierCount: version.tiers.length });
-  return version;
 }
 
 export async function listPaymentChannels() {
@@ -430,20 +466,30 @@ export async function updatePaymentChannel(
     return { ...fallbackPaymentChannels.find((channel) => channel.provider === provider), provider, ...input };
   }
 
-  const channel = await prisma.paymentChannelConfig.update({
-    where: { provider },
-    data: {
-      enabled: input.enabled,
-      mode: input.mode,
-      currencies: input.currencies ? json(input.currencies) : undefined,
-      regions: input.regions ? json(input.regions) : undefined,
-      feeNote: input.feeNote,
-      statusNote: input.statusNote,
-      config: input.config === undefined ? undefined : json(input.config)
-    }
+  return prisma.$transaction(async (tx) => {
+    return auditAdminMutation(
+      tx,
+      admin,
+      {
+        action: "admin.payment_channel.update",
+        targetType: "payment_channel",
+        targetId: provider,
+        metadata: json(input)
+      },
+      () => tx.paymentChannelConfig.update({
+        where: { provider },
+        data: {
+          enabled: input.enabled,
+          mode: input.mode,
+          currencies: input.currencies ? json(input.currencies) : undefined,
+          regions: input.regions ? json(input.regions) : undefined,
+          feeNote: input.feeNote,
+          statusNote: input.statusNote,
+          config: input.config === undefined ? undefined : json(input.config)
+        }
+      })
+    );
   });
-  await writeAuditLog(admin, "admin.payment_channel.update", "payment_channel", provider, input);
-  return channel;
 }
 
 export type AdminAuditCursor = { createdAt: Date; id: string };

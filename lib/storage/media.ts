@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
+import { isPublishablePostVisibility } from "@/lib/post-visibility";
 import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import sharp from "sharp";
@@ -311,9 +312,17 @@ async function authorizeReadyMedia(assetId: string, userId?: string) {
   const asset = await prisma.mediaAsset.findUnique({ where: { id: assetId }, include: { post: true } });
   if (!asset || asset.status !== "ready") throw new Error("Media is not ready.");
 
-  const isPublic = (asset.visibility === "public" || asset.visibility === "free") && asset.post?.visibility === "free";
+  const publishable = !asset.post || isPublishablePostVisibility(asset.post.visibility);
+  const isCreator = Boolean(userId && asset.post && userId === asset.post.creatorId);
+  if (!publishable && !isCreator) throw new Error("Media access is not authorized.");
+
+  const isPublic = publishable
+    && (asset.visibility === "public" || asset.visibility === "free")
+    && asset.post?.visibility === "free";
   let authorized = isPublic;
-  if (!authorized && userId && asset.post) {
+  if (!authorized && isCreator) {
+    authorized = true;
+  } else if (!authorized && publishable && userId && asset.post) {
     const [entitlement, subscription] = await Promise.all([
       prisma.entitlement.findFirst({ where: { userId, postId: asset.post.id } }),
       prisma.subscription.findFirst({ where: { userId, creatorId: asset.post.creatorId, status: "active" } })

@@ -50,7 +50,11 @@ Then rebuild:
 ./scripts/deploy.sh staging
 ```
 
-For Phase 4 staging tests, make sure `.env.staging` includes a real `ADMIN_ACCESS_TOKEN` value. The deploy script passes it to the web container and uses it for the finance smoke check.
+For finance smoke checks, make sure `.env.staging` includes `SMOKE_ADMIN_EMAIL`
+and `SMOKE_ADMIN_PASSWORD` for an active seeded administrator. The deploy script
+uses those host-side credentials only against loopback nginx, retains the
+session in a temporary cookie jar, and never passes the credentials to the web
+container or prints them.
 
 If Docker cannot resolve Docker Hub, for example `failed to resolve reference` or `lookup registry-1.docker.io on 127.0.0.53:53: i/o timeout`, configure Docker daemon DNS on the server:
 
@@ -132,7 +136,8 @@ Rollback recreates services from the last available local image and reruns healt
 - `curl http://127.0.0.1/api/health` returns `status: ok`.
 - `curl http://127.0.0.1/worker-health` returns `status: ok`.
 - `/api/health` reports `objectStorage: ok`, and the one-shot `minio-init` service exits with code 0 after creating the private bucket.
-- Finance smoke checks can read settlement configs and reconciliation runs with the staging admin token.
+- Finance smoke checks sign in through Better Auth and read settlement configs
+  and reconciliation runs with the resulting session cookie.
 - `SMOKE_BASE_URL=http://127.0.0.1 ./scripts/smoke-test.sh` passes.
 - `npm run test:e2e` passes before the build is promoted.
 - Logs for the last 10 minutes contain no startup-level `uncaught`, `unhandled`, `fatal`, or `panic` errors.
@@ -141,9 +146,10 @@ Rollback recreates services from the last available local image and reruns healt
 
 Before deployment, confirm that `.env.staging` contains exactly one
 `PUREHUB_PHASE=phase-7` entry and real server-only values for
-`BETTER_AUTH_SECRET`, `DEMO_ACCOUNT_PASSWORD`, `ADMIN_ACCESS_TOKEN`,
-`WORKER_ACCESS_TOKEN`, `POSTGRES_PASSWORD`, and `MINIO_ROOT_PASSWORD`. Never
-commit or print those values.
+`BETTER_AUTH_SECRET`, `DEMO_ACCOUNT_PASSWORD`, `SMOKE_ADMIN_EMAIL`,
+`SMOKE_ADMIN_PASSWORD`, `WORKER_ACCESS_TOKEN`, `POSTGRES_PASSWORD`, and
+`MINIO_ROOT_PASSWORD`. Never commit or print those values. The smoke account
+must have an active `AdminAccount` row in the seeded staging database.
 
 Deploy from the intended commit, run migrations, and opt in to the repeatable
 staging seed:
@@ -179,7 +185,6 @@ npm run db:generate
 npx playwright install --with-deps chromium
 export PLAYWRIGHT_BASE_URL="$(docker compose --env-file .env.staging exec -T web printenv NEXT_PUBLIC_APP_URL)"
 test -n "${PLAYWRIGHT_BASE_URL}"
-export ADMIN_ACCESS_TOKEN="$(grep '^ADMIN_ACCESS_TOKEN=' .env.staging | tail -1 | cut -d= -f2-)"
 export DEMO_ACCOUNT_PASSWORD="$(grep '^DEMO_ACCOUNT_PASSWORD=' .env.staging | tail -1 | cut -d= -f2-)"
 export WORKER_ACCESS_TOKEN="$(grep '^WORKER_ACCESS_TOKEN=' .env.staging | tail -1 | cut -d= -f2-)"
 runtime_database_url="$(docker compose --env-file .env.staging exec -T web printenv DATABASE_URL)"
@@ -198,7 +203,7 @@ export OBJECT_STORAGE_BUCKET="$(docker compose --env-file .env.staging exec -T w
 export OBJECT_STORAGE_REGION="$(docker compose --env-file .env.staging exec -T web printenv OBJECT_STORAGE_REGION)"
 export OBJECT_STORAGE_FORCE_PATH_STYLE="$(docker compose --env-file .env.staging exec -T web printenv OBJECT_STORAGE_FORCE_PATH_STYLE)"
 npm run test:e2e:deployed
-unset ADMIN_ACCESS_TOKEN DEMO_ACCOUNT_PASSWORD WORKER_ACCESS_TOKEN DATABASE_URL runtime_database_url
+unset DEMO_ACCOUNT_PASSWORD WORKER_ACCESS_TOKEN DATABASE_URL runtime_database_url
 unset OBJECT_STORAGE_ENDPOINT OBJECT_STORAGE_ACCESS_KEY OBJECT_STORAGE_SECRET_KEY
 unset OBJECT_STORAGE_BUCKET OBJECT_STORAGE_REGION OBJECT_STORAGE_FORCE_PATH_STYLE runtime_object_storage_endpoint
 ```

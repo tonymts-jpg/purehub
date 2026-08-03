@@ -58,7 +58,11 @@ bash "${SCRIPT_DIR}/healthcheck.sh" "${ENVIRONMENT}"
 echo "Running smoke tests"
 HTTP_PORT_VALUE="$(grep -E '^HTTP_PORT=' "${ENV_FILE}" | tail -1 | cut -d= -f2- || true)"
 HTTP_PORT_VALUE="${HTTP_PORT_VALUE:-80}"
-ADMIN_ACCESS_TOKEN_VALUE="$(grep -E '^ADMIN_ACCESS_TOKEN=' "${ENV_FILE}" | tail -1 | cut -d= -f2-)"
-SMOKE_ADMIN_TOKEN="${SMOKE_ADMIN_TOKEN:-${ADMIN_ACCESS_TOKEN_VALUE}}" SMOKE_BASE_URL="${SMOKE_BASE_URL:-http://127.0.0.1:${HTTP_PORT_VALUE}}" bash "${SCRIPT_DIR}/smoke-test.sh"
+SMOKE_ADMIN_EMAIL_VALUE="$(grep -E '^SMOKE_ADMIN_EMAIL=' "${ENV_FILE}" | tail -1 | cut -d= -f2-)"
+SMOKE_ADMIN_PASSWORD_VALUE="$(grep -E '^SMOKE_ADMIN_PASSWORD=' "${ENV_FILE}" | tail -1 | cut -d= -f2-)"
+SMOKE_ADMIN_EMAIL="${SMOKE_ADMIN_EMAIL:-${SMOKE_ADMIN_EMAIL_VALUE}}" \
+SMOKE_ADMIN_PASSWORD="${SMOKE_ADMIN_PASSWORD:-${SMOKE_ADMIN_PASSWORD_VALUE}}" \
+SMOKE_BASE_URL="${SMOKE_BASE_URL:-http://127.0.0.1:${HTTP_PORT_VALUE}}" \
+bash "${SCRIPT_DIR}/smoke-test.sh"
 
 echo "Deployment complete"

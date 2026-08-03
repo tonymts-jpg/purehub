@@ -3,6 +3,13 @@ set -euo pipefail
 
 BASE_URL="${SMOKE_BASE_URL:-http://127.0.0.1:80}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if ! node "${SCRIPT_DIR}/smoke-test.mjs" validate-base-url "${BASE_URL}"; then
+  echo "SMOKE_BASE_URL must be an HTTP(S) loopback origin" >&2
+  exit 1
+fi
+COOKIE_JAR="$(mktemp)"
+AUTH_BODY="$(mktemp)"
+trap 'rm -f "${COOKIE_JAR}" "${AUTH_BODY}"' EXIT
 
 check_url() {
   local name="$1"
@@ -39,16 +46,33 @@ test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
   --data '{}' \
   "${BASE_URL}/api/dashboard/channels")" = "401"
 
-if [ -n "${SMOKE_ADMIN_TOKEN:-}" ]; then
-  echo "Checking finance fee configs: ${BASE_URL}/api/admin/finance/fee-configs"
-  curl --fail --silent --show-error \
-    -H "x-admin-token: ${SMOKE_ADMIN_TOKEN}" \
-    "${BASE_URL}/api/admin/finance/fee-configs" >/dev/null
-  echo "Checking Phase 5 settlement configs and reconciliation"
-  curl --fail --silent --show-error -H "x-admin-token: ${SMOKE_ADMIN_TOKEN}" "${BASE_URL}/api/admin/finance/settlement-configs" >/dev/null
-  curl --fail --silent --show-error -H "x-admin-token: ${SMOKE_ADMIN_TOKEN}" "${BASE_URL}/api/admin/finance/reconciliation" >/dev/null
-else
-  echo "Skipping finance fee configs smoke check: SMOKE_ADMIN_TOKEN is not configured"
-fi
+: "${SMOKE_ADMIN_EMAIL:?SMOKE_ADMIN_EMAIL is required}"
+: "${SMOKE_ADMIN_PASSWORD:?SMOKE_ADMIN_PASSWORD is required}"
+
+SMOKE_ADMIN_EMAIL="${SMOKE_ADMIN_EMAIL}" SMOKE_ADMIN_PASSWORD="${SMOKE_ADMIN_PASSWORD}" \
+  node -e 'process.stdout.write(JSON.stringify({email:process.env.SMOKE_ADMIN_EMAIL,password:process.env.SMOKE_ADMIN_PASSWORD}))' \
+  >"${AUTH_BODY}"
+
+echo "Signing in the staging smoke administrator"
+AUTH_STATUS="$(curl --silent --show-error \
+  --output /dev/null \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'content-type: application/json' \
+  --header "origin: ${BASE_URL}" \
+  --cookie-jar "${COOKIE_JAR}" \
+  --data-binary "@${AUTH_BODY}" \
+  "${BASE_URL}/api/auth/sign-in/email")"
+test "${AUTH_STATUS}" = "200"
+test -s "${COOKIE_JAR}"
+
+echo "Checking finance fee configs: ${BASE_URL}/api/admin/finance/fee-configs"
+curl --fail --silent --show-error --cookie "${COOKIE_JAR}" \
+  "${BASE_URL}/api/admin/finance/fee-configs" >/dev/null
+echo "Checking Phase 5 settlement configs and reconciliation"
+curl --fail --silent --show-error --cookie "${COOKIE_JAR}" \
+  "${BASE_URL}/api/admin/finance/settlement-configs" >/dev/null
+curl --fail --silent --show-error --cookie "${COOKIE_JAR}" \
+  "${BASE_URL}/api/admin/finance/reconciliation" >/dev/null
 
 echo "Smoke tests passed"

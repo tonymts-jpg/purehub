@@ -90,6 +90,48 @@ async function requireJson(name, path, validate) {
   console.log(`ok ${name} ${url}`);
 }
 
+export function requireLoopbackBaseUrl(value = baseUrl) {
+  const url = new URL(value);
+  const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+  const protocol = url.protocol === "http:" || url.protocol === "https:";
+  const originOnly = !url.username && !url.password && url.pathname === "/" && !url.search && !url.hash;
+  if (!loopback || !protocol || !originOnly) {
+    throw new Error("SMOKE_BASE_URL must be an HTTP(S) loopback origin");
+  }
+  return url;
+}
+
+function sessionCookies(response) {
+  const values = typeof response.headers.getSetCookie === "function"
+    ? response.headers.getSetCookie()
+    : [response.headers.get("set-cookie")].filter(Boolean);
+  return values.map((value) => value.split(";", 1)[0]).join("; ");
+}
+
+async function signInSmokeAdmin() {
+  const email = process.env.SMOKE_ADMIN_EMAIL;
+  const password = process.env.SMOKE_ADMIN_PASSWORD;
+  if (!email || !password) {
+    throw new Error("SMOKE_ADMIN_EMAIL and SMOKE_ADMIN_PASSWORD are required");
+  }
+  const url = new URL("/api/auth/sign-in/email", requireLoopbackBaseUrl());
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      origin: url.origin
+    },
+    body: JSON.stringify({ email, password })
+  });
+  if (!response.ok) {
+    throw new Error(`smoke administrator sign-in failed: ${response.status} ${response.statusText} at ${url}`);
+  }
+  const cookie = sessionCookies(response);
+  if (!cookie) throw new Error("smoke administrator sign-in did not return a session cookie");
+  console.log(`ok smoke-admin-sign-in ${url}`);
+  return cookie;
+}
+
 async function runSmoke() {
   for (const check of [
     { name: "home", path: "/" },
@@ -123,30 +165,22 @@ async function runSmoke() {
   }
   console.log("ok channel-mutation-identity-boundary /api/dashboard/channels");
 
-  const adminToken = process.env.SMOKE_ADMIN_TOKEN || process.env.ADMIN_ACCESS_TOKEN;
-  if (adminToken) {
-    const url = new URL("/api/admin/finance/fee-configs", baseUrl);
-    const response = await fetch(url, {
-      headers: {
-        "x-admin-token": adminToken
-      }
-    });
-    if (!response.ok) {
-      throw new Error(`finance-fee-configs failed: ${response.status} ${response.statusText} at ${url}`);
-    }
-    const body = await response.json();
-    if (!Array.isArray(body.configs)) {
-      throw new Error("finance-fee-configs expected configs array");
-    }
-    console.log(`ok finance-fee-configs ${url}`);
-    for (const path of ["/api/admin/finance/settlement-configs", "/api/admin/finance/reconciliation"]) {
-      const phase5Url = new URL(path, baseUrl);
-      const phase5Response = await fetch(phase5Url, { headers: { "x-admin-token": adminToken } });
-      if (!phase5Response.ok) throw new Error(`phase5 finance check failed: ${phase5Response.status} at ${phase5Url}`);
-      console.log(`ok phase5-finance ${phase5Url}`);
-    }
-  } else {
-    console.log("skip finance-fee-configs: SMOKE_ADMIN_TOKEN or ADMIN_ACCESS_TOKEN not configured");
+  const cookie = await signInSmokeAdmin();
+  const url = new URL("/api/admin/finance/fee-configs", baseUrl);
+  const response = await fetch(url, { headers: { cookie } });
+  if (!response.ok) {
+    throw new Error(`finance-fee-configs failed: ${response.status} ${response.statusText} at ${url}`);
+  }
+  const body = await response.json();
+  if (!Array.isArray(body.configs)) {
+    throw new Error("finance-fee-configs expected configs array");
+  }
+  console.log(`ok finance-fee-configs ${url}`);
+  for (const path of ["/api/admin/finance/settlement-configs", "/api/admin/finance/reconciliation"]) {
+    const phase5Url = new URL(path, baseUrl);
+    const phase5Response = await fetch(phase5Url, { headers: { cookie } });
+    if (!phase5Response.ok) throw new Error(`phase5 finance check failed: ${phase5Response.status} at ${phase5Url}`);
+    console.log(`ok phase5-finance ${phase5Url}`);
   }
 }
 
@@ -154,6 +188,8 @@ const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv
 if (isMain) {
   if (process.argv[2] === "validate-json") {
     await validateStdin(process.argv[3]);
+  } else if (process.argv[2] === "validate-base-url") {
+    requireLoopbackBaseUrl(process.argv[3]);
   } else {
     await runSmoke();
   }

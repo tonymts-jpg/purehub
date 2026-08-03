@@ -18,7 +18,7 @@ export type AccountCursor = {
 
 export type AccountPostListItem = {
   post: Post;
-  creator?: AccountPostCreator;
+  creator: AccountPostCreator;
   occurredAt: string;
 };
 
@@ -54,6 +54,7 @@ export type AccountUnlockedSource = "purchase" | "subscription";
 
 export type AccountUnlockedListItem = {
   post: Post;
+  creator: AccountPostCreator;
   source: AccountUnlockedSource;
   occurredAt: string;
 };

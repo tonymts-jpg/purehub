@@ -10,6 +10,8 @@ Updated: 2026-08-03
 - Initial handoff commit: `e8f953c20a1ab29a158cf34dd08a586a40a312ef`
 - Corrected handoff commit: the commit containing this revision, with message
   `docs: correct account hub staging runbook`
+- Final broad-review hardening commit: the commit containing the final-fix report
+  and this revision.
 - Migration: `prisma/migrations/20260730000000_account_hub`
 - Scope completed here: Task 12 steps 1-6 only. No push, merge, SSH, deployment,
   staging data reset, or deployed acceptance was performed.
@@ -36,6 +38,36 @@ connection diagnostics and exercised the repository's explicit database skip
 gates. The successful exit and the counts above do not replace database-backed
 staging acceptance. The build also warned about Better Auth's default secret;
 staging must supply a real `BETTER_AUTH_SECRET`.
+
+## Final broad-review hardening (2026-08-03)
+
+- Canonical public/account post visibility is now exactly `free`, `members`, and
+  `purchase`; hidden, unpublished, pending, and removed records fail closed in
+  public, creator, direct-detail, media, favorites, likes, history, and unlocked
+  surfaces even when old entitlement rows exist.
+- Favorites and unlocked responses include the database creator plus canonical
+  occurrence timestamps, and their cards render that creator directly.
+- Public and admin sign-in callbacks share a same-origin path sanitizer.
+- Deploy smoke tests authenticate a seeded administrator through Better Auth and
+  a temporary loopback-only cookie jar; the admin token bypass was removed from
+  Compose, environment defaults, scripts, and the current acceptance runbook.
+- Every state-changing admin route is inventoried. All newly covered finance
+  actions and the five previously split admin settings flows now use atomic
+  mutation-plus-audit transactions through the rollback-tested shared helper.
+
+Final local evidence after these changes:
+
+- canonical production-server desktop focus: `73 passed`, `34 expected local
+  database/mobile skips`, `0 failed` (`107` total; 56.8 seconds);
+- `npx tsc --noEmit --incremental false`: exit `0` (27.3 seconds);
+- `npm run lint`: exit `0` (15.2 seconds);
+- `npm run build`: exit `0` (143.1 seconds), including `36/36` static pages;
+- `git diff --check`, deploy/smoke shell syntax, and Node smoke syntax: exit `0`.
+
+The new moderated-content and audit rollback cases are PostgreSQL-gated and were
+included in the 34 expected local skips. They must execute with zero unexpected
+skips on seeded staging. Detailed evidence is in
+`.superpowers/sdd/2026-07-30-account-hub-trending-admin/final-fix-1-report.md`.
 
 ## Repairs included in `dc81104`
 
@@ -86,7 +118,7 @@ Keep `.env.staging` server-side and ensure each key appears once. At minimum:
   `NEXT_PUBLIC_DEMO_MODE=false`, the correct public/auth URLs, and the intended
   `HTTP_PORT`;
 - real non-placeholder `BETTER_AUTH_SECRET` (at least 32 characters),
-  `DEMO_ACCOUNT_PASSWORD`, `ADMIN_ACCESS_TOKEN`, `WORKER_ACCESS_TOKEN`,
+  `DEMO_ACCOUNT_PASSWORD`, `SMOKE_ADMIN_EMAIL`, `SMOKE_ADMIN_PASSWORD`, `WORKER_ACCESS_TOKEN`,
   `POSTGRES_PASSWORD`, and `MINIO_ROOT_PASSWORD`;
 - matching PostgreSQL (`POSTGRES_DB`, `POSTGRES_USER`, `DATABASE_URL`, host and
   port), Redis, MinIO/object-storage bucket and region, image, registry, and any
@@ -121,7 +153,6 @@ If the host lacks acceptance dependencies:
 ```bash
 npm ci --registry=https://registry.npmmirror.com/
 npx playwright install --with-deps chromium
-export ADMIN_ACCESS_TOKEN="$(grep '^ADMIN_ACCESS_TOKEN=' .env.staging | tail -1 | cut -d= -f2-)"
 export DEMO_ACCOUNT_PASSWORD="$(grep '^DEMO_ACCOUNT_PASSWORD=' .env.staging | tail -1 | cut -d= -f2-)"
 ```
 
@@ -191,6 +222,7 @@ docker compose --env-file .env.staging restart nginx
 
 ## Protected files
 
-`README.md`, `start-local-demo.cmd`, all `.env*` files, secrets, and
-`progress.md` were left untouched and were not staged or committed during this
-Task 12 local pass.
+`README.md`, `start-local-demo.cmd`, real `.env.staging`/`.env.production` files,
+secrets, and `progress.md` were left untouched. `.env.example` was intentionally
+updated only to document the credentialed smoke account variables; it contains no
+real credential.

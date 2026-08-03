@@ -7,8 +7,7 @@ import { AccountListState } from "@/components/account/account-list-state";
 import { AccountPostGrid } from "@/components/account/account-post-grid";
 import { ChannelFavoriteCard } from "@/components/account/channel-favorite-card";
 import { redirectToAccountSignIn } from "@/lib/account/client";
-import type { AccountChannelFavoriteListItem } from "@/lib/account/types";
-import type { Post } from "@/lib/types";
+import type { AccountChannelFavoriteListItem, AccountPostListItem } from "@/lib/account/types";
 
 type FavoriteType = "posts" | "channels";
 type FavoriteChannel = AccountChannelFavoriteListItem;
@@ -23,7 +22,7 @@ function FavoritesContent() {
   const searchParams = useSearchParams();
   const requestedType = searchParams.get("type");
   const selectedType: FavoriteType = isFavoriteType(requestedType) ? requestedType : "posts";
-  const [posts, setPosts] = useState<Post[]>([]);
+  const [posts, setPosts] = useState<AccountPostListItem[]>([]);
   const [channels, setChannels] = useState<FavoriteChannel[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -51,7 +50,7 @@ function FavoritesContent() {
         const body = await response.json().catch(() => null) as { items?: unknown[]; nextCursor?: string | null; error?: string } | null;
         if (!response.ok) throw new Error(body?.error || "暂时无法加载收藏。");
         if (!active) return;
-        if (selectedType === "posts") setPosts((body?.items ?? []) as Post[]);
+        if (selectedType === "posts") setPosts((body?.items ?? []) as AccountPostListItem[]);
         else setChannels((body?.items ?? []) as FavoriteChannel[]);
         setNextCursor(body?.nextCursor ?? null);
       } catch (cause) {
@@ -76,7 +75,7 @@ function FavoritesContent() {
       }
       const body = await response.json().catch(() => null) as { items?: unknown[]; nextCursor?: string | null; error?: string } | null;
       if (!response.ok) throw new Error(body?.error || "暂时无法加载更多收藏。");
-      if (selectedType === "posts") setPosts((current) => [...current, ...((body?.items ?? []) as Post[])]);
+      if (selectedType === "posts") setPosts((current) => [...current, ...((body?.items ?? []) as AccountPostListItem[])]);
       else setChannels((current) => [...current, ...((body?.items ?? []) as FavoriteChannel[])]);
       setNextCursor(body?.nextCursor ?? null);
     } catch (cause) {
@@ -118,7 +117,7 @@ function FavoritesContent() {
         <button type="button" role="tab" aria-selected={selectedType === "channels"} onClick={() => selectType("channels")} className={`rounded-md px-4 py-2 text-sm font-bold ${selectedType === "channels" ? "bg-violet text-white" : "muted"}`}>频道</button>
       </div>
       <AccountListState loading={loading} error={error} empty={items.length === 0} onRetry={() => setRefresh((value) => value + 1)} emptyTitle="还没有收藏内容" emptyDescription="去发现喜欢的作品和频道吧。">
-        {selectedType === "posts" ? <AccountPostGrid posts={posts} /> : (
+        {selectedType === "posts" ? <AccountPostGrid items={posts} /> : (
           <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
             {channels.map((item) => <ChannelFavoriteCard key={item.channel.slug} channel={item.channel} occurredAt={item.occurredAt} onRemove={() => void removeChannel(item)} removing={removingSlug === item.channel.slug} />)}
           </div>

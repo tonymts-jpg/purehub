@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import type { AdminContext } from "@/lib/admin-auth";
+import { auditAdminMutation } from "@/lib/admin-audit-matrix";
 import { prisma } from "@/lib/prisma";
 
 const json = (value: unknown) => value as Prisma.InputJsonValue;
@@ -118,40 +119,53 @@ export async function recordPaymentLedger(tx: Tx, order: {
   return { ledger, availableAt };
 }
 
-export async function settleDueRevenue(now = new Date()) {
-  const due = await prisma.paymentTransaction.findMany({
-    where: { status: "succeeded", settledAt: null, availableAt: { lte: now } },
-    orderBy: { availableAt: "asc" },
-    take: 100
+export async function settleDueRevenue(now = new Date(), admin?: AdminContext) {
+  return prisma.$transaction(async (tx) => {
+    const settle = async () => {
+      const due = await tx.paymentTransaction.findMany({
+        where: { status: "succeeded", settledAt: null, availableAt: { lte: now } },
+        orderBy: { availableAt: "asc" },
+        take: 100
+      });
+      let settled = 0;
+      for (const payment of due) {
+        const current = await tx.paymentTransaction.findUnique({ where: { id: payment.id }, include: { order: true } });
+        if (!current || current.settledAt || current.status !== "succeeded") continue;
+        const pending = creatorAccount(current.order.creatorUserId, "pending", current.currency);
+        const available = creatorAccount(current.order.creatorUserId, "available", current.currency);
+        await postLedgerTransaction(tx, {
+          idempotencyKey: `settlement:${current.id}`,
+          type: "creator_settlement",
+          referenceType: "payment_transaction",
+          referenceId: current.id,
+          currency: current.currency,
+          entries: [
+            { ...pending, amount: -current.creatorNetAmount },
+            { ...available, amount: current.creatorNetAmount }
+          ]
+        });
+        await tx.walletBalance.update({
+          where: { userId: current.order.creatorUserId },
+          data: { pending: { decrement: current.creatorNetAmount }, available: { increment: current.creatorNetAmount } }
+        });
+        await tx.paymentTransaction.update({ where: { id: current.id }, data: { settledAt: now } });
+        settled += 1;
+      }
+      return { scanned: due.length, settled };
+    };
+    if (!admin) return settle();
+    return auditAdminMutation(
+      tx,
+      admin,
+      (result) => ({
+        action: "finance.settlements.run",
+        targetType: "settlement_batch",
+        targetId: `settlement-batch:${now.toISOString()}`,
+        metadata: json(result)
+      }),
+      settle
+    );
   });
-  let settled = 0;
-  for (const payment of due) {
-    const didSettle = await prisma.$transaction(async (tx) => {
-      const current = await tx.paymentTransaction.findUnique({ where: { id: payment.id }, include: { order: true } });
-      if (!current || current.settledAt || current.status !== "succeeded") return false;
-      const pending = creatorAccount(current.order.creatorUserId, "pending", current.currency);
-      const available = creatorAccount(current.order.creatorUserId, "available", current.currency);
-      await postLedgerTransaction(tx, {
-        idempotencyKey: `settlement:${current.id}`,
-        type: "creator_settlement",
-        referenceType: "payment_transaction",
-        referenceId: current.id,
-        currency: current.currency,
-        entries: [
-          { ...pending, amount: -current.creatorNetAmount },
-          { ...available, amount: current.creatorNetAmount }
-        ]
-      });
-      await tx.walletBalance.update({
-        where: { userId: current.order.creatorUserId },
-        data: { pending: { decrement: current.creatorNetAmount }, available: { increment: current.creatorNetAmount } }
-      });
-      await tx.paymentTransaction.update({ where: { id: current.id }, data: { settledAt: now } });
-      return true;
-    });
-    if (didSettle) settled += 1;
-  }
-  return { scanned: due.length, settled };
 }
 
 export async function reservePayout(tx: Tx, input: { id: string; userId: string; amount: number; currency: string }) {
@@ -258,7 +272,19 @@ export async function listSettlementConfigs() {
 
 export async function createSettlementConfig(admin: AdminContext, input: { name: string; holdDays: number }) {
   if (!Number.isInteger(input.holdDays) || input.holdDays < 0 || input.holdDays > 90) throw new Error("holdDays must be from 0 to 90.");
-  return prisma.settlementConfig.create({ data: { name: input.name, holdDays: input.holdDays } });
+  return prisma.$transaction(async (tx) => {
+    return auditAdminMutation(
+      tx,
+      admin,
+      (config) => ({
+        action: "finance.settlement_config.create",
+        targetType: "settlement_config",
+        targetId: config.id,
+        metadata: json({ name: config.name, holdDays: config.holdDays })
+      }),
+      () => tx.settlementConfig.create({ data: { name: input.name, holdDays: input.holdDays } })
+    );
+  });
 }
 
 export async function activateSettlementConfig(admin: AdminContext, id: string) {
@@ -305,37 +331,53 @@ export async function reviewKycCase(admin: AdminContext, input: { id: string; st
   });
 }
 
-export async function runReconciliation() {
-  const discrepancies: Array<Record<string, unknown>> = [];
-  const grouped = await prisma.ledgerEntry.groupBy({ by: ["transactionId"], _sum: { amount: true } });
-  for (const group of grouped) {
-    if (group._sum.amount !== 0) discrepancies.push({ type: "unbalanced_ledger", transactionId: group.transactionId, amount: group._sum.amount });
-  }
-  const payments = await prisma.paymentTransaction.findMany({ where: { status: { in: ["succeeded", "refunded", "charged_back"] } }, include: { order: true } });
-  const paymentLedgerKeys = new Set((await prisma.ledgerTransaction.findMany({ where: { type: "payment_capture" }, select: { idempotencyKey: true } })).map((item) => item.idempotencyKey));
-  for (const payment of payments) {
-    const metadata = payment.metadata as { ledgerMigratedAsOpening?: boolean };
-    if (!metadata.ledgerMigratedAsOpening && !paymentLedgerKeys.has(`payment:${payment.orderId}`)) discrepancies.push({ type: "payment_missing_ledger", paymentTransactionId: payment.id, orderId: payment.orderId });
-  }
-  const wallets = await prisma.walletBalance.findMany();
-  const accounts = await prisma.ledgerAccount.findMany({ where: { ownerUserId: { not: null } } });
-  for (const wallet of wallets) {
-    const own = accounts.filter((account) => account.ownerUserId === wallet.userId && account.currency === wallet.currency);
-    const value = (type: string) => own.filter((account) => account.type === type).reduce((sum, account) => sum + account.balance, 0);
-    const actual = { pending: value("creator_pending"), available: value("creator_available"), reserved: value("creator_reserved"), debt: Math.max(0, -value("creator_debt")) };
-    if (wallet.pending !== actual.pending || wallet.available !== actual.available || wallet.reserved !== actual.reserved || wallet.debt !== actual.debt) {
-      discrepancies.push({ type: "wallet_cache_mismatch", userId: wallet.userId, cached: { pending: wallet.pending, available: wallet.available, reserved: wallet.reserved, debt: wallet.debt }, ledger: actual });
-    }
-  }
-  return prisma.reconciliationRun.create({
-    data: {
-      paymentCount: payments.length,
-      ledgerCount: grouped.length,
-      walletCount: wallets.length,
-      discrepancyCount: discrepancies.length,
-      discrepancies: json(discrepancies),
-      completedAt: new Date()
-    }
+export async function runReconciliation(admin?: AdminContext) {
+  return prisma.$transaction(async (tx) => {
+    const reconcile = async () => {
+      const discrepancies: Array<Record<string, unknown>> = [];
+      const grouped = await tx.ledgerEntry.groupBy({ by: ["transactionId"], _sum: { amount: true } });
+      for (const group of grouped) {
+        if (group._sum.amount !== 0) discrepancies.push({ type: "unbalanced_ledger", transactionId: group.transactionId, amount: group._sum.amount });
+      }
+      const payments = await tx.paymentTransaction.findMany({ where: { status: { in: ["succeeded", "refunded", "charged_back"] } }, include: { order: true } });
+      const paymentLedgerKeys = new Set((await tx.ledgerTransaction.findMany({ where: { type: "payment_capture" }, select: { idempotencyKey: true } })).map((item) => item.idempotencyKey));
+      for (const payment of payments) {
+        const metadata = payment.metadata as { ledgerMigratedAsOpening?: boolean };
+        if (!metadata.ledgerMigratedAsOpening && !paymentLedgerKeys.has(`payment:${payment.orderId}`)) discrepancies.push({ type: "payment_missing_ledger", paymentTransactionId: payment.id, orderId: payment.orderId });
+      }
+      const wallets = await tx.walletBalance.findMany();
+      const accounts = await tx.ledgerAccount.findMany({ where: { ownerUserId: { not: null } } });
+      for (const wallet of wallets) {
+        const own = accounts.filter((account) => account.ownerUserId === wallet.userId && account.currency === wallet.currency);
+        const value = (type: string) => own.filter((account) => account.type === type).reduce((sum, account) => sum + account.balance, 0);
+        const actual = { pending: value("creator_pending"), available: value("creator_available"), reserved: value("creator_reserved"), debt: Math.max(0, -value("creator_debt")) };
+        if (wallet.pending !== actual.pending || wallet.available !== actual.available || wallet.reserved !== actual.reserved || wallet.debt !== actual.debt) {
+          discrepancies.push({ type: "wallet_cache_mismatch", userId: wallet.userId, cached: { pending: wallet.pending, available: wallet.available, reserved: wallet.reserved, debt: wallet.debt }, ledger: actual });
+        }
+      }
+      return tx.reconciliationRun.create({
+        data: {
+          paymentCount: payments.length,
+          ledgerCount: grouped.length,
+          walletCount: wallets.length,
+          discrepancyCount: discrepancies.length,
+          discrepancies: json(discrepancies),
+          completedAt: new Date()
+        }
+      });
+    };
+    if (!admin) return reconcile();
+    return auditAdminMutation(
+      tx,
+      admin,
+      (run) => ({
+        action: "finance.reconciliation.run",
+        targetType: "reconciliation_run",
+        targetId: run.id,
+        metadata: json({ discrepancyCount: run.discrepancyCount })
+      }),
+      reconcile
+    );
   });
 }
 

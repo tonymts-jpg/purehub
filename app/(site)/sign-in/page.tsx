@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { FormEvent, Suspense, useState } from "react";
 import { LogIn } from "lucide-react";
 import { authClient } from "@/lib/auth-client";
+import { safeCallbackPath } from "@/lib/safe-callback";
 
 function SignInForm() {
   const router = useRouter();
@@ -21,8 +22,7 @@ function SignInForm() {
     const result = await authClient.signIn.email({ email: email.trim().toLowerCase(), password });
     setLoading(false);
     if (result.error) return setError(result.error.message ?? "登入失敗，請檢查 Email 與密碼。");
-    const callback = searchParams.get("callbackUrl");
-    router.push(callback?.startsWith("/") ? callback : "/");
+    router.push(safeCallbackPath(searchParams.get("callbackUrl")));
     router.refresh();
   }
 

@@ -493,9 +493,13 @@ test("favorites are session-owned and channel bookmarks grant no access", async 
     expect(await postFavorites.json()).toEqual({
       items: [
         expect.objectContaining({
-          id: "post-1",
-          creatorId: "c1",
-          bookmarked: true
+          post: expect.objectContaining({
+            id: "post-1",
+            creatorId: "c1",
+            bookmarked: true
+          }),
+          creator: expect.objectContaining({ id: "c1" }),
+          occurredAt: expect.any(String)
         })
       ],
       nextCursor: null

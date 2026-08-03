@@ -1,12 +1,14 @@
 "use client";
 
-import { FormEvent, useState } from "react";
-import { useRouter } from "next/navigation";
+import { FormEvent, Suspense, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { LogIn, ShieldCheck } from "lucide-react";
 import { authClient } from "@/lib/auth-client";
+import { safeCallbackPath } from "@/lib/safe-callback";
 
-export default function AdminSignInPage() {
+function AdminSignInForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -28,7 +30,7 @@ export default function AdminSignInPage() {
       return;
     }
 
-    router.replace("/admin");
+    router.replace(safeCallbackPath(searchParams.get("callbackUrl"), "/admin"));
     router.refresh();
   }
 
@@ -80,4 +82,8 @@ export default function AdminSignInPage() {
       </form>
     </main>
   );
+}
+
+export default function AdminSignInPage() {
+  return <Suspense><AdminSignInForm /></Suspense>;
 }

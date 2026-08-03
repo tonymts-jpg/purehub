@@ -77,7 +77,7 @@ async function runDeployHarness(environment: string) {
   );
   await writeExecutable(
     join(fakeBin, "curl"),
-    "#!/usr/bin/env bash\nfor arg in \"$@\"; do\n  if [[ \"$arg\" == *'%{http_code}'* ]]; then printf '401'; fi\ndone\nexit 0\n"
+    "#!/usr/bin/env bash\nurl=\"${!#}\"\ncookie_jar=''\nprevious=''\nfor arg in \"$@\"; do\n  if [[ \"$previous\" == '--cookie-jar' ]]; then cookie_jar=\"$arg\"; fi\n  previous=\"$arg\"\ndone\nif [[ \"$url\" == *'/api/auth/sign-in/email' ]]; then\n  if [[ -n \"$cookie_jar\" ]]; then printf '#HttpOnly_127.0.0.1\\tFALSE\\t/\\tFALSE\\t0\\tpurehub.session_token\\ttest-session\\n' > \"$cookie_jar\"; fi\n  printf '200'\n  exit 0\nfi\nfor arg in \"$@\"; do\n  if [[ \"$arg\" == *'%{http_code}'* ]]; then printf '401'; fi\ndone\nexit 0\n"
   );
   await writeExecutable(join(fakeBin, "node"), "#!/usr/bin/env bash\nexit 0\n");
 
@@ -141,7 +141,7 @@ test("healthcheck uses port 80 when HTTP_PORT is absent", async () => {
 
 test("deploy refreshes nginx after recreating upstream services", async () => {
   const result = await runDeployHarness(
-    "HTTP_PORT=80\nADMIN_ACCESS_TOKEN=test-admin-token\n",
+    "HTTP_PORT=80\nSMOKE_ADMIN_EMAIL=smoke-admin@example.test\nSMOKE_ADMIN_PASSWORD=smoke-admin-password\n",
   );
 
   expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
@@ -152,10 +152,37 @@ test("deploy refreshes nginx after recreating upstream services", async () => {
 });
 
 test("deploy uses port 80 when HTTP_PORT is absent", async () => {
-  const result = await runDeployHarness("ADMIN_ACCESS_TOKEN=test-admin-token\n");
+  const result = await runDeployHarness(
+    "SMOKE_ADMIN_EMAIL=smoke-admin@example.test\nSMOKE_ADMIN_PASSWORD=smoke-admin-password\n",
+  );
 
   expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
   expect(result.stdout).toContain("Deployment complete");
+  expect(`${result.stdout}\n${result.stderr}\n${result.commands}`).not.toContain("smoke-admin-password");
+});
+
+test("credentialed smoke auth accepts only bare loopback HTTP origins", () => {
+  for (const origin of ["http://127.0.0.1", "http://127.0.0.1:8080", "https://localhost", "http://[::1]:3000"]) {
+    const result = spawnSync(process.execPath, ["scripts/smoke-test.mjs", "validate-base-url", origin], {
+      cwd: process.cwd(),
+      encoding: "utf8"
+    });
+    expect(result.status, `${origin}\n${result.stdout}\n${result.stderr}`).toBe(0);
+  }
+
+  for (const origin of [
+    "http://localhost:password@evil.example",
+    "https://evil.example",
+    "ftp://localhost",
+    "http://localhost/smoke",
+    "http://localhost?redirect=evil.example"
+  ]) {
+    const result = spawnSync(process.execPath, ["scripts/smoke-test.mjs", "validate-base-url", origin], {
+      cwd: process.cwd(),
+      encoding: "utf8"
+    });
+    expect(result.status, origin).not.toBe(0);
+  }
 });
 
 test("health endpoint exposes server dependency status", async ({ request }) => {
@@ -226,7 +253,17 @@ test("deployment defaults and both smoke runners enforce the phase 7 contract", 
   expect(compose.match(/PUREHUB_COMMIT_SHA: \$\{PUREHUB_COMMIT_SHA:-unknown\}/g)).toHaveLength(2);
   expect(deploy).toContain("git rev-parse HEAD");
   expect(deploy).toContain("export PUREHUB_COMMIT_SHA");
+  expect(deploy).toContain("SMOKE_ADMIN_EMAIL");
+  expect(deploy).toContain("SMOKE_ADMIN_PASSWORD");
+  expect(environment).toContain("SMOKE_ADMIN_EMAIL=");
+  expect(environment).toContain("SMOKE_ADMIN_PASSWORD=");
   expect(health).toContain("PUREHUB_COMMIT_SHA");
+
+  for (const contract of [environment, compose, deploy, nodeSmoke, shellSmoke, acceptance]) {
+    expect(contract).not.toContain("ADMIN_ACCESS_TOKEN");
+    expect(contract).not.toContain("SMOKE_ADMIN_TOKEN");
+    expect(contract).not.toContain("x-admin-token");
+  }
 
   for (const smoke of [nodeSmoke, shellSmoke]) {
     expect(smoke).toContain("/api/channels");
@@ -238,6 +275,9 @@ test("deployment defaults and both smoke runners enforce the phase 7 contract", 
   expect(shellSmoke).toContain("smoke-test.mjs");
   expect(shellSmoke).toContain("validate-json");
   expect(shellSmoke).not.toContain("grep");
+  expect(shellSmoke).toContain("/api/auth/sign-in/email");
+  expect(shellSmoke).toContain("--cookie-jar");
+  expect(shellSmoke).toContain("--cookie");
 
   expect(worker).toContain('"channelMaterialization"');
   expect(worker).toContain('"searchIndexing"');

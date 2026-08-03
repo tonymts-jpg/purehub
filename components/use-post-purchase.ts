@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useDemoStore } from "@/lib/store";
 import type { Post } from "@/lib/types";
+import { safeCallbackPath } from "@/lib/safe-callback";
 
 type UsePostPurchaseInput = {
   postId: string;
@@ -36,7 +37,7 @@ export function usePostPurchase({
   const confirmPurchase = async () => {
     if (processing) return;
     if (!authenticated) {
-      window.location.assign(`/sign-in?callbackUrl=${encodeURIComponent(callbackUrl)}`);
+      window.location.assign(`/sign-in?callbackUrl=${encodeURIComponent(safeCallbackPath(callbackUrl))}`);
       return;
     }
 

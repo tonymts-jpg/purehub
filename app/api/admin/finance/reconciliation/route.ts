@@ -11,5 +11,5 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const auth = await requireAdmin(request, "finance", "write");
   if (!auth.ok) return auth.response;
-  return NextResponse.json({ run: await runReconciliation() }, { status: 201 });
+  return NextResponse.json({ run: await runReconciliation(auth.admin) }, { status: 201 });
 }

@@ -11,6 +11,7 @@ import {
 } from "@/lib/account/repository";
 import { encodeAccountCursor, parseAccountCursor } from "@/lib/account/cursor";
 import type { BuyerOrderListItem } from "@/lib/account/types";
+import { auditAdminMutation } from "@/lib/admin-audit-matrix";
 
 const json = (value: unknown) => value as Prisma.InputJsonValue;
 const canUseDatabase = () => Boolean(process.env.DATABASE_URL);
@@ -170,26 +171,50 @@ export async function createPlatformFeeConfig(admin: AdminContext, input: { name
   if (!canUseDatabase()) {
     return { id: `fee-${Date.now()}`, name: input.name, feeBps: input.feeBps, status: "draft", createdBy: admin.actorUserId };
   }
-  return prisma.platformFeeConfig.create({
-    data: {
-      name: input.name,
-      feeBps: input.feeBps,
-      status: "draft"
-    }
+  return prisma.$transaction(async (tx) => {
+    return auditAdminMutation(
+      tx,
+      admin,
+      (config) => ({
+        action: "finance.fee_config.create",
+        targetType: "platform_fee_config",
+        targetId: config.id,
+        metadata: json({ name: config.name, feeBps: config.feeBps })
+      }),
+      () => tx.platformFeeConfig.create({
+        data: {
+          name: input.name,
+          feeBps: input.feeBps,
+          status: "draft"
+        }
+      })
+    );
   });
 }
 
 export async function activatePlatformFeeConfig(admin: AdminContext, id: string) {
   if (!canUseDatabase()) return { ...PHASE4_FALLBACK_FEE_CONFIG, id, status: "active", activatedBy: admin.actorUserId };
   return prisma.$transaction(async (tx) => {
-    await tx.platformFeeConfig.updateMany({
-      where: { status: "active", id: { not: id } },
-      data: { status: "archived" }
-    });
-    return tx.platformFeeConfig.update({
-      where: { id },
-      data: { status: "active", activatedAt: new Date() }
-    });
+    return auditAdminMutation(
+      tx,
+      admin,
+      (config) => ({
+        action: "finance.fee_config.activate",
+        targetType: "platform_fee_config",
+        targetId: config.id,
+        metadata: json({ feeBps: config.feeBps })
+      }),
+      async () => {
+        await tx.platformFeeConfig.updateMany({
+          where: { status: "active", id: { not: id } },
+          data: { status: "archived" }
+        });
+        return tx.platformFeeConfig.update({
+          where: { id },
+          data: { status: "active", activatedAt: new Date() }
+        });
+      }
+    );
   });
 }
 
@@ -644,14 +669,24 @@ export async function reviewPayoutRequest(admin: AdminContext, input: { id: stri
       });
     }
 
-    return tx.payoutRequest.update({
-      where: { id: request.id },
-      data: {
-        status: input.status,
-        reviewNote: input.reviewNote ?? "",
-        reviewedAt: new Date(),
-        reviewedBy: admin.actorUserId
-      }
-    });
+    return auditAdminMutation(
+      tx,
+      admin,
+      {
+        action: "finance.payout.review",
+        targetType: "payout_request",
+        targetId: request.id,
+        metadata: json({ status: input.status, reviewNote: input.reviewNote ?? "" })
+      },
+      () => tx.payoutRequest.update({
+        where: { id: request.id },
+        data: {
+          status: input.status,
+          reviewNote: input.reviewNote ?? "",
+          reviewedAt: new Date(),
+          reviewedBy: admin.actorUserId
+        }
+      })
+    );
   });
 }

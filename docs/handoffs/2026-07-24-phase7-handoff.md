@@ -192,7 +192,6 @@ SMOKE_BASE_URL=http://127.0.0.1 ./scripts/smoke-test.sh
 npm ci --registry=https://registry.npmmirror.com/
 npx playwright install --with-deps chromium
 export PLAYWRIGHT_BASE_URL=http://127.0.0.1
-export ADMIN_ACCESS_TOKEN="$(grep '^ADMIN_ACCESS_TOKEN=' .env.staging | tail -1 | cut -d= -f2-)"
 export DEMO_ACCOUNT_PASSWORD="$(grep '^DEMO_ACCOUNT_PASSWORD=' .env.staging | tail -1 | cut -d= -f2-)"
 npm run test:e2e:deployed
 ```
@@ -220,7 +219,8 @@ SERVICE_ADMIN_USER_ID=admin-demo
 
 - `BETTER_AUTH_SECRET`
 - `DEMO_ACCOUNT_PASSWORD`
-- `ADMIN_ACCESS_TOKEN`
+- `SMOKE_ADMIN_EMAIL`
+- `SMOKE_ADMIN_PASSWORD`
 - `WORKER_ACCESS_TOKEN`
 - `POSTGRES_PASSWORD`
 - `MINIO_ROOT_PASSWORD`
@@ -310,7 +310,7 @@ Better Auth sign-out 要求 JSON Content-Type。
 - 使用 `tests/auth-helpers.ts`；
 - 需要隔離的測試註冊唯一 fan；
 - seed 後等待服務穩定再跑；
-- 正確 export `DEMO_ACCOUNT_PASSWORD` 與 `ADMIN_ACCESS_TOKEN`。
+- 正確 export `DEMO_ACCOUNT_PASSWORD`。
 
 ### 8. Phase 5 私有媒體測試錯誤得到 200
 

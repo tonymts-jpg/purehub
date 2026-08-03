@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { ChannelRepositoryError, getChannelBySlug } from "@/lib/channels/repository";
 import { addPostViewerState, mapDatabasePost } from "@/lib/db-repository";
 import { prisma } from "@/lib/prisma";
+import { publishablePostWhere } from "@/lib/post-visibility";
 import { encodeAccountCursor, parseAccountCursor } from "./cursor";
 import type {
   AccountChannelFavoriteListItem,
@@ -16,7 +17,8 @@ import type {
 const favoritePostInclude = {
   post: {
     include: {
-      media: { orderBy: { order: "asc" as const } }
+      media: { orderBy: { order: "asc" as const } },
+      creator: { select: { id: true, name: true, handle: true, avatar: true } }
     }
   }
 } satisfies Prisma.BookmarkInclude;
@@ -42,7 +44,8 @@ const likedPostInclude = {
 const unlockedPostInclude = {
   post: {
     include: {
-      media: { orderBy: { order: "asc" as const } }
+      media: { orderBy: { order: "asc" as const } },
+      creator: { select: { id: true, name: true, handle: true, avatar: true } }
     }
   }
 } satisfies Prisma.EntitlementInclude;
@@ -189,6 +192,12 @@ export async function listLikedPosts(
   const rows = await prisma.postLike.findMany({
     where: {
       userId,
+      post: {
+        is: {
+          ...publishablePostWhere,
+          creator: { is: { status: "active" } }
+        }
+      },
       ...(cursor ? { AND: [relationAfterPredicate(cursor)] } : {})
     },
     include: likedPostInclude,
@@ -221,6 +230,9 @@ export async function listFollowingCreators(
   const rows = await prisma.follow.findMany({
     where: {
       userId,
+      creator: {
+        is: { status: "active", role: "creator", creatorStatus: "approved" }
+      },
       ...(cursor ? { AND: [relationAfterPredicate(cursor)] } : {})
     },
     select: {
@@ -269,7 +281,10 @@ type UnlockedCandidate = {
   id: string;
   createdAt: Date;
   source: AccountUnlockedSource;
-  post: Prisma.PostGetPayload<{ include: { media: { orderBy: { order: "asc" } } } }>;
+  post: Prisma.PostGetPayload<{ include: {
+    media: { orderBy: { order: "asc" } };
+    creator: { select: { id: true; name: true; handle: true; avatar: true } };
+  } }>;
 };
 
 type UnlockedCursor = AccountCursor & {
@@ -338,6 +353,12 @@ export async function listUnlockedPosts(
       where: {
         userId,
         source: "purchase",
+        post: {
+          is: {
+            ...publishablePostWhere,
+            creator: { is: { status: "active" } }
+          }
+        },
         ...(cursor ? { AND: [unlockedAfterPredicate(cursor, "purchase")] } : {})
       },
       include: unlockedPostInclude,
@@ -348,11 +369,15 @@ export async function listUnlockedPosts(
       ? prisma.post.findMany({
           where: {
             creatorId: { in: activeCreatorIds },
-            visibility: { not: "free" },
+            visibility: { in: ["members", "purchase"] },
+            creator: { is: { status: "active" } },
             entitlements: { none: { userId, source: "purchase" } },
             ...(cursor ? { AND: [unlockedAfterPredicate(cursor, "subscription")] } : {})
           },
-          include: { media: { orderBy: { order: "asc" } } },
+          include: {
+            media: { orderBy: { order: "asc" } },
+            creator: { select: { id: true, name: true, handle: true, avatar: true } }
+          },
           orderBy: [{ createdAt: "desc" }, { id: "desc" }],
           take: limit + 1
         })
@@ -389,6 +414,7 @@ export async function listUnlockedPosts(
     return post.hasAccess
       ? [{
           post,
+          creator: row.post.creator,
           source: row.source,
           occurredAt: row.createdAt.toISOString()
         }]
@@ -408,13 +434,19 @@ export async function listUnlockedPosts(
 export async function listFavoritePosts(
   userId: string,
   input: AccountListInput = {}
-): Promise<AccountListResponse<Awaited<ReturnType<typeof addPostViewerState>>[number]>> {
+): Promise<AccountListResponse<AccountPostListItem>> {
   const scope = "favorite-posts";
   const limit = normalizeLimit(input.limit);
   const cursor = decodeCursor(input.cursor, scope);
   const rows = await prisma.bookmark.findMany({
     where: {
       userId,
+      post: {
+        is: {
+          ...publishablePostWhere,
+          creator: { is: { status: "active" } }
+        }
+      },
       ...(cursor ? { AND: [relationAfterPredicate(cursor)] } : {})
     },
     include: favoritePostInclude,
@@ -423,12 +455,16 @@ export async function listFavoritePosts(
   });
   const hasMore = rows.length > limit;
   const returned = rows.slice(0, limit);
-  const items = await addPostViewerState(
+  const posts = await addPostViewerState(
     returned.map((row) => mapDatabasePost(row.post)),
     userId
   );
   return {
-    items,
+    items: returned.map((row, index) => ({
+      post: posts[index],
+      creator: row.post.creator,
+      occurredAt: row.createdAt.toISOString()
+    })),
     nextCursor: nextCursor(scope, hasMore, returned.at(-1))
   };
 }
@@ -500,8 +536,8 @@ export async function recordPostView(
   postId: string,
   now = new Date()
 ) {
-  const post = await prisma.post.findUnique({
-    where: { id: postId },
+  const post = await prisma.post.findFirst({
+    where: { id: postId, ...publishablePostWhere },
     select: { id: true }
   });
   if (!post) throw new AccountRepositoryError("Post not found.", 404);
@@ -531,6 +567,12 @@ export async function listPostHistory(
     where: {
       userId,
       lastViewedAt: { gte: cutoff },
+      post: {
+        is: {
+          ...publishablePostWhere,
+          creator: { is: { status: "active" } }
+        }
+      },
       ...(cursor ? { AND: [historyAfterPredicate(cursor)] } : {})
     },
     include: postHistoryInclude,

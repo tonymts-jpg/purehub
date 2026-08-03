@@ -70,7 +70,7 @@ export default function UnlockedPage() {
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-8">
       <PageHeader title="已解锁内容" subtitle="这里仅展示一次购买和当前有效订阅提供访问权限的作品。" />
       <AccountListState loading={loading} error={error} empty={items.length === 0} onRetry={() => setRefresh((value) => value + 1)} emptyTitle="还没有已解锁内容" emptyDescription="一次购买或当前有效订阅的作品会显示在这里。">
-        <AccountPostGrid posts={items.map((item) => item.post)} badge={(_, index) => <span className="rounded-full bg-ink/80 px-3 py-1.5 text-xs font-black text-white backdrop-blur">{items[index].source === "purchase" ? "Single Purchase" : "Active Subscription"}</span>} />
+        <AccountPostGrid items={items} badge={(_, index) => <span className="rounded-full bg-ink/80 px-3 py-1.5 text-xs font-black text-white backdrop-blur">{items[index].source === "purchase" ? "Single Purchase" : "Active Subscription"}</span>} />
       </AccountListState>
       {nextCursor && !loading && <div className="mt-8 text-center"><button type="button" onClick={() => void loadMore()} disabled={loadingMore} className="rounded-lg border border-[var(--line)] px-5 py-3 text-sm font-black disabled:cursor-wait disabled:opacity-70">{loadingMore ? "正在加载…" : "加载更多"}</button></div>}
     </div>

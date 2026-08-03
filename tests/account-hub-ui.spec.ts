@@ -169,6 +169,26 @@ test("legacy library redirects to favorites", async ({ page }) => {
   await expect(page).toHaveURL(/\/favorites$/);
 });
 
+test("sign-in never navigates to an external or backslash callback", async ({ page }) => {
+  await page.route("**/api/auth/sign-in/email", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      token: "safe-callback-test",
+      user: { id: "safe-callback-user", name: "Safe Callback", email: "safe@example.test" }
+    })
+  }));
+
+  for (const callback of ["//evil.example/steal", "/%5cevil.example/steal"]) {
+    await page.goto(`/sign-in?callbackUrl=${encodeURIComponent(callback)}`);
+    await page.locator('input[type="email"]').fill("safe@example.test");
+    await page.locator('input[type="password"]').fill("safe-callback-password");
+    await page.locator("form button").click();
+    await expect(page).toHaveURL(/\/$/);
+    expect(new URL(page.url()).origin).toBe(new URL(process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3001").origin);
+  }
+});
+
 function accountPost(id: string, title: string) {
   return {
     id,
@@ -254,7 +274,10 @@ test("favorites: loading, empty, retryable failure, and load more preserve the a
     if (requestCount === 3) {
       return route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [], nextCursor: "page-2" }) });
     }
-    return route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [accountPost("post-2", "第二页收藏")], nextCursor: null }) });
+    return route.fulfill({ contentType: "application/json", body: JSON.stringify({
+      items: [{ post: accountPost("post-2", "第二页收藏"), creator: accountCreator(), occurredAt: "2026-07-29T00:00:00.000Z" }],
+      nextCursor: null
+    }) });
   });
 
   await page.goto("/favorites");
@@ -276,8 +299,8 @@ test("unlocked: renders the API-authoritative purchase and subscription labels",
     contentType: "application/json",
     body: JSON.stringify({
       items: [
-        { post: accountPost("post-1", "一次购买作品"), source: "purchase", occurredAt: "2026-07-30T00:00:00.000Z" },
-        { post: accountPost("post-2", "订阅作品"), source: "subscription", occurredAt: "2026-07-29T00:00:00.000Z" }
+        { post: accountPost("post-1", "一次购买作品"), creator: accountCreator(), source: "purchase", occurredAt: "2026-07-30T00:00:00.000Z" },
+        { post: accountPost("post-2", "订阅作品"), creator: accountCreator(), source: "subscription", occurredAt: "2026-07-29T00:00:00.000Z" }
       ],
       nextCursor: null
     })
@@ -650,6 +673,34 @@ test("history: renders the canonical API creator instead of the demo catalog", a
 
   await page.goto("/history");
   await expect(page.getByText("数据库创作者", { exact: true })).toBeVisible();
+});
+
+test("favorites and unlocked render the canonical API creator instead of demo identity", async ({ page }) => {
+  await mockAccountSession(page);
+  const creator = accountCreator("database-account-creator");
+  await page.route("**/api/me/favorites**", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({
+      items: [{ post: accountPost("favorite-db-creator", "数据库收藏"), creator, occurredAt: "2026-07-30T04:00:00.000Z" }],
+      nextCursor: null
+    })
+  }));
+  await page.route("**/api/me/unlocked**", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({
+      items: [{ post: accountPost("unlocked-db-creator", "数据库解锁"), creator, source: "purchase", occurredAt: "2026-07-30T03:00:00.000Z" }],
+      nextCursor: null
+    })
+  }));
+
+  await page.goto("/favorites");
+  await expect(page.getByText("数据库创作者", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "数据库创作者" })).toHaveAttribute("href", "/creator/database-creator");
+
+  await page.goto("/unlocked");
+  await expect(page.getByText("数据库创作者", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "数据库创作者" })).toHaveAttribute("href", "/creator/database-creator");
+  await expect(page.getByText("Single Purchase")).toBeVisible();
 });
 
 test("hot posts: home rail renders four canonical posts before creators", async ({ page }, testInfo) => {
