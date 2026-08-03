@@ -4757,11 +4757,8 @@ test("phase 7 admin channel UI exposes operations only to channel admins", async
 
     await signInSupport(page.request);
     await page.goto("/admin/channels");
-    const readOnlyOperations = page.getByTestId("admin-channel-operations");
-    await expect(readOnlyOperations).toBeVisible();
-    await expect(readOnlyOperations).toContainText("当前管理员角色无频道变更权限");
-    await expect(readOnlyOperations.getByRole("button", { name: "审核频道" })).toHaveCount(0);
-    await expect(readOnlyOperations.getByRole("button", { name: "重新索引搜索" })).toHaveCount(0);
+    await expect(page).toHaveURL(/\/admin$/);
+    await expect(page.getByTestId("admin-channel-operations")).toHaveCount(0);
 
     const financeIdentity = await registerFan(page.request, "phase7-finance-admin");
     const financeUser = await prisma.user.findUniqueOrThrow({
@@ -4775,12 +4772,9 @@ test("phase 7 admin channel UI exposes operations only to channel admins", async
         data: { userId: financeUser.id, role: "finance_admin", status: "active" }
       })
     ]);
-    await page.goto("/admin");
-    const financeOperations = page.getByTestId("admin-channel-operations");
-    await expect(financeOperations).toBeVisible();
-    await expect(financeOperations).toContainText("当前管理员角色无频道变更权限");
-    await expect(financeOperations.getByRole("button", { name: "审核频道" })).toHaveCount(0);
-    await expect(financeOperations.getByRole("button", { name: "重新索引搜索" })).toHaveCount(0);
+    await page.goto("/admin/channels");
+    await expect(page).toHaveURL(/\/admin$/);
+    await expect(page.getByTestId("admin-channel-operations")).toHaveCount(0);
 
     expect(canAdminAccess("finance_admin", "channels", "read")).toBe(false);
     expect(canAdminAccess("support_admin", "channels", "read")).toBe(false);
