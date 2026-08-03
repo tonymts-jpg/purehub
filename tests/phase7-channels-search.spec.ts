@@ -3350,6 +3350,7 @@ test("phase 7 uploaded free image and video assets publish into safe search prev
   const query = `phase7uploadpreview${nonce}`;
   const postIds: string[] = [];
   const assetIds: string[] = [];
+  const createdSharedLedgerAccountKeys: string[] = [];
   const cleanupScope = createPhase7MediaLifecycleCleanupScope();
   let databaseReady = false;
   const imageBytes = await sharp({
@@ -3570,6 +3571,20 @@ test("phase 7 uploaded free image and video assets publish into safe search prev
     ) {
       throw new Error("Staging prerequisite failed: seeded card test channel must use the manual_confirm adapter.");
     }
+    const requiredSharedLedgerAccounts = [
+      { key: "provider:card:clearing:CNY", type: "provider_clearing", currency: "CNY" },
+      { key: "platform:revenue:CNY", type: "platform_revenue", currency: "CNY" }
+    ];
+    const existingSharedLedgerKeys = new Set((await prisma.ledgerAccount.findMany({
+      where: { key: { in: requiredSharedLedgerAccounts.map(({ key }) => key) } },
+      select: { key: true }
+    })).map(({ key }) => key));
+    const missingSharedLedgerAccounts = requiredSharedLedgerAccounts.filter(({ key }) => !existingSharedLedgerKeys.has(key));
+    if (missingSharedLedgerAccounts.length) {
+      const created = await prisma.ledgerAccount.createMany({ data: missingSharedLedgerAccounts, skipDuplicates: true });
+      expect(created.count).toBe(missingSharedLedgerAccounts.length);
+      createdSharedLedgerAccountKeys.push(...missingSharedLedgerAccounts.map(({ key }) => key));
+    }
     const ledgerAccountsBefore = await prisma.ledgerAccount.findMany({
       select: { id: true, balance: true, ownerUserId: true }
     });
@@ -3622,6 +3637,18 @@ test("phase 7 uploaded free image and video assets publish into safe search prev
           }
         }
         if (lifecycleCleanupError) throw lifecycleCleanupError;
+        if (createdSharedLedgerAccountKeys.length) {
+          const deleted = await prisma.ledgerAccount.deleteMany({
+            where: {
+              key: { in: createdSharedLedgerAccountKeys },
+              balance: 0,
+              entries: { none: {} }
+            }
+          });
+          if (deleted.count !== createdSharedLedgerAccountKeys.length) {
+            throw new Error("Phase 7 lifecycle cleanup did not remove its temporary shared ledger accounts.");
+          }
+        }
       }
     } catch (error) {
       cleanupError ??= error;
@@ -4658,7 +4685,7 @@ test("phase 7 admin channel UI exposes operations only to channel admins", async
     expect(submitted.ok(), await submitted.text()).toBeTruthy();
 
     await signInAdmin(page.request);
-    await page.goto("/admin");
+    await page.goto("/admin/channels");
     const operations = page.getByTestId("admin-channel-operations");
     await expect(operations).toBeVisible();
     await operations.getByLabel("频道状态筛选").selectOption("pending");

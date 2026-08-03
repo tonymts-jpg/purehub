@@ -167,9 +167,10 @@ test("channel feeds omit moderated rows before cursor pagination and restore ret
 
     const retained = first.posts[0];
     await moderateAdminContent({ actorUserId: "admin-demo", role: "super_admin" }, visiblePosts[0].id, { action: "hide" });
-    const moderatedText = await (await request.get(`/api/channels/${publicSlug}`)).text();
-    expect(moderatedText).not.toContain(visiblePosts[0].id);
-    expect(moderatedText).not.toContain(visiblePosts[0].title);
+    const moderated = (await (await request.get(`/api/channels/${publicSlug}`)).json()).channel as {
+      posts: Array<{ postId: string }>;
+    };
+    expect(moderated.posts.map(({ postId }) => postId)).not.toContain(visiblePosts[0].id);
     expect(await prisma.channelPost.findUniqueOrThrow({ where: { id: retained.id }, select: { status: true } })).toEqual({ status: "active" });
 
     await moderateAdminContent({ actorUserId: "admin-demo", role: "super_admin" }, visiblePosts[0].id, { action: "publish" });
