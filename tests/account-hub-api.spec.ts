@@ -826,7 +826,7 @@ test("view history routes use only the session identity and reject missing posts
 
     const history = await request.get("/api/me/history");
     expect(history.ok(), await history.text()).toBeTruthy();
-    expect((await history.json()).items.map((post: { id: string }) => post.id)).toEqual(["post-1"]);
+    expect((await history.json()).items.map((item: { post: { id: string } }) => item.post.id)).toEqual(["post-1"]);
 
     expect((await request.post(`/api/posts/missing-${Date.now()}/view`)).status()).toBe(404);
   } finally {
@@ -886,42 +886,32 @@ test("view history records one request for one open post detail while the sessio
 
 test("account maintenance accepts only its worker token and deletes expired view history", async ({ request }, testInfo) => {
   await requireAccountDatabase(request, testInfo);
-  const { POST: runAccountMaintenance } = await import(
-    "../app/api/internal/account-maintenance/run/route"
-  );
   const fan = await registerFan(request, "account-view-maintenance");
   await signIn(request, fan.email);
   const fanId = (await (await request.get("/api/me")).json()).user.id as string;
-  const previousToken = process.env.WORKER_ACCESS_TOKEN;
-  process.env.WORKER_ACCESS_TOKEN = "account-maintenance-test-token";
+  const workerToken = process.env.WORKER_ACCESS_TOKEN;
+  expect(workerToken, "WORKER_ACCESS_TOKEN is required for account maintenance acceptance.").toBeTruthy();
 
   try {
     await recordPostView(fanId, "post-1", new Date("2020-01-01T00:00:00.000Z"));
 
-    const rejected = await runAccountMaintenance(new Request(
-      "http://localhost/api/internal/account-maintenance/run",
-      { method: "POST", headers: { "x-worker-token": "wrong-token" } }
-    ));
-    expect(rejected.status).toBe(401);
+    const rejected = await request.post("/api/internal/account-maintenance/run", {
+      headers: { "x-worker-token": "wrong-token" }
+    });
+    expect(rejected.status()).toBe(401);
     expect(await prisma.postViewHistory.findUnique({
       where: { userId_postId: { userId: fanId, postId: "post-1" } }
     })).not.toBeNull();
 
-    const accepted = await runAccountMaintenance(new Request(
-      "http://localhost/api/internal/account-maintenance/run",
-      { method: "POST", headers: { "x-worker-token": "account-maintenance-test-token" } }
-    ));
-    expect(accepted.status).toBe(200);
+    const accepted = await request.post("/api/internal/account-maintenance/run", {
+      headers: { "x-worker-token": workerToken! }
+    });
+    expect(accepted.status(), await accepted.text()).toBe(200);
     expect(await accepted.json()).toEqual({ deleted: expect.any(Number) });
     expect(await prisma.postViewHistory.findUnique({
       where: { userId_postId: { userId: fanId, postId: "post-1" } }
     })).toBeNull();
   } finally {
-    if (previousToken === undefined) {
-      delete process.env.WORKER_ACCESS_TOKEN;
-    } else {
-      process.env.WORKER_ACCESS_TOKEN = previousToken;
-    }
     await prisma.postViewHistory.deleteMany({ where: { userId: fanId } });
   }
 });
