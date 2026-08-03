@@ -1,14 +1,13 @@
 import { NextResponse } from "next/server";
 import { requireAdmin } from "../../../../lib/admin-auth";
-import { listAuditLogs } from "../../../../lib/admin-repository";
+import { listAuditLogs, type AdminAuditCursor } from "../../../../lib/admin-repository";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-const PAGE_SIZE = 20;
-type AuditCursor = { createdAt: string; id: string };
 
-export function encodeAuditCursor(marker: AuditCursor) {
-  return Buffer.from(JSON.stringify({ version: 1, ...marker }), "utf8").toString("base64url");
+export function encodeAuditCursor(marker: AdminAuditCursor | { createdAt: string; id: string }) {
+  const createdAt = marker.createdAt instanceof Date ? marker.createdAt.toISOString() : marker.createdAt;
+  return Buffer.from(JSON.stringify({ version: 1, createdAt, id: marker.id }), "utf8").toString("base64url");
 }
 
 export function parseAuditCursor(value: string | null) {
@@ -19,7 +18,7 @@ export function parseAuditCursor(value: string | null) {
     if (Object.keys(parsed).sort().join(",") !== "createdAt,id,version" || parsed.version !== 1 || typeof parsed.createdAt !== "string" || typeof parsed.id !== "string" || !parsed.id || new Date(parsed.createdAt).toISOString() !== parsed.createdAt) {
       throw new Error("invalid payload");
     }
-    return { createdAt: parsed.createdAt, id: parsed.id };
+    return { createdAt: new Date(parsed.createdAt), id: parsed.id };
   } catch {
     throw new Error("Audit cursor is invalid.");
   }
@@ -33,22 +32,19 @@ export async function GET(request: Request) {
   if ([...params.keys()].some((key) => key !== "cursor") || params.getAll("cursor").length > 1) {
     return NextResponse.json({ error: "Audit query is invalid." }, { status: 400 });
   }
+  let cursor: AdminAuditCursor | null;
   try {
-    const cursor = parseAuditCursor(params.get("cursor"));
-    const allLogs = [...await listAuditLogs()].sort((left, right) => {
-      const timeDifference = new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime();
-      return timeDifference || left.id.localeCompare(right.id);
+    cursor = parseAuditCursor(params.get("cursor"));
+  } catch {
+    return NextResponse.json({ error: "Audit cursor is invalid." }, { status: 400 });
+  }
+  try {
+    const page = await listAuditLogs({ cursor });
+    return NextResponse.json({
+      logs: page.logs,
+      nextCursor: page.nextCursor ? encodeAuditCursor(page.nextCursor) : null
     });
-    const cursorIndex = cursor ? allLogs.findIndex((log) => log.id === cursor.id && new Date(log.createdAt).toISOString() === cursor.createdAt) : -1;
-    if (cursor && cursorIndex < 0) throw new Error("Audit cursor is invalid.");
-    const offset = cursorIndex + 1;
-    const logs = allLogs.slice(offset, offset + PAGE_SIZE);
-    const last = logs.at(-1);
-    const nextCursor = last && allLogs.length > offset + PAGE_SIZE
-      ? encodeAuditCursor({ createdAt: new Date(last.createdAt).toISOString(), id: last.id })
-      : null;
-    return NextResponse.json({ logs, nextCursor });
-  } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Audit cursor is invalid." }, { status: 400 });
+  } catch {
+    return NextResponse.json({ error: "Unable to load audit logs." }, { status: 500 });
   }
 }

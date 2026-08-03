@@ -740,45 +740,97 @@ test("admin finance request isolation preserves URL state and loads only the act
 test("admin finance maps every URL-backed tab to one canonical read endpoint", async () => {
   const { adminFinanceListUrl } = await import("../components/admin/finance-page");
 
-  expect(adminFinanceListUrl("orders", new URLSearchParams())).toBe("/api/admin/finance/transactions");
+  expect(adminFinanceListUrl("orders", new URLSearchParams())).toBe("/api/admin/finance/transactions?view=orders");
   expect(adminFinanceListUrl("payments", new URLSearchParams())).toBe("/api/admin/finance/ledger");
-  expect(adminFinanceListUrl("refunds", new URLSearchParams("status=pending"))).toBe("/api/admin/finance/transactions?status=pending");
+  expect(adminFinanceListUrl("refunds", new URLSearchParams("status=pending"))).toBe("/api/admin/finance/transactions?view=refunds&status=pending");
   expect(adminFinanceListUrl("payouts", new URLSearchParams("status=pending"))).toBe("/api/admin/finance/payout-requests?status=pending");
   expect(adminFinanceListUrl("kyc", new URLSearchParams())).toBe("/api/admin/finance/kyc-cases");
   expect(adminFinanceListUrl("reconciliation", new URLSearchParams("status=exception"))).toBe("/api/admin/finance/reconciliation?status=exception");
 });
 
-test("admin refund and payout mutations retain rows on failure and apply server-confirmed state", async () => {
-  const { updateFinanceRowAfterSuccess } = await import("../components/admin/finance-page");
-  const rows = [{ id: "payout-1", status: "pending", amount: 100 }];
-  const failedFetcher = async () => new Response(JSON.stringify({ error: "请重试提现审核" }), {
-    status: 500,
-    headers: { "content-type": "application/json" }
-  });
-
-  await expect(updateFinanceRowAfterSuccess(
-    rows,
+test("admin refund and payout retries apply patches to the latest two-row state", async () => {
+  const { applyFinanceRowPatch, requestFinanceRowPatch } = await import("../components/admin/finance-page");
+  const original = [
+    { id: "payout-1", status: "pending", amount: 100 },
+    { id: "payout-2", status: "pending", amount: 200 }
+  ];
+  let firstAttempts = 0;
+  const retryFirst = () => requestFinanceRowPatch(
     "payout-1",
     "/api/admin/finance/payout-requests",
     { method: "PATCH", body: JSON.stringify({ id: "payout-1", status: "approved" }) },
-    (body) => (body as { payout: { status: string } }).payout,
-    failedFetcher
-  )).rejects.toThrow("请重试提现审核");
-  expect(rows).toEqual([{ id: "payout-1", status: "pending", amount: 100 }]);
+    (body) => (body as { payout: { id: string; status: string } }).payout,
+    async () => {
+      firstAttempts += 1;
+      return new Response(JSON.stringify(firstAttempts === 1
+        ? { error: "请重试提现审核" }
+        : { payout: { id: "payout-1", status: "approved" } }), {
+        status: firstAttempts === 1 ? 500 : 200,
+        headers: { "content-type": "application/json" }
+      });
+    }
+  );
 
-  const updated = await updateFinanceRowAfterSuccess(
-    rows,
-    "payout-1",
+  await expect(retryFirst()).rejects.toThrow("请重试提现审核");
+  const secondPatch = await requestFinanceRowPatch(
+    "payout-2",
     "/api/admin/finance/payout-requests",
-    { method: "PATCH", body: JSON.stringify({ id: "payout-1", status: "approved" }) },
-    (body) => (body as { payout: { status: string } }).payout,
-    async () => new Response(JSON.stringify({ payout: { id: "payout-1", status: "approved" } }), {
+    { method: "PATCH", body: JSON.stringify({ id: "payout-2", status: "rejected" }) },
+    (body) => (body as { payout: { id: string; status: string } }).payout,
+    async () => new Response(JSON.stringify({ payout: { id: "payout-2", status: "rejected" } }), {
       status: 200,
       headers: { "content-type": "application/json" }
     })
   );
-  expect(updated).toEqual([{ id: "payout-1", status: "approved", amount: 100 }]);
-  expect(rows).toEqual([{ id: "payout-1", status: "pending", amount: 100 }]);
+  let current = applyFinanceRowPatch(original, secondPatch);
+  current = applyFinanceRowPatch(current, await retryFirst());
+
+  expect(current).toEqual([
+    { id: "payout-1", status: "approved", amount: 100 },
+    { id: "payout-2", status: "rejected", amount: 200 }
+  ]);
+  expect(original.every((row) => row.status === "pending")).toBe(true);
+});
+
+test("admin finance separates deduplicated eligible orders from refund rows", async () => {
+  const { canRefundFinanceOrder, financeRowsForTab } = await import("../components/admin/finance-page");
+  const fulfilled = { id: "order-1", status: "fulfilled", amount: 100, currency: "CNY", successfulPayment: true };
+  const body = {
+    orders: [fulfilled, { ...fulfilled }, { id: "order-refunded", status: "refunded", successfulPayment: false }],
+    refunds: [
+      { id: "refund-1", orderId: "order-refunded", status: "succeeded", source: "admin" },
+      { id: "refund-2", orderId: "order-charged", status: "succeeded", source: "chargeback" }
+    ]
+  };
+
+  expect(financeRowsForTab("orders", body).map((row: { id: string }) => row.id)).toEqual(["order-1"]);
+  expect(financeRowsForTab("refunds", body).map((row: { id: string }) => row.id)).toEqual(["refund-1", "refund-2"]);
+  expect(canRefundFinanceOrder(fulfilled)).toBe(true);
+  expect(canRefundFinanceOrder({ ...fulfilled, status: "refunded" })).toBe(false);
+  expect(canRefundFinanceOrder({ ...fulfilled, successfulPayment: false })).toBe(false);
+  expect(canRefundFinanceOrder(body.refunds[0])).toBe(false);
+});
+
+test("admin reconciliation columns align one semantic cell with every header", async () => {
+  const { financeColumnsForTab } = await import("../components/admin/finance-page");
+  const columns = financeColumnsForTab("reconciliation");
+
+  expect(columns.map((column: { key: string }) => column.key)).toEqual([
+    "time",
+    "payments",
+    "ledger",
+    "wallets",
+    "result",
+    "operation"
+  ]);
+  expect(columns.map((column: { header: string }) => column.header)).toEqual([
+    "时间",
+    "支付",
+    "账本",
+    "钱包",
+    "结果",
+    "操作"
+  ]);
 });
 
 test("admin settings request isolation follows exact finance and operational capabilities", async () => {
@@ -845,6 +897,278 @@ test("admin audit cursor is opaque, strict, and round-trips its stable marker", 
   const cursor = encodeAuditCursor(marker);
 
   expect(cursor).not.toContain(marker.id);
-  expect(parseAuditCursor(cursor)).toEqual(marker);
+  expect(parseAuditCursor(cursor)).toEqual({ createdAt: new Date(marker.createdAt), id: marker.id });
   expect(() => parseAuditCursor("not-a-cursor")).toThrow("Audit cursor is invalid.");
 });
+
+test("admin audit repository cursor predicate follows deterministic descending ties", async () => {
+  const { adminAuditCursorWhere } = await import("../lib/admin-repository");
+  const createdAt = new Date("2026-07-30T12:00:00.000Z");
+
+  expect(adminAuditCursorWhere({ createdAt, id: "audit-20" })).toEqual({
+    OR: [
+      { createdAt: { lt: createdAt } },
+      { createdAt, id: { lt: "audit-20" } }
+    ]
+  });
+});
+
+test("admin audit repository paginates beyond 100 rows with ties and ignores newer insertions", async ({ request }) => {
+  test.skip(!(await hasDatabase(request)), "Audit repository pagination requires PostgreSQL.");
+  const { listAuditLogs } = await import("../lib/admin-repository");
+  const nonce = Date.now().toString(36);
+  const targetType = `audit-page-${nonce}`;
+  const tiedAt = new Date("2099-07-30T12:00:00.000Z");
+  const ids = Array.from({ length: 125 }, (_, index) => `audit-${nonce}-${String(index).padStart(3, "0")}`);
+
+  try {
+    await prisma.auditLog.createMany({
+      data: ids.map((id) => ({
+        id,
+        actorRole: "analyst",
+        action: "audit.pagination.test",
+        targetType,
+        targetId: id,
+        metadata: {},
+        createdAt: tiedAt
+      }))
+    });
+
+    const first = await listAuditLogs({ pageSize: 20 });
+    const expected = [...ids].sort((left, right) => right.localeCompare(left));
+    expect(first.logs.map((log) => log.id)).toEqual(expected.slice(0, 20));
+    expect(first.nextCursor).toEqual({ createdAt: tiedAt, id: expected[19] });
+
+    const insertedId = `audit-${nonce}-newer`;
+    await prisma.auditLog.create({
+      data: {
+        id: insertedId,
+        actorRole: "analyst",
+        action: "audit.pagination.inserted",
+        targetType,
+        targetId: insertedId,
+        metadata: {},
+        createdAt: new Date("2100-01-01T00:00:00.000Z")
+      }
+    });
+    const second = await listAuditLogs({ cursor: first.nextCursor, pageSize: 20 });
+
+    expect(second.logs.map((log) => log.id)).toEqual(expected.slice(20, 40));
+    expect(second.logs.some((log) => log.id === insertedId)).toBe(false);
+    expect(new Set([...first.logs, ...second.logs].map((log) => log.id)).size).toBe(40);
+
+    await signInAdmin(request);
+    const routeFirst = await request.get("/api/admin/audit-logs");
+    expect(routeFirst.ok()).toBeTruthy();
+    const routeFirstBody = await routeFirst.json();
+    expect(routeFirstBody.logs).toHaveLength(20);
+    expect(routeFirstBody.nextCursor).toBeTruthy();
+    const routeSecond = await request.get(`/api/admin/audit-logs?cursor=${encodeURIComponent(routeFirstBody.nextCursor)}`);
+    expect(routeSecond.ok()).toBeTruthy();
+    const routeSecondBody = await routeSecond.json();
+    expect(new Set([...routeFirstBody.logs, ...routeSecondBody.logs].map((log: { id: string }) => log.id)).size).toBe(40);
+    expect((await request.get("/api/admin/audit-logs?cursor=bad-cursor")).status()).toBe(400);
+  } finally {
+    await prisma.auditLog.deleteMany({ where: { targetType } });
+  }
+});
+
+test("admin finance repository returns unique eligible orders and only canonical refunds", async ({ request }) => {
+  test.skip(!(await hasDatabase(request)), "Finance repository semantics require PostgreSQL.");
+  const { listFinanceOrders, listFinanceRefunds } = await import("../lib/payments/repository");
+  const nonce = Date.now().toString(36);
+  const eligibleId = `finance-order-eligible-${nonce}`;
+  const refundedId = `finance-order-refunded-${nonce}`;
+  const chargedId = `finance-order-charged-${nonce}`;
+  const orderIds = [eligibleId, refundedId, chargedId];
+
+  try {
+    await prisma.order.createMany({
+      data: [
+        { id: eligibleId, buyerUserId: "fan-demo", creatorUserId: "c1", kind: "post_unlock", itemId: "p1", amount: 100, currency: "CNY", status: "fulfilled", provider: "card", createdAt: new Date("2099-07-30T12:00:03.000Z") },
+        { id: refundedId, buyerUserId: "fan-demo", creatorUserId: "c1", kind: "post_unlock", itemId: "p2", amount: 120, currency: "CNY", status: "refunded", provider: "card", createdAt: new Date("2099-07-30T12:00:02.000Z") },
+        { id: chargedId, buyerUserId: "fan-demo", creatorUserId: "c1", kind: "subscription", itemId: "p12", amount: 140, currency: "CNY", status: "charged_back", provider: "card", createdAt: new Date("2099-07-30T12:00:01.000Z") }
+      ]
+    });
+    await prisma.paymentTransaction.createMany({
+      data: [
+        { id: `finance-payment-a-${nonce}`, orderId: eligibleId, provider: "card", amount: 100, currency: "CNY", status: "succeeded", platformFeeBps: 1000, platformFeeAmount: 10, creatorNetAmount: 90 },
+        { id: `finance-payment-b-${nonce}`, orderId: eligibleId, provider: "card", amount: 100, currency: "CNY", status: "failed", platformFeeBps: 1000, platformFeeAmount: 10, creatorNetAmount: 90 },
+        { id: `finance-payment-refund-${nonce}`, orderId: refundedId, provider: "card", amount: 120, currency: "CNY", status: "refunded", platformFeeBps: 1000, platformFeeAmount: 12, creatorNetAmount: 108 },
+        { id: `finance-payment-charge-${nonce}`, orderId: chargedId, provider: "card", amount: 140, currency: "CNY", status: "charged_back", platformFeeBps: 1000, platformFeeAmount: 14, creatorNetAmount: 126 }
+      ]
+    });
+    await prisma.refund.createMany({
+      data: [
+        { id: `finance-refund-${nonce}`, orderId: refundedId, reason: "review refund", status: "succeeded", source: "admin" },
+        { id: `finance-chargeback-${nonce}`, orderId: chargedId, reason: "review chargeback", status: "succeeded", source: "chargeback" }
+      ]
+    });
+
+    const orders = await listFinanceOrders();
+    const refunds = await listFinanceRefunds();
+    expect(orders.filter((order) => order.id === eligibleId)).toHaveLength(1);
+    expect(orders.some((order) => order.id === refundedId || order.id === chargedId)).toBe(false);
+    expect(orders.find((order) => order.id === eligibleId)?.successfulPayment).toBe(true);
+    expect(refunds.filter((refund) => refund.orderId === refundedId || refund.orderId === chargedId).map((refund) => refund.source).sort()).toEqual(["admin", "chargeback"]);
+
+    await signInAdmin(request);
+    const orderResponse = await request.get("/api/admin/finance/transactions?view=orders");
+    const refundResponse = await request.get("/api/admin/finance/transactions?view=refunds");
+    expect(orderResponse.ok()).toBeTruthy();
+    expect(refundResponse.ok()).toBeTruthy();
+    expect((await orderResponse.json()).orders.filter((order: { id: string }) => order.id === eligibleId)).toHaveLength(1);
+    expect((await refundResponse.json()).refunds.filter((refund: { orderId: string }) => orderIds.includes(refund.orderId))).toHaveLength(2);
+    expect((await request.get("/api/admin/finance/transactions?view=orders&actorUserId=spoofed")).status()).toBe(400);
+  } finally {
+    await prisma.refund.deleteMany({ where: { orderId: { in: orderIds } } });
+    await prisma.paymentTransaction.deleteMany({ where: { orderId: { in: orderIds } } });
+    await prisma.order.deleteMany({ where: { id: { in: orderIds } } });
+  }
+});
+
+test("admin finance settings and audit pages isolate authenticated browser requests and URL tabs", async ({ page }, testInfo) => {
+  test.skip(!(await hasDatabase(page.request)), "Authenticated Task 11 pages require seeded administrator accounts.");
+  await signInAdmin(page.request);
+  const calls: string[] = [];
+  await page.route("**/api/admin/**", async (route) => {
+    const url = new URL(route.request().url());
+    calls.push(`${url.pathname}${url.search}`);
+    const bodies: Record<string, unknown> = {
+      "/api/admin/finance/payout-requests": { payouts: [{ id: "payout-browser", status: "pending", amount: 100, channel: "alipay", user: { name: "浏览器创作者", handle: "browser-creator" } }] },
+      "/api/admin/finance/transactions": { orders: [{ id: "order-browser", status: "fulfilled", amount: 100, currency: "CNY", provider: "card", kind: "post_unlock", successfulPayment: true }] },
+      "/api/admin/pricing/versions": { versions: [] },
+      "/api/admin/finance/fee-configs": { configs: [] },
+      "/api/admin/finance/settlement-configs": { configs: [] },
+      "/api/admin/payment-channels": { channels: [] },
+      "/api/admin/audit-logs": { logs: [{ id: "audit-browser", actorUserId: "admin-demo", actorRole: "super_admin", action: "finance.review", targetType: "order", targetId: "order-browser", metadata: { result: "success" }, createdAt: "2026-07-30T12:00:00.000Z" }], nextCursor: null }
+    };
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(bodies[url.pathname] ?? {}) });
+  });
+
+  await page.goto("/admin/finance?tab=payouts&status=pending");
+  await expect(page.getByRole("heading", { name: "订单与财务" })).toBeVisible();
+  expect([...new Set(calls)]).toEqual(["/api/admin/finance/payout-requests?status=pending"]);
+
+  calls.length = 0;
+  await page.getByRole("link", { name: "订单", exact: true }).click();
+  await expect(page).toHaveURL(/\/admin\/finance\?tab=orders$/);
+  expect([...new Set(calls)]).toEqual(["/api/admin/finance/transactions?view=orders"]);
+  if (testInfo.project.name === "mobile") {
+    await expect(page.getByTestId("finance-mobile-list")).toBeVisible();
+    await expect(page.getByTestId("finance-desktop-table")).toBeHidden();
+    await expect(page.getByTestId("finance-mobile-list").getByText("order-browser", { exact: true })).toBeVisible();
+  } else {
+    await expect(page.getByTestId("finance-desktop-table")).toBeVisible();
+    await expect(page.getByTestId("finance-mobile-list")).toBeHidden();
+    await expect(page.getByTestId("finance-desktop-table").getByText("order-browser", { exact: true })).toBeVisible();
+  }
+
+  calls.length = 0;
+  await page.goto("/admin/settings");
+  await expect(page.getByRole("heading", { name: "平台设置" })).toBeVisible();
+  expect([...new Set(calls)].sort()).toEqual([
+    "/api/admin/finance/fee-configs",
+    "/api/admin/finance/settlement-configs",
+    "/api/admin/payment-channels",
+    "/api/admin/pricing/versions"
+  ]);
+
+  calls.length = 0;
+  await page.goto("/admin/audit");
+  await expect(page.getByRole("heading", { name: "审计日志" })).toBeVisible();
+  expect([...new Set(calls)]).toEqual(["/api/admin/audit-logs"]);
+  if (testInfo.project.name === "mobile") {
+    await expect(page.getByTestId("audit-mobile-list")).toBeVisible();
+  } else {
+    await expect(page.getByTestId("audit-desktop-table")).toBeVisible();
+  }
+});
+
+test("admin finance role cannot unlock operational settings with x-admin-role", async ({ page }) => {
+  test.skip(!(await hasDatabase(page.request)), "Finance role page acceptance requires PostgreSQL.");
+  const identity = await createTemporaryAdmin(page.request, "finance_admin", "task11-finance");
+  try {
+    await page.setExtraHTTPHeaders({ "x-admin-role": "super_admin" });
+    const calls: string[] = [];
+    await page.route("**/api/admin/**", async (route) => {
+      const url = new URL(route.request().url());
+      calls.push(url.pathname);
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ configs: [] }) });
+    });
+    await page.goto("/admin/settings");
+
+    await expect(page.getByTestId("settings-platform-fee")).toBeVisible();
+    await expect(page.getByTestId("settings-settlement-window")).toBeVisible();
+    await expect(page.getByTestId("settings-pricing")).toHaveCount(0);
+    await expect(page.getByTestId("settings-payment-channels")).toHaveCount(0);
+    expect([...new Set(calls)].sort()).toEqual([
+      "/api/admin/finance/fee-configs",
+      "/api/admin/finance/settlement-configs"
+    ]);
+  } finally {
+    await removeTemporaryAdmin(identity.userId);
+  }
+});
+
+test("admin analyst sees read-only audit and x-admin-role cannot unlock finance", async ({ page }) => {
+  test.skip(!(await hasDatabase(page.request)), "Analyst page acceptance requires PostgreSQL.");
+  const identity = await createTemporaryAdmin(page.request, "analyst", "task11-analyst");
+  try {
+    await page.setExtraHTTPHeaders({ "x-admin-role": "super_admin" });
+    await page.route("**/api/admin/audit-logs**", (route) => route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ logs: [{ id: "analyst-audit", actorUserId: null, actorRole: "system", action: "read.only", targetType: "system", targetId: "one", metadata: {}, createdAt: "2026-07-30T12:00:00.000Z" }], nextCursor: null })
+    }));
+    await page.goto("/admin/audit");
+    await expect(page.getByRole("heading", { name: "审计日志" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /退款|审核|对账|结算|发布|启用|停用/ })).toHaveCount(0);
+
+    await page.goto("/admin/finance");
+    await expect(page).toHaveURL(/\/admin$/);
+    await expect(page.getByRole("heading", { name: "订单与财务" })).toHaveCount(0);
+  } finally {
+    await removeTemporaryAdmin(identity.userId);
+  }
+});
+
+test("admin finance page exposes loading forbidden and retry states and handles API 401 safely", async ({ page }) => {
+  test.skip(!(await hasDatabase(page.request)), "Protected finance error-state acceptance requires seeded admin authentication.");
+  await signInAdmin(page.request);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let attempts = 0;
+  await page.route("**/api/admin/finance/payout-requests**", async (route) => {
+    attempts += 1;
+    if (attempts === 1) {
+      await gate;
+      return route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: "forbidden" }) });
+    }
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ payouts: [] }) });
+  });
+  await page.goto("/admin/finance?tab=payouts");
+  await expect(page.getByText("正在加载提现…")).toBeVisible();
+  release();
+  await expect(page.getByText("当前管理员没有访问财务分区的权限。")).toBeVisible();
+  await page.getByRole("button", { name: "重试" }).click();
+  await expect(page.getByText("暂无提现记录")).toBeVisible();
+
+  await page.route("**/api/admin/audit-logs**", (route) => route.fulfill({ status: 401, contentType: "application/json", body: JSON.stringify({ error: "expired" }) }));
+  await page.goto("/admin/audit");
+  await expect(page).toHaveURL("/admin/sign-in");
+});
+
+async function createTemporaryAdmin(request: Parameters<typeof registerFan>[0], role: "finance_admin" | "analyst", label: string) {
+  const identity = await registerFan(request, label);
+  const user = await prisma.user.findUniqueOrThrow({ where: { email: identity.email }, select: { id: true } });
+  await prisma.adminAccount.create({ data: { userId: user.id, role, status: "active" } });
+  return { userId: user.id };
+}
+
+async function removeTemporaryAdmin(userId: string) {
+  await prisma.session.deleteMany({ where: { userId } });
+  await prisma.account.deleteMany({ where: { userId } });
+  await prisma.adminAccount.deleteMany({ where: { userId } });
+  await prisma.user.deleteMany({ where: { id: userId } });
+}

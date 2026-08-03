@@ -8,7 +8,7 @@ import { AdminPageState, AdminStatus, AdminTable } from "./admin-ui";
 type Fetcher = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 export const ADMIN_FINANCE_TABS = ["orders", "payments", "refunds", "payouts", "kyc", "reconciliation"] as const;
 export type AdminFinanceTab = (typeof ADMIN_FINANCE_TABS)[number];
-type FinanceRow = {
+export type FinanceRow = {
   id: string;
   status?: string;
   amount?: number;
@@ -26,9 +26,17 @@ type FinanceRow = {
   referenceType?: string;
   referenceId?: string;
   type?: string;
-  order?: { id: string; kind?: string; status?: string };
+  kind?: string;
+  itemId?: string;
+  orderId?: string;
+  orderStatus?: string;
+  source?: string;
+  reason?: string;
+  successfulPayment?: boolean;
   user?: { handle?: string; name?: string };
 };
+
+export type FinanceRowPatch<T extends { id: string }> = { rowId: string; patch: Partial<T>; remove: boolean };
 
 type RequestError = Error & { status?: number };
 
@@ -62,6 +70,7 @@ async function readJson<T>(response: Response): Promise<T> {
 
 export function adminFinanceListUrl(tab: AdminFinanceTab, params: URLSearchParams) {
   const query = new URLSearchParams();
+  if (tab === "orders" || tab === "refunds") query.set("view", tab);
   const status = params.get("status")?.trim();
   if (status) query.set("status", status);
   const endpoint = TAB_ENDPOINTS[tab];
@@ -72,32 +81,64 @@ export async function loadAdminFinance(tab: AdminFinanceTab, params: URLSearchPa
   return readJson<Record<string, unknown>>(await fetcher(adminFinanceListUrl(tab, params)));
 }
 
-export async function updateFinanceRowAfterSuccess<T extends { id: string }>(
-  rows: readonly T[],
+export async function requestFinanceRowPatch<T extends { id: string }>(
   rowId: string,
   url: string,
   init: RequestInit,
   selectPatch: (body: unknown) => Partial<T>,
-  fetcher: Fetcher = fetch
-) {
+  fetcher: Fetcher = fetch,
+  remove = false
+): Promise<FinanceRowPatch<T>> {
   const body = await readJson<unknown>(await fetcher(url, {
     ...init,
     headers: { "content-type": "application/json", ...(init.headers ?? {}) }
   }));
   const patch = selectPatch(body);
-  return rows.map((row) => row.id === rowId ? { ...row, ...patch } : row);
+  return { rowId, patch, remove };
 }
 
-function rowsForTab(tab: AdminFinanceTab, body: Record<string, unknown>) {
-  const key = tab === "payouts" ? "payouts" : tab === "kyc" ? "cases" : tab === "reconciliation" ? "runs" : "transactions";
-  return Array.isArray(body[key]) ? body[key] as FinanceRow[] : [];
+export function applyFinanceRowPatch<T extends { id: string }>(rows: readonly T[], result: FinanceRowPatch<T>) {
+  if (result.remove) return rows.filter((row) => row.id !== result.rowId);
+  return rows.map((row) => row.id === result.rowId ? { ...row, ...result.patch } : row);
+}
+
+export function financeRowsForTab(tab: AdminFinanceTab, body: Record<string, unknown>) {
+  const key = tab === "orders" ? "orders" : tab === "refunds" ? "refunds" : tab === "payouts" ? "payouts" : tab === "kyc" ? "cases" : tab === "reconciliation" ? "runs" : "transactions";
+  const rows = Array.isArray(body[key]) ? body[key] as FinanceRow[] : [];
+  if (tab !== "orders") return rows;
+  const unique = new Map<string, FinanceRow>();
+  for (const row of rows) {
+    if (!["refunded", "charged_back"].includes(row.status ?? "") && !unique.has(row.id)) unique.set(row.id, row);
+  }
+  return [...unique.values()];
+}
+
+export function canRefundFinanceOrder(row: FinanceRow) {
+  return !row.orderId && ["paid", "fulfilled"].includes(row.status ?? "") && row.successfulPayment === true;
+}
+
+export function financeColumnsForTab(tab: AdminFinanceTab) {
+  if (tab === "reconciliation") return [
+    { key: "time", header: "时间" },
+    { key: "payments", header: "支付" },
+    { key: "ledger", header: "账本" },
+    { key: "wallets", header: "钱包" },
+    { key: "result", header: "结果" },
+    { key: "operation", header: "操作" }
+  ] as const;
+  return [
+    { key: "record", header: "记录" },
+    { key: "amount", header: "金额 / 国家" },
+    { key: "status", header: "状态" },
+    { key: "detail", header: "详情" },
+    { key: "operation", header: "操作" }
+  ] as const;
 }
 
 function rowMatchesStatus(tab: AdminFinanceTab, row: FinanceRow, status: string) {
   if (!status) return true;
   if (tab === "reconciliation" && status === "exception") return (row.discrepancyCount ?? 0) > 0;
-  if (tab === "refunds" && status === "pending") return row.status === "pending" || row.order?.status === "refund_pending";
-  return row.status === status || row.order?.status === status;
+  return row.status === status;
 }
 
 export function FinancePage({
@@ -126,7 +167,7 @@ export function FinancePage({
     setError("");
     try {
       const body = await loadAdminFinance(initialTab, params);
-      setRows(rowsForTab(initialTab, body).filter((row) => rowMatchesStatus(initialTab, row, initialStatus)));
+      setRows(financeRowsForTab(initialTab, body).filter((row) => rowMatchesStatus(initialTab, row, initialStatus)));
     } catch (caught) {
       const requestError = caught as RequestError;
       if (requestError.status === 401) {
@@ -148,14 +189,15 @@ export function FinancePage({
     url: string,
     init: RequestInit,
     selectPatch: (body: unknown) => Partial<FinanceRow>,
-    successMessage: string
+    successMessage: string,
+    remove = false
   ) {
     const attempt = async () => {
       setError("");
       setMessage("");
       try {
-        const next = await updateFinanceRowAfterSuccess(rows, rowId, url, init, selectPatch);
-        setRows(next);
+        const result = await requestFinanceRowPatch(rowId, url, init, selectPatch, fetch, remove);
+        setRows((current) => applyFinanceRowPatch(current, result));
         setMessage(successMessage);
         setRetryMutation(null);
       } catch (caught) {
@@ -226,19 +268,39 @@ export function FinancePage({
     canWrite: boolean;
     mutateRow: typeof mutateRow;
   }) {
-    const headers = tab === "reconciliation" ? ["时间", "支付", "账本", "钱包", "结果", "操作"] : ["记录", "金额 / 国家", "状态", "详情", "操作"];
+    const columns = financeColumnsForTab(tab);
     return (
-      <AdminTable headers={headers}>
-        {tableRows.map((row) => (
-          <tr key={row.id}>
-            <td className="px-4 py-3 font-black">{row.order?.kind ?? row.legalName ?? row.type ?? row.user?.name ?? row.id}<p className="text-xs font-normal muted">{row.order?.id ?? row.user?.handle ?? (row.startedAt || row.createdAt ? formatDate(row.startedAt ?? row.createdAt) : row.id)}</p></td>
-            <td className="px-4 py-3">{tab === "reconciliation" ? row.paymentCount ?? 0 : row.countryCode ?? `${row.currency ?? ""} ${row.amount ?? "—"}`}</td>
-            <td className="px-4 py-3"><AdminStatus tone={statusTone(row.status, row.discrepancyCount)}>{tab === "reconciliation" ? `${row.discrepancyCount ?? 0} 项差异` : row.status ?? row.order?.status ?? "—"}</AdminStatus></td>
-            <td className="px-4 py-3 text-xs muted">{tab === "reconciliation" ? `${row.ledgerCount ?? 0} 笔账本 / ${row.walletCount ?? 0} 个钱包` : row.provider ?? row.channel ?? row.referenceType ?? row.countryCode ?? "—"}</td>
-            <td className="px-4 py-3"><FinanceActions tab={tab} row={row} canWrite={writable} mutate={mutate} /></td>
-          </tr>
-        ))}
-      </AdminTable>
+      <>
+        <div data-testid="finance-desktop-table" className="hidden md:block">
+          <AdminTable headers={columns.map((column) => column.header)}>
+            {tableRows.map((row) => tab === "reconciliation" ? (
+              <tr key={row.id}>
+                <td className="px-4 py-3 text-xs">{formatDate(row.startedAt ?? row.createdAt)}</td>
+                <td className="px-4 py-3">{row.paymentCount ?? 0}</td>
+                <td className="px-4 py-3">{row.ledgerCount ?? 0}</td>
+                <td className="px-4 py-3">{row.walletCount ?? 0}</td>
+                <td className="px-4 py-3"><AdminStatus tone={statusTone(row.status, row.discrepancyCount)}>{row.discrepancyCount ?? 0} 项差异</AdminStatus></td>
+                <td className="px-4 py-3"><span className="text-xs muted">只读记录</span></td>
+              </tr>
+            ) : (
+              <tr key={row.id}>
+                <td className="px-4 py-3 font-black">{row.kind ?? row.legalName ?? row.type ?? row.user?.name ?? row.id}<p className="text-xs font-normal muted">{row.orderId ?? row.user?.handle ?? row.id}</p></td>
+                <td className="px-4 py-3">{row.countryCode ?? `${row.currency ?? ""} ${row.amount ?? "—"}`}</td>
+                <td className="px-4 py-3"><AdminStatus tone={statusTone(row.status, row.discrepancyCount)}>{row.status ?? "—"}</AdminStatus></td>
+                <td className="px-4 py-3 text-xs muted">{row.provider ?? row.channel ?? row.source ?? row.referenceType ?? row.countryCode ?? "—"}</td>
+                <td className="px-4 py-3"><FinanceActions tab={tab} row={row} canWrite={writable} mutate={mutate} /></td>
+              </tr>
+            ))}
+          </AdminTable>
+        </div>
+        <div data-testid="finance-mobile-list" className="space-y-3 md:hidden">
+          {tableRows.map((row) => <article key={row.id} className="rounded-2xl border border-[var(--line)] p-4">
+            <div className="flex items-start justify-between gap-3"><div><h2 className="font-black">{row.kind ?? row.legalName ?? row.type ?? row.user?.name ?? (tab === "reconciliation" ? formatDate(row.startedAt) : row.id)}</h2><p className="text-xs muted">{row.orderId ?? row.id}</p></div><AdminStatus tone={statusTone(row.status, row.discrepancyCount)}>{tab === "reconciliation" ? `${row.discrepancyCount ?? 0} 项差异` : row.status ?? "—"}</AdminStatus></div>
+            <dl className="mt-3 grid grid-cols-2 gap-2 text-sm">{tab === "reconciliation" ? <><div><dt className="muted">支付</dt><dd>{row.paymentCount ?? 0}</dd></div><div><dt className="muted">账本</dt><dd>{row.ledgerCount ?? 0}</dd></div><div><dt className="muted">钱包</dt><dd>{row.walletCount ?? 0}</dd></div></> : <><div><dt className="muted">金额 / 国家</dt><dd>{row.countryCode ?? `${row.currency ?? ""} ${row.amount ?? "—"}`}</dd></div><div><dt className="muted">详情</dt><dd>{row.provider ?? row.channel ?? row.source ?? "—"}</dd></div></>}</dl>
+            <div className="mt-3"><FinanceActions tab={tab} row={row} canWrite={writable} mutate={mutate} /></div>
+          </article>)}
+        </div>
+      </>
     );
   }
 }
@@ -252,12 +314,13 @@ function FinanceActions({ tab, row, canWrite, mutate }: {
     url: string,
     init: RequestInit,
     selectPatch: (body: unknown) => Partial<FinanceRow>,
-    successMessage: string
+    successMessage: string,
+    remove?: boolean
   ) => Promise<void>;
 }) {
   if (!canWrite) return <span className="text-xs muted">只读</span>;
-  if ((tab === "orders" || tab === "refunds") && row.order?.id && row.status === "succeeded") {
-    return <button type="button" onClick={() => void mutate(row.id, `/api/admin/finance/orders/${row.order!.id}/refund`, { method: "POST", body: JSON.stringify({ reason: "财务后台全额退款" }) }, () => ({ status: "refunded", order: { ...row.order!, status: "refunded" } }), "订单已退款，访问权限已撤销。") } className="rounded-lg border border-rose-500 px-2 py-1 text-xs font-bold text-rose-700">全额退款</button>;
+  if (tab === "orders" && canRefundFinanceOrder(row)) {
+    return <button type="button" onClick={() => void mutate(row.id, `/api/admin/finance/orders/${row.id}/refund`, { method: "POST", body: JSON.stringify({ reason: "财务后台全额退款" }) }, () => ({}), "订单已退款，访问权限已撤销。", true) } className="rounded-lg border border-rose-500 px-2 py-1 text-xs font-bold text-rose-700">全额退款</button>;
   }
   if (tab === "payouts") {
     const nextStatuses = row.status === "pending" ? (["approved", "rejected"] as const) : row.status === "approved" ? (["paid"] as const) : [];

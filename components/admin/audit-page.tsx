@@ -79,9 +79,14 @@ export function AuditPage({ initialCursor = "" }: { initialCursor?: string }) {
       {error && logs.length ? <div role="alert" className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-rose-500/10 px-4 py-3 text-sm text-rose-700"><span>{error}</span><button type="button" onClick={() => void load()} className="rounded-lg border border-rose-500 px-3 py-1 font-bold">重试</button></div> : null}
       {logs.length ? (
         <>
-          <AdminTable headers={["参与者", "动作", "时间", "目标", "结果"]}>
-            {logs.map((log) => <tr key={log.id}><td className="px-4 py-3 font-black">{log.actorUserId ?? "系统"}<p className="text-xs font-normal muted">{log.actorRole}</p></td><td className="px-4 py-3">{log.action}</td><td className="px-4 py-3 text-xs">{new Date(log.createdAt).toLocaleString("zh-CN")}</td><td className="px-4 py-3">{log.targetType}<p className="text-xs muted">{log.targetId}</p></td><td className="px-4 py-3"><AdminStatus tone={auditResult(log.metadata) === "失败" ? "danger" : "success"}>{auditResult(log.metadata)}</AdminStatus></td></tr>)}
-          </AdminTable>
+          <div data-testid="audit-desktop-table" className="hidden md:block">
+            <AdminTable headers={["参与者", "动作", "时间", "目标", "结果"]}>
+              {logs.map((log) => <tr key={log.id}><td className="px-4 py-3 font-black">{log.actorUserId ?? "系统"}<p className="text-xs font-normal muted">{log.actorRole}</p></td><td className="px-4 py-3">{log.action}</td><td className="px-4 py-3 text-xs">{new Date(log.createdAt).toLocaleString("zh-CN")}</td><td className="px-4 py-3">{log.targetType}<p className="text-xs muted">{log.targetId}</p></td><td className="px-4 py-3"><AdminStatus tone={auditResult(log.metadata) === "失败" ? "danger" : "success"}>{auditResult(log.metadata)}</AdminStatus></td></tr>)}
+            </AdminTable>
+          </div>
+          <div data-testid="audit-mobile-list" className="space-y-3 md:hidden">
+            {logs.map((log) => <article key={log.id} className="rounded-2xl border border-[var(--line)] p-4"><div className="flex items-start justify-between gap-3"><div><h2 className="font-black">{log.action}</h2><p className="text-xs muted">{log.actorUserId ?? "系统"} · {log.actorRole}</p></div><AdminStatus tone={auditResult(log.metadata) === "失败" ? "danger" : "success"}>{auditResult(log.metadata)}</AdminStatus></div><dl className="mt-3 grid gap-2 text-sm"><div><dt className="muted">时间</dt><dd>{new Date(log.createdAt).toLocaleString("zh-CN")}</dd></div><div><dt className="muted">目标</dt><dd>{log.targetType}:{log.targetId}</dd></div></dl></article>)}
+          </div>
           {nextCursor ? <button type="button" onClick={() => router.replace(`/admin/audit?cursor=${encodeURIComponent(nextCursor)}`)} className="mt-4 rounded-xl border border-[var(--line)] px-4 py-2 text-sm font-bold">下一页</button> : null}
         </>
       ) : null}

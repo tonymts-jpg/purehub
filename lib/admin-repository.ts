@@ -446,8 +446,50 @@ export async function updatePaymentChannel(
   return channel;
 }
 
-export async function listAuditLogs() {
-  if (!canUseDatabase()) return fallbackAuditLogs;
+export type AdminAuditCursor = { createdAt: Date; id: string };
+export const ADMIN_AUDIT_PAGE_SIZE = 20;
 
-  return prisma.auditLog.findMany({ orderBy: { createdAt: "desc" }, take: 100 });
+export function adminAuditCursorWhere(cursor?: AdminAuditCursor | null): Prisma.AuditLogWhereInput | undefined {
+  if (!cursor) return undefined;
+  return {
+    OR: [
+      { createdAt: { lt: cursor.createdAt } },
+      { createdAt: cursor.createdAt, id: { lt: cursor.id } }
+    ]
+  };
+}
+
+export async function listAuditLogs({
+  cursor = null,
+  pageSize = ADMIN_AUDIT_PAGE_SIZE
+}: {
+  cursor?: AdminAuditCursor | null;
+  pageSize?: number;
+} = {}) {
+  const take = Math.max(1, Math.min(100, pageSize));
+  if (!canUseDatabase()) {
+    const logs = fallbackAuditLogs
+      .map((log) => ({ ...log, createdAt: new Date(log.createdAt) }))
+      .filter((log) => !cursor || log.createdAt < cursor.createdAt || (log.createdAt.getTime() === cursor.createdAt.getTime() && log.id < cursor.id))
+      .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime() || right.id.localeCompare(left.id))
+      .slice(0, take + 1);
+    const page = logs.slice(0, take);
+    const last = page.at(-1);
+    return {
+      logs: page,
+      nextCursor: logs.length > take && last ? { createdAt: last.createdAt, id: last.id } : null
+    };
+  }
+
+  const rows = await prisma.auditLog.findMany({
+    where: adminAuditCursorWhere(cursor),
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: take + 1
+  });
+  const logs = rows.slice(0, take);
+  const last = logs.at(-1);
+  return {
+    logs,
+    nextCursor: rows.length > take && last ? { createdAt: last.createdAt, id: last.id } : null
+  };
 }

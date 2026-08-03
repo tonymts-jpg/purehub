@@ -512,6 +512,73 @@ export async function listFinanceTransactions() {
   });
 }
 
+export async function listFinanceOrders(status?: string) {
+  if (!canUseDatabase()) return [];
+  const orders = await prisma.order.findMany({
+    where: {
+      status: status
+        ? status
+        : { notIn: ["refunded", "charged_back"] }
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: {
+      id: true,
+      kind: true,
+      itemId: true,
+      amount: true,
+      currency: true,
+      status: true,
+      provider: true,
+      platformFeeBps: true,
+      platformFeeAmount: true,
+      creatorNetAmount: true,
+      createdAt: true,
+      paidAt: true,
+      paymentTransactions: {
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        select: { id: true, status: true, provider: true, createdAt: true }
+      }
+    },
+    take: 100
+  });
+  return orders
+    .filter((order) => !["refunded", "charged_back"].includes(order.status))
+    .map((order) => ({
+      ...order,
+      successfulPayment: order.paymentTransactions.some((payment) => payment.status === "succeeded")
+    }));
+}
+
+export async function listFinanceRefunds(status?: string) {
+  if (!canUseDatabase()) return [];
+  const refunds = await prisma.refund.findMany({
+    where: status ? { status } : undefined,
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: 100
+  });
+  const orders = refunds.length ? await prisma.order.findMany({
+    where: { id: { in: refunds.map((refund) => refund.orderId) } },
+    select: { id: true, kind: true, amount: true, currency: true, status: true, provider: true }
+  }) : [];
+  const ordersById = new Map(orders.map((order) => [order.id, order]));
+  return refunds.map((refund) => {
+    const order = ordersById.get(refund.orderId);
+    return {
+      id: refund.id,
+      orderId: refund.orderId,
+      reason: refund.reason,
+      status: refund.status,
+      source: refund.source,
+      createdAt: refund.createdAt,
+      kind: order?.kind ?? "unknown",
+      amount: order?.amount ?? null,
+      currency: order?.currency ?? null,
+      provider: order?.provider ?? null,
+      orderStatus: order?.status ?? "missing"
+    };
+  });
+}
+
 export async function createPayoutRequest(input: { userId?: string; amount: number; channel: string }) {
   const userId = input.userId ?? "c1";
   if (!Number.isInteger(input.amount) || input.amount < 100) throw new Error("Payout amount must be at least 100.");
