@@ -717,7 +717,7 @@ test("admin overview and domain pages isolate real browser requests and preserve
   await page.getByRole("link", { name: /待审创作者/ }).click();
   await expect(page).toHaveURL(/\/admin\/creators\?status=pending$/);
   await expect(page.getByRole("heading", { name: "创作者管理" })).toBeVisible();
-  expect([...new Set(calls)].sort()).toEqual([
+  await expect.poll(() => [...new Set(calls)].sort()).toEqual([
     "/api/admin/creator-applications?status=pending",
     "/api/admin/creator-levels"
   ]);
@@ -1148,7 +1148,7 @@ test("admin finance settings and audit pages isolate authenticated browser reque
 
   calls.length = 0;
   await page.goto("/admin/settings");
-  await expect(page.getByRole("heading", { name: "平台设置" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "平台设置", exact: true })).toBeVisible();
   expect([...new Set(calls)].sort()).toEqual([
     "/api/admin/finance/fee-configs",
     "/api/admin/finance/settlement-configs",

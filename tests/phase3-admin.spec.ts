@@ -19,7 +19,7 @@ test("phase 3 admin UI is reachable with an admin session", async ({ page }) => 
   await page.goto("/admin");
   await expect(page.getByTestId("admin-shell")).toBeVisible();
   await expect(page.getByTestId("site-shell")).toHaveCount(0);
-  await expect(page.getByRole("heading", { name: "站务概览" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "站务概览", exact: true })).toBeVisible();
   await expect(page.getByTestId("admin-work-queues")).toBeVisible();
   await expect(page.getByTestId("admin-pricing-panel")).toHaveCount(0);
 });

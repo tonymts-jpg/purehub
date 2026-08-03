@@ -71,7 +71,7 @@ test("navigation: fan gets the complete account navigation", async ({ page }, te
   await signInFan(page.request);
   await page.goto("/");
 
-  await expect(page.getByText("账户", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "账户", exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "收藏", exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "订单", exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "成为博主" })).toBeVisible();
