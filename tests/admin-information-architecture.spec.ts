@@ -5,6 +5,7 @@ import { adminNavigationForPermissions } from "../components/admin/admin-nav";
 import { ADMIN_MUTATION_AUDIT_MATRIX, auditAdminMutation } from "../lib/admin-audit-matrix";
 import { canAdminAccess, canAdminManageSettings } from "../lib/admin-auth";
 import { getAdminOverview } from "../lib/admin-repository";
+import { listFinanceOrders, listFinanceRefunds } from "../lib/payments/repository";
 import { prisma } from "../lib/prisma";
 import { authHeaders, hasDatabase, registerFan, signIn, signInAdmin, signInSupport } from "./auth-helpers";
 
@@ -516,10 +517,11 @@ test("admin members API writes authenticated account state and audit atomically"
 
   try {
     await signInAdmin(request);
-    const missingOrigin = await request.patch(`/api/admin/users/${user.id}`, {
+    const mismatchedOrigin = await request.patch(`/api/admin/users/${user.id}`, {
+      headers: { origin: "https://evil.example" },
       data: { status: "suspended" }
     });
-    expect(missingOrigin.status()).toBe(403);
+    expect(mismatchedOrigin.status()).toBe(403);
     const suspended = await request.patch(`/api/admin/users/${user.id}`, {
       headers: authHeaders,
       data: { status: "suspended" }
@@ -726,7 +728,7 @@ test("admin overview and domain pages isolate real browser requests and preserve
   await expect(page.getByRole("button", { name: "暂停账号 Alice Creator" })).toBeVisible();
   expect([...new Set(calls)]).toEqual(["/api/admin/users?q=alice&role=creator&status=active"]);
   await page.getByRole("button", { name: "暂停账号 Alice Creator" }).click();
-  await expect(page.getByRole("alert")).toContainText("member update failed visibly");
+  await expect(page.getByText("member update failed visibly", { exact: true })).toBeVisible();
   await expect(page.getByText("active", { exact: true })).toBeVisible();
 
   calls.length = 0;
@@ -1056,7 +1058,6 @@ test("admin audit repository paginates beyond 100 rows with ties and ignores new
 
 test("admin finance repository returns unique eligible orders and only canonical refunds", async ({ request }) => {
   test.skip(!(await hasDatabase(request)), "Finance repository semantics require PostgreSQL.");
-  const { listFinanceOrders, listFinanceRefunds } = await import("../lib/payments/repository");
   const nonce = Date.now().toString(36);
   const eligibleId = `finance-order-eligible-${nonce}`;
   const refundedId = `finance-order-refunded-${nonce}`;
@@ -1157,7 +1158,7 @@ test("admin finance settings and audit pages isolate authenticated browser reque
 
   calls.length = 0;
   await page.goto("/admin/audit");
-  await expect(page.getByRole("heading", { name: "审计日志" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "审计日志", exact: true })).toBeVisible();
   expect([...new Set(calls)]).toEqual(["/api/admin/audit-logs"]);
   if (testInfo.project.name === "mobile") {
     await expect(page.getByTestId("audit-mobile-list")).toBeVisible();
@@ -1203,7 +1204,7 @@ test("admin analyst sees read-only audit and x-admin-role cannot unlock finance"
       body: JSON.stringify({ logs: [{ id: "analyst-audit", actorUserId: null, actorRole: "system", action: "read.only", targetType: "system", targetId: "one", metadata: {}, createdAt: "2026-07-30T12:00:00.000Z" }], nextCursor: null })
     }));
     await page.goto("/admin/audit");
-    await expect(page.getByRole("heading", { name: "审计日志" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "审计日志", exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: /退款|审核|对账|结算|发布|启用|停用/ })).toHaveCount(0);
 
     await page.goto("/admin/finance");

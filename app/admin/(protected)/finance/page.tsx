@@ -1,6 +1,6 @@
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
-import { ADMIN_FINANCE_TABS, FinancePage, type AdminFinanceTab } from "@/components/admin/finance-page";
+import { FinancePage, type AdminFinanceTab } from "@/components/admin/finance-page";
 import { canAdminAccess } from "@/lib/admin-auth";
 import { auth } from "@/lib/auth";
 import type { AdminRole } from "@/lib/platform-config";
@@ -8,6 +8,7 @@ import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
 type SearchParams = Promise<Record<string, string | string[] | undefined>>;
+const ADMIN_FINANCE_TABS = ["orders", "payments", "refunds", "payouts", "kyc", "reconciliation"] as const satisfies readonly AdminFinanceTab[];
 
 export default async function AdminFinanceRoute({ searchParams }: { searchParams: SearchParams }) {
   const role = await currentAdminRole();
