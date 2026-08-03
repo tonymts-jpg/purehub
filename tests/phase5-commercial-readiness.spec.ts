@@ -1,10 +1,5 @@
 import { expect, test, type APIRequestContext, type TestInfo } from "@playwright/test";
-import { registerFan, signInCreator, signInFan, signInSupport } from "./auth-helpers";
-
-const adminHeaders = {
-  "x-admin-token": process.env.ADMIN_ACCESS_TOKEN ?? "purehub-admin-demo-token",
-  "x-admin-role": "finance_admin"
-};
+import { registerFan, signInAdmin, signInCreator, signInFan, signInSupport } from "./auth-helpers";
 async function requireDatabase(request: APIRequestContext, testInfo: TestInfo) {
   test.skip(testInfo.project.name === "mobile", "Phase 5 finance mutations run once against the shared staging database.");
   const health = await request.get("/api/health");
@@ -12,18 +7,19 @@ async function requireDatabase(request: APIRequestContext, testInfo: TestInfo) {
 }
 
 async function enableCard(request: APIRequestContext) {
+  await signInAdmin(request);
   const response = await request.patch("/api/admin/payment-channels/card", {
-    headers: adminHeaders,
     data: { enabled: true, mode: "test", statusNote: "phase5_manual_confirm", config: { adapter: "manual_confirm" } }
   });
   expect(response.ok()).toBeTruthy();
 }
 
 async function activateSettlement(request: APIRequestContext, holdDays: number) {
-  const created = await request.post("/api/admin/finance/settlement-configs", { headers: adminHeaders, data: { name: `Phase 5 ${holdDays} day ${Date.now()}`, holdDays } });
+  await signInAdmin(request);
+  const created = await request.post("/api/admin/finance/settlement-configs", { data: { name: `Phase 5 ${holdDays} day ${Date.now()}`, holdDays } });
   expect(created.ok()).toBeTruthy();
   const body = await created.json();
-  const activated = await request.post(`/api/admin/finance/settlement-configs/${body.config.id}/activate`, { headers: adminHeaders });
+  const activated = await request.post(`/api/admin/finance/settlement-configs/${body.config.id}/activate`);
   expect(activated.ok()).toBeTruthy();
 }
 
@@ -68,7 +64,8 @@ test("phase 5 payment ledger is balanced and revenue starts pending", async ({ r
   expect(paid.paymentTransactions[0].availableAt).toBeTruthy();
   expect(new Date(paid.paymentTransactions[0].availableAt).getTime()).toBeGreaterThan(Date.now() + 6 * 24 * 60 * 60 * 1000);
 
-  const ledger = await request.get(`/api/admin/finance/ledger?referenceId=${paid.id}`, { headers: adminHeaders });
+  await signInAdmin(request);
+  const ledger = await request.get(`/api/admin/finance/ledger?referenceId=${paid.id}`);
   expect(ledger.ok()).toBeTruthy();
   const payment = (await ledger.json()).transactions.find((item: { type: string }) => item.type === "payment_capture");
   expect(payment.entries.reduce((sum: number, entry: { amount: number }) => sum + entry.amount, 0)).toBe(0);
@@ -79,12 +76,15 @@ test("phase 5 settlement is idempotent", async ({ request }, testInfo) => {
   await activateSettlement(request, 0);
   const paid = await pay(request, (await createPost(request)).id);
   const paymentId = paid.paymentTransactions[0].id;
-  await request.post("/api/admin/finance/settlements/run", { headers: adminHeaders });
-  await request.post("/api/admin/finance/settlements/run", { headers: adminHeaders });
+  await signInAdmin(request);
+  await request.post("/api/admin/finance/settlements/run");
+  await request.post("/api/admin/finance/settlements/run");
+  await signInFan(request);
   const reread = await request.get(`/api/payments/orders/${paid.id}`);
   const order = (await reread.json()).order;
   expect(order.paymentTransactions[0].settledAt).toBeTruthy();
-  const ledger = await request.get(`/api/admin/finance/ledger?referenceId=${paymentId}`, { headers: adminHeaders });
+  await signInAdmin(request);
+  const ledger = await request.get(`/api/admin/finance/ledger?referenceId=${paymentId}`);
   const settlements = (await ledger.json()).transactions.filter((item: { type: string }) => item.type === "creator_settlement");
   expect(settlements).toHaveLength(1);
   expect(settlements[0].entries.reduce((sum: number, entry: { amount: number }) => sum + entry.amount, 0)).toBe(0);
@@ -94,15 +94,18 @@ test("phase 5 full refund is idempotent and revokes access", async ({ request },
   await requireDatabase(request, testInfo);
   await activateSettlement(request, 7);
   const paid = await pay(request, (await createPost(request)).id);
-  const first = await request.post(`/api/admin/finance/orders/${paid.id}/refund`, { headers: adminHeaders, data: { reason: "Phase 5 refund test" } });
-  const second = await request.post(`/api/admin/finance/orders/${paid.id}/refund`, { headers: adminHeaders, data: { reason: "Repeated refund" } });
+  await signInAdmin(request);
+  const first = await request.post(`/api/admin/finance/orders/${paid.id}/refund`, { data: { reason: "Phase 5 refund test" } });
+  const second = await request.post(`/api/admin/finance/orders/${paid.id}/refund`, { data: { reason: "Repeated refund" } });
   expect(first.ok()).toBeTruthy();
   expect(second.ok()).toBeTruthy();
+  await signInFan(request);
   const read = await request.get(`/api/payments/orders/${paid.id}`);
   const order = (await read.json()).order;
   expect(order.status).toBe("refunded");
   expect(order.entitlements).toHaveLength(0);
-  const ledger = await request.get(`/api/admin/finance/ledger?referenceId=${paid.id}`, { headers: adminHeaders });
+  await signInAdmin(request);
+  const ledger = await request.get(`/api/admin/finance/ledger?referenceId=${paid.id}`);
   expect((await ledger.json()).transactions.filter((item: { type: string }) => item.type === "refund")).toHaveLength(1);
 
   const charged = await pay(request, (await createPost(request)).id);
@@ -111,7 +114,8 @@ test("phase 5 full refund is idempotent and revokes access", async ({ request },
   expect((await request.post("/api/payments/webhooks/card", { data: event })).ok()).toBeTruthy();
   const chargedOrder = await (await request.get(`/api/payments/orders/${charged.id}`)).json();
   expect(chargedOrder.order.status).toBe("charged_back");
-  const chargedLedger = await request.get(`/api/admin/finance/ledger?referenceId=${charged.id}`, { headers: adminHeaders });
+  await signInAdmin(request);
+  const chargedLedger = await request.get(`/api/admin/finance/ledger?referenceId=${charged.id}`);
   expect((await chargedLedger.json()).transactions.filter((item: { type: string }) => item.type === "chargeback")).toHaveLength(1);
 });
 
@@ -126,8 +130,10 @@ test("phase 5 payout moves available through reserved to clearing", async ({ req
   const reserved = await (await request.get("/api/dashboard/summary")).json();
   expect(reserved.balance).toBe(beforeWallet.balance - 100);
   expect(reserved.reserved).toBe(beforeWallet.reserved + 100);
-  expect((await request.patch("/api/admin/finance/payout-requests", { headers: adminHeaders, data: { id: payout.id, status: "approved" } })).ok()).toBeTruthy();
-  expect((await request.patch("/api/admin/finance/payout-requests", { headers: adminHeaders, data: { id: payout.id, status: "paid" } })).ok()).toBeTruthy();
+  await signInAdmin(request);
+  expect((await request.patch("/api/admin/finance/payout-requests", { data: { id: payout.id, status: "approved" } })).ok()).toBeTruthy();
+  expect((await request.patch("/api/admin/finance/payout-requests", { data: { id: payout.id, status: "paid" } })).ok()).toBeTruthy();
+  await signInCreator(request);
   const paid = await (await request.get("/api/dashboard/summary")).json();
   expect(paid.reserved).toBe(beforeWallet.reserved);
 });
@@ -140,9 +146,10 @@ test("phase 5 KYC, private media access, and reconciliation enforce finance boun
   await signInSupport(request);
   const forbidden = await request.get("/api/admin/finance/kyc-cases", { headers: { "x-admin-role": "super_admin" } });
   expect(forbidden.status()).toBe(403);
-  const cases = await request.get("/api/admin/finance/kyc-cases", { headers: adminHeaders });
+  await signInAdmin(request);
+  const cases = await request.get("/api/admin/finance/kyc-cases");
   const kyc = (await cases.json()).cases.find((item: { userId: string }) => item.userId === "c2");
-  expect((await request.patch("/api/admin/finance/kyc-cases", { headers: adminHeaders, data: { id: kyc.id, status: "approved" } })).ok()).toBeTruthy();
+  expect((await request.patch("/api/admin/finance/kyc-cases", { data: { id: kyc.id, status: "approved" } })).ok()).toBeTruthy();
 
   await signInCreator(request);
   const prepared = await request.post("/api/uploads/presign", { data: { fileName: "phase5-private.jpg", mimeType: "image/jpeg", sizeBytes: 100, kind: "image", visibility: "purchase" } });
@@ -157,7 +164,8 @@ test("phase 5 KYC, private media access, and reconciliation enforce finance boun
   await pay(request, post.id);
   expect((await request.get(`/api/media/${upload.assetId}/access`)).ok()).toBeTruthy();
 
-  const reconciliation = await request.post("/api/admin/finance/reconciliation", { headers: adminHeaders });
+  await signInAdmin(request);
+  const reconciliation = await request.post("/api/admin/finance/reconciliation");
   expect(reconciliation.ok()).toBeTruthy();
   expect((await reconciliation.json()).run.status).toBe("completed");
 });

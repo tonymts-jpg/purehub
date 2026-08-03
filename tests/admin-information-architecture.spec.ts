@@ -719,3 +719,132 @@ test("admin members and creators render authenticated support read-only browser 
   await expect(page.getByRole("button", { name: "拒绝" })).toHaveCount(0);
   await expect(page.getByText("只读", { exact: true })).toBeVisible();
 });
+
+test("admin finance request isolation preserves URL state and loads only the active canonical endpoint", async () => {
+  const calls: string[] = [];
+  const { loadAdminFinance } = await import("../components/admin/finance-page");
+  const fetcher = async (input: string | URL | Request) => {
+    calls.push(String(input));
+    return new Response(JSON.stringify({ payouts: [] }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+
+  await loadAdminFinance("payouts", new URLSearchParams("status=pending&actorUserId=spoofed"), fetcher);
+
+  expect(calls).toEqual(["/api/admin/finance/payout-requests?status=pending"]);
+  expect(calls.some((url) => /pricing|payment-channels|audit-logs/.test(url))).toBe(false);
+});
+
+test("admin finance maps every URL-backed tab to one canonical read endpoint", async () => {
+  const { adminFinanceListUrl } = await import("../components/admin/finance-page");
+
+  expect(adminFinanceListUrl("orders", new URLSearchParams())).toBe("/api/admin/finance/transactions");
+  expect(adminFinanceListUrl("payments", new URLSearchParams())).toBe("/api/admin/finance/ledger");
+  expect(adminFinanceListUrl("refunds", new URLSearchParams("status=pending"))).toBe("/api/admin/finance/transactions?status=pending");
+  expect(adminFinanceListUrl("payouts", new URLSearchParams("status=pending"))).toBe("/api/admin/finance/payout-requests?status=pending");
+  expect(adminFinanceListUrl("kyc", new URLSearchParams())).toBe("/api/admin/finance/kyc-cases");
+  expect(adminFinanceListUrl("reconciliation", new URLSearchParams("status=exception"))).toBe("/api/admin/finance/reconciliation?status=exception");
+});
+
+test("admin refund and payout mutations retain rows on failure and apply server-confirmed state", async () => {
+  const { updateFinanceRowAfterSuccess } = await import("../components/admin/finance-page");
+  const rows = [{ id: "payout-1", status: "pending", amount: 100 }];
+  const failedFetcher = async () => new Response(JSON.stringify({ error: "请重试提现审核" }), {
+    status: 500,
+    headers: { "content-type": "application/json" }
+  });
+
+  await expect(updateFinanceRowAfterSuccess(
+    rows,
+    "payout-1",
+    "/api/admin/finance/payout-requests",
+    { method: "PATCH", body: JSON.stringify({ id: "payout-1", status: "approved" }) },
+    (body) => (body as { payout: { status: string } }).payout,
+    failedFetcher
+  )).rejects.toThrow("请重试提现审核");
+  expect(rows).toEqual([{ id: "payout-1", status: "pending", amount: 100 }]);
+
+  const updated = await updateFinanceRowAfterSuccess(
+    rows,
+    "payout-1",
+    "/api/admin/finance/payout-requests",
+    { method: "PATCH", body: JSON.stringify({ id: "payout-1", status: "approved" }) },
+    (body) => (body as { payout: { status: string } }).payout,
+    async () => new Response(JSON.stringify({ payout: { id: "payout-1", status: "approved" } }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    })
+  );
+  expect(updated).toEqual([{ id: "payout-1", status: "approved", amount: 100 }]);
+  expect(rows).toEqual([{ id: "payout-1", status: "pending", amount: 100 }]);
+});
+
+test("admin settings request isolation follows exact finance and operational capabilities", async () => {
+  const calls: string[] = [];
+  const { loadAdminSettings, settingsGroupsForCapabilities } = await import("../components/admin/settings-page");
+  const fetcher = async (input: string | URL | Request) => {
+    const url = String(input);
+    calls.push(url);
+    const body = url.includes("fee-configs") || url.includes("settlement-configs")
+      ? { configs: [] }
+      : url.includes("pricing")
+        ? { versions: [] }
+        : { channels: [] };
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+
+  await loadAdminSettings({ finance: true, operations: false }, fetcher);
+  expect(calls).toEqual([
+    "/api/admin/finance/fee-configs",
+    "/api/admin/finance/settlement-configs"
+  ]);
+  expect(settingsGroupsForCapabilities({ finance: true, operations: false })).toEqual([
+    "platform-fee",
+    "settlement-window"
+  ]);
+  expect(calls.some((url) => /pricing|payment-channels|audit-logs/.test(url))).toBe(false);
+
+  calls.length = 0;
+  await loadAdminSettings({ finance: false, operations: true }, fetcher);
+  expect(calls).toEqual([
+    "/api/admin/pricing/versions",
+    "/api/admin/payment-channels"
+  ]);
+  expect(settingsGroupsForCapabilities({ finance: false, operations: true })).toEqual([
+    "pricing",
+    "payment-channels"
+  ]);
+  expect(calls.some((url) => /fee-configs|settlement-configs|audit-logs/.test(url))).toBe(false);
+});
+
+test("admin audit request isolation forwards only the opaque cursor and exposes no mutation contract", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const { loadAdminAudit } = await import("../components/admin/audit-page");
+  const fetcher = async (input: string | URL | Request, init?: RequestInit) => {
+    calls.push({ url: String(input), init });
+    return new Response(JSON.stringify({ logs: [], nextCursor: null }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+
+  const body = await loadAdminAudit(new URLSearchParams("cursor=opaque-cursor&actorUserId=spoofed"), fetcher);
+
+  expect(calls).toEqual([{ url: "/api/admin/audit-logs?cursor=opaque-cursor", init: undefined }]);
+  expect(body).toEqual({ logs: [], nextCursor: null });
+});
+
+test("admin audit cursor is opaque, strict, and round-trips its stable marker", async () => {
+  const { encodeAuditCursor, parseAuditCursor } = await import("../app/api/admin/audit-logs/route");
+  const marker = { createdAt: "2026-07-30T12:00:00.000Z", id: "audit-20" };
+  const cursor = encodeAuditCursor(marker);
+
+  expect(cursor).not.toContain(marker.id);
+  expect(parseAuditCursor(cursor)).toEqual(marker);
+  expect(() => parseAuditCursor("not-a-cursor")).toThrow("Audit cursor is invalid.");
+});

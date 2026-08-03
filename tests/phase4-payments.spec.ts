@@ -1,10 +1,5 @@
 import { expect, test, type APIRequestContext } from "@playwright/test";
-import { signInCreator, signInFan, signInSupport } from "./auth-helpers";
-
-const adminHeaders = {
-  "x-admin-token": process.env.ADMIN_ACCESS_TOKEN ?? "purehub-admin-demo-token",
-  "x-admin-role": "super_admin"
-};
+import { signInAdmin, signInCreator, signInFan, signInSupport } from "./auth-helpers";
 
 async function hasDatabase(request: APIRequestContext) {
   try {
@@ -36,16 +31,14 @@ async function createPaidPost(request: APIRequestContext, price: number) {
 }
 
 async function activateFee(request: APIRequestContext, feeBps: number) {
+  await signInAdmin(request);
   const created = await request.post("/api/admin/finance/fee-configs", {
-    headers: adminHeaders,
     data: { name: `Phase 4 fee ${feeBps} ${Date.now()}`, feeBps }
   });
   expect(created.ok()).toBeTruthy();
   const createdBody = await created.json();
 
-  const activated = await request.post(`/api/admin/finance/fee-configs/${createdBody.config.id}/activate`, {
-    headers: adminHeaders
-  });
+  const activated = await request.post(`/api/admin/finance/fee-configs/${createdBody.config.id}/activate`);
   expect(activated.ok()).toBeTruthy();
   return (await activated.json()).config as { id: string; feeBps: number; status: string };
 }
@@ -85,10 +78,11 @@ test("phase 4 payment channel must be enabled before creating an intent", async 
   expect(order.ok()).toBeTruthy();
   const orderBody = await order.json();
 
+  await signInAdmin(request);
   await request.patch("/api/admin/payment-channels/paypal", {
-    headers: adminHeaders,
     data: { enabled: false, mode: "test", statusNote: "phase4_disabled_check" }
   });
+  await signInFan(request);
 
   const intent = await request.post("/api/payments/intents", {
     data: { orderId: orderBody.order.id, provider: "paypal" }
@@ -99,8 +93,8 @@ test("phase 4 payment channel must be enabled before creating an intent", async 
 test("phase 4 configurable fees snapshot creator net revenue", async ({ request }) => {
   test.skip(!(await hasDatabase(request)), "Phase 4 payment APIs require the seeded database.");
 
+  await signInAdmin(request);
   await request.patch("/api/admin/payment-channels/card", {
-    headers: adminHeaders,
     data: { enabled: true, mode: "test", statusNote: "phase4_manual_confirm", config: { adapter: "manual_confirm" } }
   });
 
@@ -132,8 +126,8 @@ test("phase 4 configurable fees snapshot creator net revenue", async ({ request 
 test("phase 4 manual confirmation is idempotent and subscriptions fulfill", async ({ request }) => {
   test.skip(!(await hasDatabase(request)), "Phase 4 payment APIs require the seeded database.");
 
+  await signInAdmin(request);
   await request.patch("/api/admin/payment-channels/card", {
-    headers: adminHeaders,
     data: { enabled: true, mode: "test", statusNote: "phase4_manual_confirm", config: { adapter: "manual_confirm" } }
   });
   await activateFee(request, 1000);
@@ -177,8 +171,8 @@ test("phase 4 finance admin can review payouts and support admin cannot", async 
   });
   expect(forbidden.status()).toBe(403);
 
+  await signInAdmin(request);
   const approved = await request.patch("/api/admin/finance/payout-requests", {
-    headers: adminHeaders,
     data: { id: payoutBody.payout.id, status: "approved", reviewNote: "phase4_e2e_approved" }
   });
   expect(approved.ok()).toBeTruthy();
