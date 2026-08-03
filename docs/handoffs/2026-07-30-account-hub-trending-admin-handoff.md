@@ -7,8 +7,9 @@ Updated: 2026-08-03
 - Branch: `feat/account-hub-trending-admin`
 - Task 12 starting feature commit: `666550554d2ef08a40cdbfd15c1531ba673668be`
 - Locally verified feature/repair commit: `dc81104af932f0018eef97ab48d88a7e6ef1cab8`
-- Handoff commit: the commit containing this document, with message
-  `docs: hand off account hub staging acceptance`
+- Initial handoff commit: `e8f953c20a1ab29a158cf34dd08a586a40a312ef`
+- Corrected handoff commit: the commit containing this revision, with message
+  `docs: correct account hub staging runbook`
 - Migration: `prisma/migrations/20260730000000_account_hub`
 - Scope completed here: Task 12 steps 1-6 only. No push, merge, SSH, deployment,
   staging data reset, or deployed acceptance was performed.
@@ -55,13 +56,14 @@ staging must supply a real `BETTER_AUTH_SECRET`.
 ## Database-backed cases required on staging
 
 The deployed run must execute the complete suite against seeded PostgreSQL and
-must not accept the local skip total as deployed evidence. In particular, the
-31 focused database-gated project cases cover:
+must not accept the local skip total as deployed evidence. Of the focused
+desktop suite's 31 skips, 29 were database-gated and two were intentionally
+mobile-project-only cases. The 29 focused database-gated cases cover:
 
 - session-owned account likes, follows, unlocks, orders, favorites, history,
   identity-override rejection, ACL-visible pagination, timestamp preservation,
   the exact 90-day retention boundary, and account maintenance;
-- seeded fan/creator/mobile account navigation plus public/private/stale and
+- seeded fan and creator account navigation plus public/private/stale and
   hydration-sensitive channel favorite detail behavior;
 - hot-post ranking against persisted views;
 - direct admin authorization with `x-admin-role` ignored, content permissions,
@@ -100,14 +102,14 @@ checked out that exact SHA on the Ubuntu staging host:
 ```bash
 cd /var/www/purehub
 git config core.fileMode false
+PREVIOUS_SHA="$(git rev-parse HEAD)"
+printf 'Record this pre-deploy SHA for rollback: %s\n' "${PREVIOUS_SHA}"
 git pull --ff-only
 git rev-parse HEAD
 chmod +x scripts/*.sh
 DEPLOY_SEED=true ./scripts/deploy.sh staging
 docker compose --env-file .env.staging ps
 ./scripts/healthcheck.sh staging
-curl -fsS http://127.0.0.1/api/health
-SMOKE_BASE_URL=http://127.0.0.1 ./scripts/smoke-test.sh
 ```
 
 `scripts/deploy.sh staging` applies `npm run db:migrate`; confirm the migration
@@ -119,11 +121,22 @@ If the host lacks acceptance dependencies:
 ```bash
 npm ci --registry=https://registry.npmmirror.com/
 npx playwright install --with-deps chromium
-export PLAYWRIGHT_BASE_URL=http://127.0.0.1
 export ADMIN_ACCESS_TOKEN="$(grep '^ADMIN_ACCESS_TOKEN=' .env.staging | tail -1 | cut -d= -f2-)"
 export DEMO_ACCOUNT_PASSWORD="$(grep '^DEMO_ACCOUNT_PASSWORD=' .env.staging | tail -1 | cut -d= -f2-)"
+```
+
+For host-local acceptance, derive the URL from the existing staging environment
+instead of assuming port 80:
+
+```bash
+HTTP_PORT_VALUE="$(grep -E '^HTTP_PORT=' .env.staging | tail -1 | cut -d= -f2-)"
+case "${HTTP_PORT_VALUE}" in ''|*[!0-9]*) echo 'Invalid HTTP_PORT in .env.staging' >&2; exit 1;; esac
+export PLAYWRIGHT_BASE_URL="http://127.0.0.1:${HTTP_PORT_VALUE}"
 npm run test:e2e:deployed
 ```
+
+For the public deployed acceptance required by the implementation plan, use
+`PLAYWRIGHT_BASE_URL=http://183.6.3.174:99` and retain one worker.
 
 The deployed Playwright run is strictly one worker. `playwright.config.ts` now
 defaults to `workers: 1`; if invoking Playwright directly, retain
@@ -131,22 +144,40 @@ defaults to `workers: 1`; if invoking Playwright directly, retain
 
 ## Rollback
 
-The repository rollback script restores the last available local image and then
-runs the health check:
+Before deployment, record the exact `PREVIOUS_SHA` as shown above outside the
+transient shell and retain the corresponding database backup/snapshot. An app
+rollback must explicitly select that SHA, rebuild it, and verify it; do not run
+these commands unless rollback has been authorized:
 
 ```bash
 cd /var/www/purehub
-./scripts/rollback.sh staging
+PREVIOUS_SHA='<recorded-pre-deploy-40-character-sha>'
+git status --short
+git cat-file -e "${PREVIOUS_SHA}^{commit}"
+git switch --detach "${PREVIOUS_SHA}"
+DEPLOY_SEED=false ./scripts/deploy.sh staging
 docker compose --env-file .env.staging ps
-curl -fsS http://127.0.0.1/api/health
+./scripts/healthcheck.sh staging
 ```
 
+Proceed only if `git status --short` is clean and `PREVIOUS_SHA` matches the
+recorded pre-deploy commit. `scripts/rollback.sh staging` is not an application
+version rollback: it only starts the image tags selected by the current Compose
+configuration without rebuilding, so it must not be used as proof that the
+previous commit was restored.
+
+Prisma migrations are forward-only in this flow. Before checking out the older
+application, decide whether the migrated schema is forward-compatible with that
+SHA. If it is not, use the approved database backup/manual restore procedure;
+never invent or apply an unreviewed down migration. The app and database
+rollback decisions must be recorded together.
+
 If the web container is healthy but Nginx returns `502`, restart only Nginx and
-recheck health:
+run the authoritative port-aware health check:
 
 ```bash
 docker compose --env-file .env.staging restart nginx
-curl -fsS http://127.0.0.1/api/health
+./scripts/healthcheck.sh staging
 ```
 
 ## Deployed acceptance placeholder
