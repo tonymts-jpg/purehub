@@ -729,7 +729,7 @@ test("admin overview and domain pages isolate real browser requests and preserve
   expect([...new Set(calls)]).toEqual(["/api/admin/users?q=alice&role=creator&status=active"]);
   await page.getByRole("button", { name: "暂停账号 Alice Creator" }).click();
   await expect(page.getByText("member update failed visibly", { exact: true })).toBeVisible();
-  await expect(page.getByText("active", { exact: true })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "active", exact: true })).toBeVisible();
 
   calls.length = 0;
   await page.goto("/admin/members?q=ops");
@@ -1149,7 +1149,7 @@ test("admin finance settings and audit pages isolate authenticated browser reque
   calls.length = 0;
   await page.goto("/admin/settings");
   await expect(page.getByRole("heading", { name: "平台设置", exact: true })).toBeVisible();
-  expect([...new Set(calls)].sort()).toEqual([
+  await expect.poll(() => [...new Set(calls)].sort()).toEqual([
     "/api/admin/finance/fee-configs",
     "/api/admin/finance/settlement-configs",
     "/api/admin/payment-channels",
