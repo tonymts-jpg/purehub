@@ -1130,12 +1130,12 @@ test("admin finance settings and audit pages isolate authenticated browser reque
 
   await page.goto("/admin/finance?tab=payouts&status=pending");
   await expect(page.getByRole("heading", { name: "订单与财务" })).toBeVisible();
-  expect([...new Set(calls)]).toEqual(["/api/admin/finance/payout-requests?status=pending"]);
+  await expect.poll(() => [...new Set(calls)]).toEqual(["/api/admin/finance/payout-requests?status=pending"]);
 
   calls.length = 0;
   await page.getByRole("link", { name: "订单", exact: true }).click();
   await expect(page).toHaveURL(/\/admin\/finance\?tab=orders$/);
-  expect([...new Set(calls)]).toEqual(["/api/admin/finance/transactions?view=orders"]);
+  await expect.poll(() => [...new Set(calls)]).toEqual(["/api/admin/finance/transactions?view=orders"]);
   if (testInfo.project.name === "mobile") {
     await expect(page.getByTestId("finance-mobile-list")).toBeVisible();
     await expect(page.getByTestId("finance-desktop-table")).toBeHidden();
@@ -1159,7 +1159,7 @@ test("admin finance settings and audit pages isolate authenticated browser reque
   calls.length = 0;
   await page.goto("/admin/audit");
   await expect(page.getByRole("heading", { name: "审计日志", exact: true })).toBeVisible();
-  expect([...new Set(calls)]).toEqual(["/api/admin/audit-logs"]);
+  await expect.poll(() => [...new Set(calls)]).toEqual(["/api/admin/audit-logs"]);
   if (testInfo.project.name === "mobile") {
     await expect(page.getByTestId("audit-mobile-list")).toBeVisible();
   } else {
