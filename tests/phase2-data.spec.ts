@@ -1,5 +1,6 @@
 ﻿import { expect, test } from "@playwright/test";
 
+import { prisma } from "../lib/prisma";
 import { hasDatabase, registerFan, signInCreator } from "./auth-helpers";
 
 test("phase 2 feed, detail, creator, and pricing APIs are available", async ({ request }) => {
@@ -28,35 +29,54 @@ test("phase 2 feed, detail, creator, and pricing APIs are available", async ({ r
 
 test("phase 2 creator application and post APIs accept writable data", async ({ request }) => {
   test.skip(!(await hasDatabase(request)), "Phase 2 writable APIs require the seeded database.");
-  await registerFan(request, "phase2-applicant");
-  const application = await request.post("/api/creator/applications", {
-    data: {
-      displayName: "Phase 2 Creator",
-      category: "Cosplay",
-      portfolio: "https://example.com/portfolio",
-      contact: "phase2@example.com",
-      note: "Phase 2 e2e application smoke"
-    }
+  const identity = await registerFan(request, "phase2-applicant");
+  const applicant = await prisma.user.findUniqueOrThrow({
+    where: { email: identity.email },
+    select: { id: true }
   });
-  expect(application.ok()).toBeTruthy();
-  const applicationBody = await application.json();
-  expect(applicationBody.application.status).toBe("pending");
+  let postId: string | undefined;
 
-  await signInCreator(request);
-  const post = await request.post("/api/posts", {
-    data: {
-      title: "Phase 2 API Post",
-      excerpt: "Created through the Phase 2 post API.",
-      content: "This post verifies that the Phase 2 post API can accept new creator work and keep the response shape stable.",
-      category: "Cosplay",
-      contentType: "long_video",
-      saleMode: "long_video_single",
-      visibility: "purchase",
-      price: 80
+  try {
+    const application = await request.post("/api/creator/applications", {
+      data: {
+        displayName: "Phase 2 Creator",
+        category: "Cosplay",
+        portfolio: "https://example.com/portfolio",
+        contact: "phase2@example.com",
+        note: "Phase 2 e2e application smoke"
+      }
+    });
+    expect(application.ok()).toBeTruthy();
+    const applicationBody = await application.json();
+    expect(applicationBody.application.status).toBe("pending");
+
+    await signInCreator(request);
+    const post = await request.post("/api/posts", {
+      data: {
+        title: "Phase 2 API Post",
+        excerpt: "Created through the Phase 2 post API.",
+        content: "This post verifies that the Phase 2 post API can accept new creator work and keep the response shape stable.",
+        category: "Cosplay",
+        contentType: "long_video",
+        saleMode: "long_video_single",
+        visibility: "purchase",
+        price: 80
+      }
+    });
+    expect(post.ok()).toBeTruthy();
+    const postBody = await post.json();
+    postId = postBody.post.id;
+    expect(postBody.post.title).toBe("Phase 2 API Post");
+    expect(postBody.post.price).toBe(80);
+  } finally {
+    if (postId) {
+      await prisma.channelJob.deleteMany({ where: { entityType: "post", entityId: postId } });
+      await prisma.searchDocument.deleteMany({ where: { entityType: "post", entityId: postId } });
+      await prisma.post.deleteMany({ where: { id: postId } });
     }
-  });
-  expect(post.ok()).toBeTruthy();
-  const postBody = await post.json();
-  expect(postBody.post.title).toBe("Phase 2 API Post");
-  expect(postBody.post.price).toBe(80);
+    await prisma.creatorApplication.deleteMany({ where: { userId: applicant.id } });
+    await prisma.session.deleteMany({ where: { userId: applicant.id } });
+    await prisma.account.deleteMany({ where: { userId: applicant.id } });
+    await prisma.user.deleteMany({ where: { id: applicant.id } });
+  }
 });
