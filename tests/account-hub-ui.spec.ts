@@ -86,7 +86,7 @@ test("navigation: approved creator gets fan links and creator space without beco
 
   await expect(page.getByRole("link", { name: "收藏", exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "订单", exact: true })).toBeVisible();
-  await expect(page.getByText("博主空间", { exact: true })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "博主空间" })).toBeVisible();
   await expect(page.getByRole("link", { name: "成为博主" })).toHaveCount(0);
 });
 
