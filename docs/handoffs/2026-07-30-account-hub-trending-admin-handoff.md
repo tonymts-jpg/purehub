@@ -238,14 +238,29 @@ docker compose --env-file .env.staging restart nginx
 ./scripts/healthcheck.sh staging
 ```
 
-## Deployed acceptance placeholder
+## Deployed acceptance evidence (2026-08-04)
 
-- Deployed commit SHA: pending authorized push/deploy.
-- Migration status: pending staging verification.
-- Service health: pending.
-- Smoke result: pending.
-- Deployed Playwright totals (`workers=1`): pending.
-- Approved staging seed reset and final public health recheck: pending.
+- Accepted application/runtime commit SHA:
+  `727e4cb8a452b5ee1cd10b63424fcff963c87726`.
+- GitHub `main`, the staging checkout, Web runtime, Worker runtime, and the
+  public `/api/health` response were verified at that exact SHA before the
+  final acceptance run.
+- Public acceptance origin: `http://183.6.3.174:99` (home returned HTTP 200;
+  health returned `status=ok`, `phase=phase-7`, and the accepted SHA).
+- Migration status: seven migrations found and no pending migrations after
+  `prisma migrate deploy`; `20260730000000_account_hub` is applied.
+- Service health: PostgreSQL, Redis, MinIO, Web, Worker, and Nginx all reported
+  healthy; `./scripts/healthcheck.sh staging` passed.
+- Credentialed smoke: passed after the canonical staging seed, including home,
+  explore, post detail, Phase 7 capabilities, channels, typed creator search,
+  unauthenticated identity/mutation boundaries, administrator sign-in, finance
+  configuration, settlement configuration, and reconciliation.
+- Deployed Playwright (`PLAYWRIGHT_BASE_URL=http://183.6.3.174:99`,
+  `workers=1`): `408 passed`, `70 expected project/scenario skips`, `0 failed`
+  (`478` total; 14.5 minutes).
+- After Playwright, the approved staging seed was run again. Final healthcheck,
+  credentialed smoke, service health, and public-origin checks passed against
+  the clean seeded state.
 
 ## Protected files
 
