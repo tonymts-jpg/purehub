@@ -90,6 +90,14 @@ test("navigation: approved creator gets fan links and creator space without beco
   await expect(page.getByRole("link", { name: "成为博主" })).toHaveCount(0);
 });
 
+test("navigation: approved creator has an explicit sign-out action", async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name === "mobile", "Desktop account card is hidden on mobile.");
+  await useApprovedCreatorSession(page);
+  await page.goto("/");
+
+  await expect(page.getByRole("button", { name: "退出登入", exact: true })).toBeVisible();
+});
+
 test("navigation: pending creator keeps the application link and receives account links", async ({ page }, testInfo: TestInfo) => {
   await usePendingCreatorSession(page);
   await page.goto("/");
@@ -150,6 +158,20 @@ test("navigation: mobile My opens the complete account menu", async ({ page }, t
   await page.goto("/me");
   await expect(page.getByRole("heading", { name: "账户", exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "收藏", exact: true })).toBeVisible();
+});
+
+test("navigation: mobile approved creator exposes creator space and sign-out", async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name !== "mobile", "Mobile-only creator navigation coverage.");
+  await useApprovedCreatorSession(page);
+  await page.goto("/");
+
+  const mobileNavigation = page.getByRole("navigation", { name: "移动导航" });
+  await expect(mobileNavigation.getByRole("link", { name: "博主空间", exact: true })).toHaveAttribute("href", "/me");
+
+  await page.goto("/me");
+  await expect(page.getByRole("heading", { name: "博主空间", exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "博主工作台", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "退出登入", exact: true })).toBeVisible();
 });
 
 test("navigation: mobile bottom stays compact with My", async ({ page }, testInfo: TestInfo) => {

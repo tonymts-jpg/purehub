@@ -31,7 +31,7 @@ const navigationIcons: Record<string, LucideIcon> = {
 };
 
 const becomeCreatorNav: NavItem = { href: "/become-creator", label: "成为博主" };
-const mobileNav: NavItem[] = [publicNav[0], publicNav[1], publicNav[2], { href: "/me", label: "我的" }];
+const mobilePublicNav: NavItem[] = [publicNav[0], publicNav[1], publicNav[2]];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -40,6 +40,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const user = session?.user;
   const sessionUser = user ? { role: user.role ?? undefined, creatorStatus: user.creatorStatus ?? undefined, status: user.status ?? undefined } : null;
   const approvedCreator = isApprovedCreator(sessionUser);
+  const mobileNav: NavItem[] = [...mobilePublicNav, { href: "/me", label: approvedCreator ? "博主空间" : "我的" }];
 
   useEffect(() => { document.documentElement.classList.toggle("dark", theme === "dark"); }, [theme]);
   useEffect(() => {
@@ -68,7 +69,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </>}
       <div className="mt-auto space-y-3">
         <button onClick={toggleTheme} className="glass flex w-full items-center justify-between rounded-2xl px-4 py-3 text-sm font-semibold"><span className="flex items-center gap-3">{theme === "light" ? <Moon size={18} /> : <Sun size={18} />}外观模式</span><span className="muted">{theme === "light" ? "浅色" : "深色"}</span></button>
-        {user ? <div className="glass flex items-center gap-3 rounded-2xl p-3"><Avatar text={user.name.slice(0, 1).toUpperCase()} small /><div className="min-w-0 flex-1"><p className="truncate text-sm font-bold">{user.name}</p><p className="truncate text-xs muted">{approvedCreator ? "博主" : "粉丝"}</p></div><button title="登出" aria-label="登出" onClick={() => authClient.signOut().then(() => window.location.assign("/"))} className="rounded-xl p-2 muted hover:bg-black/5"><LogOut size={17} /></button></div> : <Link href="/sign-in" className="brand-gradient flex items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-bold text-white"><LogIn size={17} />登入</Link>}
+        {user ? <div className="glass flex items-center gap-3 rounded-2xl p-3"><Avatar text={user.name.slice(0, 1).toUpperCase()} small /><div className="min-w-0 flex-1"><p className="truncate text-sm font-bold">{user.name}</p><p className="truncate text-xs muted">{approvedCreator ? "博主" : "粉丝"}</p></div><button title="退出登入" aria-label="退出登入" onClick={() => authClient.signOut().then(() => window.location.assign("/"))} className="flex shrink-0 items-center gap-1 rounded-xl px-2 py-2 text-xs font-bold muted hover:bg-black/5"><LogOut size={17} /><span>退出登入</span></button></div> : <Link href="/sign-in" className="brand-gradient flex items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-bold text-white"><LogIn size={17} />登入</Link>}
       </div>
     </aside>
     <header className="sticky top-0 z-20 flex h-16 items-center justify-between border-b border-[var(--line)] bg-[var(--bg)]/85 px-4 backdrop-blur-xl lg:hidden">
