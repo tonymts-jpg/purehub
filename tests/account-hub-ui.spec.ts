@@ -98,6 +98,47 @@ test("navigation: approved creator has an explicit sign-out action", async ({ pa
   await expect(page.getByRole("button", { name: "退出登入", exact: true })).toBeVisible();
 });
 
+test("navigation: desktop creator tools and sign-out stay inside the viewport", async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name === "mobile", "Desktop sidebar is hidden on mobile.");
+  await page.setViewportSize({ width: 1440, height: 720 });
+  await useApprovedCreatorSession(page);
+  await page.goto("/");
+
+  await expect(page.getByRole("button", { name: "博主空间", exact: true })).toBeInViewport({ ratio: 1 });
+  await expect(page.getByRole("link", { name: "博主工作台", exact: true })).toBeInViewport({ ratio: 1 });
+  await expect(page.getByRole("button", { name: "退出登入", exact: true })).toBeInViewport({ ratio: 1 });
+});
+
+test("navigation: desktop fan sign-out must stay inside the viewport", async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name === "mobile", "Desktop sidebar is hidden on mobile.");
+  await page.setViewportSize({ width: 1440, height: 720 });
+  await mockAccountSession(page);
+  await page.goto("/");
+
+  await expect(page.getByRole("button", { name: "退出登入", exact: true })).toBeInViewport({ ratio: 1 });
+});
+
+test("navigation: desktop creator uses accessible collapsible navigation groups", async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name === "mobile", "Desktop sidebar is hidden on mobile.");
+  await page.setViewportSize({ width: 1440, height: 720 });
+  await useApprovedCreatorSession(page);
+  await page.goto("/");
+
+  const creatorToggle = page.getByRole("button", { name: "博主空间", exact: true });
+  const accountToggle = page.getByRole("button", { name: "账户", exact: true });
+  await expect(creatorToggle).toHaveAttribute("aria-expanded", "true");
+  await expect(accountToggle).toHaveAttribute("aria-expanded", "false");
+
+  await accountToggle.click();
+  await expect(accountToggle).toHaveAttribute("aria-expanded", "true");
+  await expect(creatorToggle).toHaveAttribute("aria-expanded", "false");
+
+  await page.goto("/dashboard");
+  await expect(page.getByRole("button", { name: "博主空间", exact: true })).toHaveAttribute("aria-expanded", "true");
+  await page.goto("/favorites");
+  await expect(page.getByRole("button", { name: "账户", exact: true })).toHaveAttribute("aria-expanded", "true");
+});
+
 test("navigation: pending creator keeps the application link and receives account links", async ({ page }, testInfo: TestInfo) => {
   await usePendingCreatorSession(page);
   await page.goto("/");
@@ -133,7 +174,9 @@ test("navigation: desktop groups have distinct accessible names", async ({ page 
   await page.goto("/");
 
   await expect(page.getByRole("navigation", { name: "公共导航" })).toBeVisible();
-  await expect(page.getByRole("navigation", { name: "账户" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "账户", exact: true })).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByRole("button", { name: "博主空间", exact: true })).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByRole("navigation", { name: "账户" })).toHaveCount(0);
   await expect(page.getByRole("navigation", { name: "博主空间" })).toBeVisible();
 });
 

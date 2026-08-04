@@ -2,9 +2,9 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Bell, Bookmark, Compass, Heart, History, Home, LayoutDashboard, LockKeyhole, LogIn, LogOut, Moon, PlusCircle, Radio, Search, ShoppingBag, Sparkles, Sun, UserPlus, UserRound, Users, WalletCards, type LucideIcon } from "lucide-react";
+import { Bell, Bookmark, ChevronDown, Compass, Heart, History, Home, LayoutDashboard, LockKeyhole, LogIn, LogOut, Moon, PlusCircle, Radio, Search, ShoppingBag, Sparkles, Sun, UserPlus, UserRound, Users, WalletCards, type LucideIcon } from "lucide-react";
 import { useDemoStore } from "@/lib/store";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { authClient } from "@/lib/auth-client";
 import { accountNav, canApplyAsCreator, creatorNav, isApprovedCreator, publicNav, type NavItem } from "@/components/account-nav";
 
@@ -32,15 +32,18 @@ const navigationIcons: Record<string, LucideIcon> = {
 
 const becomeCreatorNav: NavItem = { href: "/become-creator", label: "成为博主" };
 const mobilePublicNav: NavItem[] = [publicNav[0], publicNav[1], publicNav[2]];
+type SidebarGroup = "account" | "creator";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { theme, toggleTheme, toast, clearToast } = useDemoStore();
   const { data: session } = authClient.useSession();
   const user = session?.user;
+  const userId = user?.id;
   const sessionUser = user ? { role: user.role ?? undefined, creatorStatus: user.creatorStatus ?? undefined, status: user.status ?? undefined } : null;
   const approvedCreator = isApprovedCreator(sessionUser);
   const mobileNav: NavItem[] = [...mobilePublicNav, { href: "/me", label: approvedCreator ? "博主空间" : "我的" }];
+  const [expandedSidebarGroup, setExpandedSidebarGroup] = useState<SidebarGroup | null>(null);
 
   useEffect(() => { document.documentElement.classList.toggle("dark", theme === "dark"); }, [theme]);
   useEffect(() => {
@@ -48,26 +51,50 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     const timer = setTimeout(clearToast, 2400);
     return () => clearTimeout(timer);
   }, [toast, clearToast]);
+  useEffect(() => {
+    if (!userId) {
+      setExpandedSidebarGroup(null);
+      return;
+    }
+    if (approvedCreator && isNavigationPath(pathname, creatorNav)) {
+      setExpandedSidebarGroup("creator");
+      return;
+    }
+    if (isNavigationPath(pathname, accountNav)) {
+      setExpandedSidebarGroup("account");
+      return;
+    }
+    setExpandedSidebarGroup(approvedCreator ? "creator" : "account");
+  }, [approvedCreator, pathname, userId]);
 
   return <div data-testid="site-shell" className="min-h-screen">
-    <aside className="fixed left-0 top-0 z-30 hidden h-screen w-64 border-r border-[var(--line)] bg-[var(--bg)]/90 px-5 py-7 backdrop-blur-xl lg:flex lg:flex-col">
-      <Link href="/" className="mb-9 flex items-center gap-3 text-xl font-black tracking-tight">
+    <aside className="fixed left-0 top-0 z-30 hidden h-screen w-64 overflow-hidden border-r border-[var(--line)] bg-[var(--bg)]/90 px-5 py-5 backdrop-blur-xl lg:flex lg:flex-col">
+      <Link href="/" className="mb-5 flex shrink-0 items-center gap-3 text-xl font-black tracking-tight">
         <span className="brand-gradient grid h-10 w-10 place-items-center rounded-2xl text-white"><Sparkles size={20} /></span>PureHub
       </Link>
-      <nav aria-label="公共导航" className="space-y-1">
-        <NavigationLinks items={[...publicNav, ...(canApplyAsCreator(sessionUser) ? [becomeCreatorNav] : [])]} pathname={pathname} />
-      </nav>
-      {user && <>
-        <div className="my-6 border-t border-[var(--line)]" />
-        <p id="account-navigation-heading" className="mb-2 px-4 text-[11px] font-bold uppercase tracking-[.18em] muted">账户</p>
-        <nav aria-labelledby="account-navigation-heading" className="space-y-1"><NavigationLinks items={accountNav} pathname={pathname} /></nav>
-      </>}
-      {approvedCreator && <>
-        <div className="my-6 border-t border-[var(--line)]" />
-        <p id="creator-navigation-heading" className="mb-2 px-4 text-[11px] font-bold uppercase tracking-[.18em] muted">博主空间</p>
-        <nav aria-labelledby="creator-navigation-heading" className="space-y-1"><NavigationLinks items={creatorNav} pathname={pathname} creator /></nav>
-      </>}
-      <div className="mt-auto space-y-3">
+      <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+        <nav aria-label="公共导航" className="space-y-1">
+          <NavigationLinks items={[...publicNav, ...(canApplyAsCreator(sessionUser) ? [becomeCreatorNav] : [])]} pathname={pathname} />
+        </nav>
+        {approvedCreator && <SidebarNavigationGroup
+          group="creator"
+          label="博主空间"
+          items={creatorNav}
+          pathname={pathname}
+          expanded={expandedSidebarGroup === "creator"}
+          onToggle={() => setExpandedSidebarGroup((current) => current === "creator" ? null : "creator")}
+          creator
+        />}
+        {user && <SidebarNavigationGroup
+          group="account"
+          label="账户"
+          items={accountNav}
+          pathname={pathname}
+          expanded={expandedSidebarGroup === "account"}
+          onToggle={() => setExpandedSidebarGroup((current) => current === "account" ? null : "account")}
+        />}
+      </div>
+      <div className="shrink-0 space-y-3 pt-4">
         <button onClick={toggleTheme} className="glass flex w-full items-center justify-between rounded-2xl px-4 py-3 text-sm font-semibold"><span className="flex items-center gap-3">{theme === "light" ? <Moon size={18} /> : <Sun size={18} />}外观模式</span><span className="muted">{theme === "light" ? "浅色" : "深色"}</span></button>
         {user ? <div className="glass flex items-center gap-3 rounded-2xl p-3"><Avatar text={user.name.slice(0, 1).toUpperCase()} small /><div className="min-w-0 flex-1"><p className="truncate text-sm font-bold">{user.name}</p><p className="truncate text-xs muted">{approvedCreator ? "博主" : "粉丝"}</p></div><button title="退出登入" aria-label="退出登入" onClick={() => authClient.signOut().then(() => window.location.assign("/"))} className="flex shrink-0 items-center gap-1 rounded-xl px-2 py-2 text-xs font-bold muted hover:bg-black/5"><LogOut size={17} /><span>退出登入</span></button></div> : <Link href="/sign-in" className="brand-gradient flex items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-bold text-white"><LogIn size={17} />登入</Link>}
       </div>
@@ -90,6 +117,29 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     </nav>
     {toast && <div role="status" className="fixed bottom-24 left-1/2 z-50 -translate-x-1/2 rounded-2xl bg-ink px-5 py-3 text-sm font-semibold text-white shadow-2xl dark:bg-white dark:text-ink">{toast}</div>}
   </div>;
+}
+
+function SidebarNavigationGroup({ group, label, items, pathname, expanded, onToggle, creator = false }: {
+  group: SidebarGroup;
+  label: string;
+  items: NavItem[];
+  pathname: string;
+  expanded: boolean;
+  onToggle: () => void;
+  creator?: boolean;
+}) {
+  const navigationId = `${group}-navigation`;
+  return <section className="mt-4 border-t border-[var(--line)] pt-4">
+    <button type="button" aria-expanded={expanded} aria-controls={navigationId} onClick={onToggle} className="flex w-full items-center justify-between rounded-2xl px-4 py-3 text-sm font-bold muted hover:bg-black/5 dark:hover:bg-white/5">
+      <span>{label}</span>
+      <ChevronDown size={17} className={`transition-transform ${expanded ? "rotate-180" : ""}`} />
+    </button>
+    {expanded && <nav id={navigationId} aria-label={label} className="mt-1 space-y-1"><NavigationLinks items={items} pathname={pathname} creator={creator} /></nav>}
+  </section>;
+}
+
+function isNavigationPath(pathname: string, items: NavItem[]): boolean {
+  return items.some((item) => pathname === item.href || pathname.startsWith(`${item.href}/`));
 }
 
 function NavigationLinks({ items, pathname, creator = false }: { items: NavItem[]; pathname: string; creator?: boolean }) {
